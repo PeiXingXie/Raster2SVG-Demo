@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepagents-template"
+version = "0.1.0"
+description = "A Raster-to-SVG Planner + ReAct demo built on Deep Agents."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "deepagents>=0.5.3",
+  "langchain>=1.0.0",
+  "langgraph>=1.0.0",
+  "langchain-openai>=1.0.0",
+  "openai>=1.0.0",
+  "fastapi>=0.116.0",
+  "uvicorn>=0.35.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.10.0",
+  "python-dotenv>=1.1.0",
+  "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.12.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

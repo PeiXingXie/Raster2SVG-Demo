@@ -1,0 +1,10 @@
+name: agent-demo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip>=24
+  - uvicorn>=0.35
+  - pip:
+      - -e .[dev]
