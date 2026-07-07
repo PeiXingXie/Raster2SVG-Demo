@@ -1,140 +1,140 @@
-# 打包流程 README
+# Packaging README
 
-这个目录用于把当前项目构建成普通用户可以双击安装的桌面应用。目标用户不需要安装 Python、Node.js、conda，也不需要打开 terminal 手动启动后端服务。
+This directory contains the packaging flow for building a desktop app that ordinary users can install by double-clicking an installer. Target users do not need Python, Node.js, conda, or a terminal to start the backend service manually.
 
-当前项目的打包方式是：
-
-```text
-Electron 桌面壳
-+ PyInstaller onedir 打包后的 FastAPI 后端
-+ electron-builder 生成系统安装包
-```
-
-重要原则：
+The current packaging approach is:
 
 ```text
-Windows 安装器应在 Windows 上构建。
-macOS 安装包应在 macOS 上构建。
+Electron desktop shell
++ FastAPI backend bundled by PyInstaller onedir
++ electron-builder system installers
 ```
 
-原因是本项目包含 PyInstaller 打包的 Python 后端。PyInstaller 通常不是跨平台交叉编译工具，因此 Windows 后端需要在 Windows 上打包，macOS 后端需要在 macOS 上打包。
+Important platform rule:
 
-## 目录说明
+```text
+Build the Windows installer on Windows.
+Build the macOS package on macOS.
+```
+
+This matters because the project includes a PyInstaller-bundled Python backend. PyInstaller is generally not a cross-platform cross-compiler, so the Windows backend should be built on Windows and the macOS backend should be built on macOS.
+
+## Directory Contents
 
 ```text
 packaging/
-├── README.packaging.md
-├── prepare-package-venv.ps1
-├── build-backend.ps1
-├── build-desktop.ps1
-├── build-windows-installer.ps1
-├── build-release-windows.ps1
-├── set-version.ps1
-├── validate-version.ps1
-├── analyze-package-deps.ps1
-└── generate-icon.py
+- README.packaging.md
+- prepare-package-venv.ps1
+- build-backend.ps1
+- build-desktop.ps1
+- build-windows-installer.ps1
+- build-release-windows.ps1
+- set-version.ps1
+- validate-version.ps1
+- analyze-package-deps.ps1
+- generate-icon.py
 ```
 
-各文件作用：
+File roles:
 
-- `prepare-package-venv.ps1`：创建干净的 Windows 打包环境 `.venv_package`，只安装运行依赖和 PyInstaller。
-- `build-backend.ps1`：在 Windows 上把 Python/FastAPI 后端打包到 `dist/backend/raster-svg-api/`。
-- `build-desktop.ps1`：调用 `electron-builder` 生成 Windows 安装器。
-- `build-windows-installer.ps1`：Windows 完整构建入口，依次执行版本校验、后端打包、桌面安装器打包。
-- `build-release-windows.ps1`：Windows 发布构建入口，先统一版本号，再生成版本化安装器。
-- `set-version.ps1`：同步更新 `pyproject.toml`、`desktop/package.json`、`desktop/package-lock.json` 里的版本号。
-- `validate-version.ps1`：校验版本号一致，并确保 `appId`、`productName` 没有被误改。
-- `analyze-package-deps.ps1`：分析 `.venv_package` 里哪些依赖占空间最大。
-- `generate-icon.py`：生成应用图标资源。
+- `prepare-package-venv.ps1`: creates the clean Windows packaging environment `.venv_package` with runtime dependencies and PyInstaller only.
+- `build-backend.ps1`: builds the Python/FastAPI backend into `dist/backend/raster-svg-api/` on Windows.
+- `build-desktop.ps1`: runs `electron-builder` to create the Windows installer.
+- `build-windows-installer.ps1`: full Windows build entrypoint; validates version metadata, builds the backend, then builds the desktop installer.
+- `build-release-windows.ps1`: Windows release build entrypoint; synchronizes version metadata first, then creates a versioned installer.
+- `set-version.ps1`: updates versions in `pyproject.toml`, `desktop/package.json`, and `desktop/package-lock.json`.
+- `validate-version.ps1`: checks version consistency and ensures `appId` and `productName` were not accidentally changed.
+- `analyze-package-deps.ps1`: reports the largest packages in `.venv_package`.
+- `generate-icon.py`: generates app icon assets.
 
-目前 Windows 已经有完整 `.ps1` 脚本；macOS 暂时使用手动命令完成最小闭环，后续建议补充 `build-release-macos.sh`。
+Windows has complete `.ps1` scripts today. macOS currently uses manual commands for the minimum packaging loop; a future improvement should add `build-release-macos.sh`.
 
-## 启动原理
+## Installed App Startup Model
 
-安装后的应用启动流程是：
+After installation, app startup works like this:
 
 ```text
-用户打开 Raster to SVG
--> Electron 自动寻找空闲端口
--> Electron 启动内置后端 raster-svg-api
--> Electron 等待 /health 成功
--> Electron 打开 /static/desktop.html
+user opens Raster to SVG
+-> Electron finds a free local port
+-> Electron starts the bundled backend raster-svg-api
+-> Electron waits for /health
+-> Electron opens /static/desktop.html
 ```
 
-Windows 后端文件名是：
+Windows backend filename:
 
 ```text
 raster-svg-api.exe
 ```
 
-macOS/Linux 后端文件名是：
+macOS/Linux backend filename:
 
 ```text
 raster-svg-api
 ```
 
-`desktop/main.js` 已经按 `process.platform` 选择对应后端文件名。
+`desktop/main.js` chooses the backend filename based on `process.platform`.
 
-## 在 Windows 上打包
+## Build On Windows
 
-Windows 平台使用 PowerShell 脚本。
+Windows packaging uses PowerShell scripts.
 
-### 第一次打包
+### First Build
 
-在项目根目录运行：
+Run from the project root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1
 ```
 
-这条命令会自动：
+This command automatically:
 
-1. 准备 `.venv_package`
-2. 构建后端
-3. 安装或检查 Electron 打包依赖
-4. 生成 Windows 安装器
+1. prepares `.venv_package`
+2. builds the backend
+3. installs or checks Electron packaging dependencies
+4. creates the Windows installer
 
-如果希望重新创建干净的 `.venv_package`：
+To recreate the clean `.venv_package`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -RecreatePackageVenv
 ```
 
-如果 `desktop/node_modules` 已经安装过，可以跳过 `npm install`：
+To skip `npm install` when `desktop/node_modules` is already current:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-本机验证过的 Windows 优化构建命令：
+Verified optimized Windows build command in this workspace:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
 ```
 
-### 发布 Windows 新版本
+### Release A New Windows Version
 
-正式发新版时，优先使用 `build-release-windows.ps1`，不要手动分别修改多个版本号。
+For real releases, prefer `build-release-windows.ps1`. Do not manually edit version numbers in multiple files.
 
-例如从 `0.1.0` 发布到 `0.1.1`：
+For example, to release `0.1.1` from `0.1.0`:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
 ```
 
-如果 Python 后端依赖发生变化，重新创建干净打包环境：
+If Python backend dependencies changed, recreate the clean packaging environment:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
 ```
 
-发布脚本会做三件事：
+The release script does three things:
 
-1. 调用 `set-version.ps1` 统一版本号。
-2. 调用 `validate-version.ps1` 校验版本和应用身份。
-3. 构建 `dist/installers/Raster to SVG Setup <version>.exe`。
+1. calls `set-version.ps1` to synchronize version metadata
+2. calls `validate-version.ps1` to validate version and app identity
+3. builds `dist/installers/Raster to SVG Setup <version>.exe`
 
-Windows 产物：
+Windows outputs:
 
 ```text
 dist/backend/raster-svg-api/raster-svg-api.exe
@@ -142,17 +142,17 @@ dist/installers/Raster to SVG Setup 0.1.1.exe
 dist/installers/win-unpacked/
 ```
 
-当前验证过的 Windows 安装器大小约为：
+Current verified Windows installer size:
 
 ```text
-Raster to SVG Setup 0.1.0.exe: 156 MB
+Raster to SVG Setup 0.1.0.exe: about 156 MB
 ```
 
-## 在 macOS 上打包
+## Build On macOS
 
-macOS 平台需要在 Mac 电脑上执行。不要在 Windows 上直接构建 macOS 包。
+macOS packages must be built on a Mac. Do not build the macOS package directly on Windows.
 
-当前 `desktop/package.json` 已经包含 macOS DMG 目标：
+`desktop/package.json` already contains the macOS DMG target:
 
 ```json
 "mac": {
@@ -162,11 +162,11 @@ macOS 平台需要在 Mac 电脑上执行。不要在 Windows 上直接构建 ma
 }
 ```
 
-但 macOS 还没有专用 `.sh` 脚本，因此先使用下面的手动命令完成最小闭环。
+There is no dedicated macOS `.sh` packaging script yet, so use the manual commands below for the current minimum loop.
 
-### 1. 准备 Python 打包环境
+### 1. Prepare Python Packaging Environment
 
-在项目根目录运行：
+Run from the project root:
 
 ```bash
 python3 -m venv .venv_package
@@ -175,7 +175,7 @@ python3 -m venv .venv_package
 ./.venv_package/bin/python -m pip install pyinstaller
 ```
 
-如果要从干净环境重来：
+To recreate from a clean environment:
 
 ```bash
 rm -rf .venv_package
@@ -185,9 +185,9 @@ python3 -m venv .venv_package
 ./.venv_package/bin/python -m pip install pyinstaller
 ```
 
-### 2. 打包 macOS 后端
+### 2. Build The macOS Backend
 
-在项目根目录运行：
+Run from the project root:
 
 ```bash
 ./.venv_package/bin/python -m PyInstaller \
@@ -203,140 +203,140 @@ python3 -m venv .venv_package
   src/deepagents_template/desktop_server.py
 ```
 
-注意 `--add-data` 的分隔符不同：
+Note the `--add-data` separator difference:
 
 ```text
 Windows: src/deepagents_template/static;deepagents_template/static
 macOS:   src/deepagents_template/static:deepagents_template/static
 ```
 
-打包完成后，macOS 后端产物通常是：
+The macOS backend output is usually:
 
 ```text
 dist/backend/raster-svg-api/raster-svg-api
 ```
 
-确保后端文件有执行权限：
+Ensure the backend file is executable:
 
 ```bash
 chmod +x dist/backend/raster-svg-api/raster-svg-api
 ```
 
-### 3. 打包 macOS DMG
+### 3. Build The macOS DMG
 
-安装 Electron 打包依赖：
+Install Electron packaging dependencies:
 
 ```bash
 cd desktop
 npm install
 ```
 
-如果 `desktop/node_modules` 已经存在，并且没有改 Electron/Node 依赖，可以跳过 `npm install`。
+If `desktop/node_modules` already exists and Electron/Node dependencies have not changed, you can skip `npm install`.
 
-构建 DMG：
+Build the DMG:
 
 ```bash
 npm run dist -- --mac dmg
 ```
 
-macOS 产物通常在：
+macOS outputs are usually under:
 
 ```text
 dist/installers/Raster to SVG Setup 0.1.0.dmg
 dist/installers/mac/
 ```
 
-### 4. macOS 用户如何安装
+### 4. How macOS Users Install It
 
-把 `.dmg` 文件发给用户：
+Send the `.dmg` file to the user:
 
 ```text
 dist/installers/Raster to SVG Setup 0.1.0.dmg
 ```
 
-用户步骤：
+User steps:
 
-1. 双击打开 `.dmg`。
-2. 把 `Raster to SVG.app` 拖到 `Applications`。
-3. 从 `Applications` 打开应用。
+1. double-click the `.dmg`
+2. drag `Raster to SVG.app` into `Applications`
+3. open the app from `Applications`
 
-如果是未签名内部测试包，macOS 可能提示无法验证开发者。用户可以在系统设置的隐私与安全中允许打开，或右键应用选择打开。
+For unsigned internal test builds, macOS may warn that it cannot verify the developer. Users can allow opening from Privacy & Security settings, or right-click the app and choose Open.
 
-### 5. macOS 正式发布前需要补齐
+### 5. macOS Work Needed Before Public Release
 
-内部测试可以先使用未签名 DMG。正式分发给外部用户前，建议补齐：
+Unsigned DMGs are acceptable for internal testing. Before distributing to external users, add:
 
 - `desktop/assets/icon.icns`
-- Apple Developer ID 代码签名
-- notarization 公证
-- DMG 签名
-- Apple Silicon / Intel 架构策略：`arm64`、`x64` 或 `universal`
-- macOS 专用发布脚本，例如 `build-release-macos.sh`
+- Apple Developer ID code signing
+- notarization
+- DMG signing
+- Apple Silicon / Intel architecture strategy: `arm64`, `x64`, or `universal`
+- a dedicated macOS release script, such as `build-release-macos.sh`
 
-## 覆盖旧版安装的更新能力
+## Overwrite Update Behavior
 
-Windows 当前采用最小可靠方案：新版安装器覆盖旧版安装。
+Windows currently uses the simplest reliable update path: the new installer overwrites the old installation.
 
-开发者需要做：
+Developer steps:
 
-1. 增加版本号，例如 `0.1.0` -> `0.1.1`。
-2. 构建新版安装器：`Raster to SVG Setup 0.1.1.exe`。
-3. 把新版 `.exe` 发给用户。
+1. bump the version, for example `0.1.0` -> `0.1.1`
+2. build the new installer: `Raster to SVG Setup 0.1.1.exe`
+3. send the new `.exe` to the user
 
-用户需要做：
+User steps:
 
-1. 关闭正在运行的 Raster to SVG。
-2. 双击新版安装器。
-3. 一路按安装向导完成安装。
-4. 从开始菜单或桌面快捷方式重新打开应用。
+1. close Raster to SVG if it is running
+2. double-click the new installer
+3. finish the installer wizard
+4. reopen the app from the Start Menu or desktop shortcut
 
-覆盖安装时，程序安装目录会被新版替换；用户配置、API 设置、运行结果和日志默认保留。
+During overwrite install, the application directory is replaced by the new version. User configuration, API settings, run outputs, and logs are preserved by default.
 
-macOS 的更新方式目前是重新发新版 `.dmg`，用户把新版 `Raster to SVG.app` 拖入 `Applications` 覆盖旧版。正式产品化后可以再接入 electron-updater 或 Sparkle 类自动更新方案。
+macOS updates currently use a replacement `.dmg`: users drag the new `Raster to SVG.app` into `Applications` and overwrite the old app. A productionized update path can later use electron-updater or Sparkle-style auto updates.
 
-不要在普通版本升级时修改下面两个字段：
+Do not change these fields during ordinary version upgrades:
 
 - `desktop/package.json` -> `build.appId`
 - `desktop/package.json` -> `build.productName`
 
-这两个字段决定系统是否把新版识别为同一个应用。当前值应保持为：
+These fields determine whether the OS treats the new build as the same app. Current values should remain:
 
 ```text
 appId: com.local.rastertosvg
 productName: Raster to SVG
 ```
 
-`validate-version.ps1` 会在 Windows 构建前检查这些字段，防止误改导致新版变成另一个应用。
+`validate-version.ps1` checks these fields before Windows builds, preventing accidental identity changes.
 
-如果只想更新版本号但不打包：
+To set a version without building:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\set-version.ps1 -Version 0.1.1
 ```
 
-如果只想检查版本元数据：
+To validate version metadata only:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\validate-version.ps1
 ```
 
-## 用户数据保存在哪里
+## User Data Locations
 
-安装版不会把配置和运行结果写回项目目录。
+Installed apps do not write configuration and run outputs back into the project directory.
 
-Windows 上通常位于：
+Windows usually stores user data under:
 
 ```text
-C:\Users\<用户名>\AppData\Roaming\Raster to SVG\
+C:\Users\<user>\AppData\Roaming\Raster to SVG\
 ```
 
-macOS 上通常位于：
+macOS usually stores user data under:
 
 ```text
 ~/Library/Application Support/Raster to SVG/
 ```
 
-里面包含：
+Contents include:
 
 ```text
 .frontend_runtime_overrides.json
@@ -344,66 +344,68 @@ artifacts/runs/
 logs/backend.log
 ```
 
-如果应用打不开，优先查看对应用户数据目录里的：
+If the app fails to open, first check:
 
 ```text
 logs/backend.log
 ```
 
-## 卸载行为
+inside the matching user-data directory.
 
-Windows 卸载入口由 NSIS 自动提供：
+## Uninstall Behavior
 
-- Windows 设置 -> 应用 -> 已安装的应用
-- 开始菜单里的 `Raster to SVG` 卸载快捷方式
+Windows uninstall is provided automatically by NSIS:
 
-交互式卸载时，卸载器会询问是否同时清理用户数据。选择清理时，会删除 AppData 下的保存设置、生成结果和日志。选择保留时，只移除程序文件，用户数据继续保留。
+- Windows Settings -> Apps -> Installed apps
+- the Start Menu uninstall shortcut created for `Raster to SVG`
 
-macOS 卸载通常是删除：
+During interactive uninstall, the uninstaller asks whether to remove user data. If users choose to remove it, saved settings, generated results, and logs are deleted from AppData. If users choose to keep it, only program files are removed.
+
+macOS uninstall usually means deleting:
 
 ```text
 /Applications/Raster to SVG.app
 ```
 
-如果需要清理用户数据，再手动删除：
+To remove user data too, delete:
 
 ```text
 ~/Library/Application Support/Raster to SVG/
 ```
 
-## 为什么安装包会偏大
+## Why The Installer Is Large
 
-安装包包含三部分：
+The installer contains three main parts:
 
 ```text
-Electron/Chromium 运行时
-+ Python 解释器和后端依赖
-+ 项目前端静态资源
+Electron/Chromium runtime
++ Python interpreter and backend dependencies
++ project frontend static assets
 ```
 
-Electron 本身会带 Chromium 和 Node.js，因此空应用也会比较大。
+Electron includes Chromium and Node.js, so even an empty Electron app is relatively large.
 
-当前后端使用 PyInstaller `onedir` 模式，输出一个后端目录，而不是单个自解压 exe。这个模式通常更适合桌面应用：
+The backend currently uses PyInstaller `onedir`, which outputs a backend directory instead of a single self-extracting executable. This is usually better for desktop apps:
 
-- 启动更快
-- 更容易排查缺失依赖
-- 安装器压缩后体积可接受
+- faster startup
+- easier missing-dependency debugging
+- acceptable installer size after compression
 
-## 依赖体积分析
+## Dependency Size Analysis
 
-Windows 上运行：
+On Windows, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\analyze-package-deps.ps1
 ```
 
-报告输出到：
+The report is written to:
 
 ```text
 dist/dependency-size-report.md
 ```
 
-当前 `.venv_package` 已经不默认安装 LangChain 相关依赖。主安装版走直接 OpenAI SDK 的多模态处理链路，因此这些包已移到可选依赖：
+`.venv_package` no longer installs LangChain-related dependencies by default. The installed app uses the direct OpenAI SDK based multimodal pipeline, so these packages are optional:
 
 ```text
 deepagents
@@ -414,115 +416,115 @@ anthropic
 google-genai
 ```
 
-如果以后确实要恢复 legacy agent / LangChain 协调模块，再手动安装：
+Install them only if you revive the legacy agent / LangChain coordinator modules:
 
 ```powershell
 .\.venv_package\Scripts\python.exe -m pip install -e ".[agent]"
 ```
 
-macOS 对应命令是：
+macOS equivalent:
 
 ```bash
 ./.venv_package/bin/python -m pip install -e ".[agent]"
 ```
 
-## 图标
+## Icon
 
-应用图标由 shapes 方案生成，表达“raster 像素块逐步过渡到 shapes/vector path 节点”的概念。
+The app icon is generated from a shapes concept: raster pixel blocks gradually transition into shapes/vector path nodes.
 
-Windows 当前使用：
+Current Windows assets:
 
 ```text
 desktop/assets/icon.ico
 desktop/assets/icon.png
 ```
 
-macOS 正式发布建议补充：
+For macOS public release, add:
 
 ```text
 desktop/assets/icon.icns
 ```
 
-重新生成当前图标：
+Regenerate current icon assets:
 
 ```powershell
 .\.venv_package\Scripts\python.exe .\packaging\generate-icon.py
 ```
 
-macOS 对应命令：
+macOS equivalent:
 
 ```bash
 ./.venv_package/bin/python ./packaging/generate-icon.py
 ```
 
-## 常见问题
+## Common Issues
 
-### 1. npm 被 PowerShell 拦截
+### 1. PowerShell blocks npm
 
-如果在 Windows 上直接运行 `npm` 报执行策略错误，脚本里已经使用 `npm.cmd` 避免这个问题。
+If running `npm` directly on Windows reports an execution policy error, the scripts already use `npm.cmd` to avoid it.
 
-### 2. electron-builder 下载失败
+### 2. electron-builder download fails
 
-首次构建时，electron-builder 需要下载 Electron 和 NSIS/DMG 相关组件。网络不稳定时可以重跑命令。
+On first build, electron-builder downloads Electron and NSIS/DMG-related components. If the network is unstable, rerun the command.
 
-### 3. PyInstaller 扫描用户 Python 目录报权限错误
+### 3. PyInstaller reports a permission error while scanning user Python directories
 
-优先使用干净的 `.venv_package` 构建，不要用全局 Python 环境。
+Prefer building with the clean `.venv_package`; do not use a global Python environment.
 
-如果在受限环境中看到类似下面的错误：
+If you see an error like:
 
 ```text
 PermissionError: [WinError 5] ... AppData\Roaming\Python\Python312\site-packages
 ```
 
-说明 PyInstaller 的依赖扫描碰到了系统权限边界。可以在本机正常 PowerShell 里重新运行发布命令，或允许提升权限后重跑构建。
+PyInstaller dependency scanning hit a system permission boundary. Rerun the release command in a normal local PowerShell session, or allow elevated execution and rebuild.
 
-### 4. macOS 打出来的 app 无法启动后端
+### 4. macOS app cannot start the backend
 
-优先检查：
+First check:
 
 ```text
 dist/backend/raster-svg-api/raster-svg-api
 ```
 
-并确认它有执行权限：
+Confirm it is executable:
 
 ```bash
 chmod +x dist/backend/raster-svg-api/raster-svg-api
 ```
 
-还要确认 `dist/installers/mac/Raster to SVG.app/Contents/Resources/backend/` 下确实包含后端目录。
+Also confirm that `dist/installers/mac/Raster to SVG.app/Contents/Resources/backend/` contains the backend directory.
 
-### 5. 安装包没有代码签名
+### 5. Installer is not code signed
 
-当前 MVP 适合内部测试。正式发布前建议补齐：
+The current MVP is suitable for internal testing. Before public release, add:
 
-- Windows 代码签名证书
-- macOS 签名与 notarization
-- 自动更新源
-- 发布说明和校验哈希
+- Windows code signing certificate
+- macOS signing and notarization
+- update source
+- release notes and checksum verification
 
-## 推荐日常命令
+## Recommended Daily Commands
 
-Windows 日常本地重打当前版本：
+Windows: rebuild current version locally:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-Windows 发布新版本：
+Windows: release a new version:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
 ```
 
-Windows 依赖变化后发布新版本：
+Windows: release a new version after dependency changes:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
 ```
 
-macOS 最小打包闭环：
+macOS minimum packaging loop:
 
 ```bash
 python3 -m venv .venv_package
@@ -536,7 +538,7 @@ npm install
 npm run dist -- --mac dmg
 ```
 
-更多背景说明见项目根目录：
+More background:
 
 ```text
 docs.installer.md

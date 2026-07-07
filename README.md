@@ -1,105 +1,107 @@
 # Raster to SVG
 
-Raster to SVG 是一个把普通位图图片转换为可编辑 SVG 的桌面/网页应用原型。本 README 是项目主入口：先用几分钟了解项目，再按你的角色跳到对应文档。
+Raster to SVG is a desktop/web application prototype for converting raster images into editable SVG. This README is the main project entrypoint: use it to understand what the project does, then follow the link that matches your role.
 
-当前项目已经具备 Windows 安装器闭环：产品用户可以通过安装包安装应用，新版安装器可以覆盖旧版安装，并默认保留用户数据。
+The current project has a working Windows installer loop: product users can install the app from an installer, newer installers can overwrite older installations, and user data is preserved by default.
 
-## 快速跳转
+## Quick Navigation
 
-| 你的角色 | 应该阅读 | 你会做什么 |
+| Your Role | Read This | What You Will Do |
 | --- | --- | --- |
-| 产品用户 | 本文的“产品用户如何使用” | 安装应用、填写 API 配置、上传图片、更新或卸载 |
-| 开发者 | [README.developer.md](./README.developer.md) 和 [docs.development.md](./docs.development.md) | 从源码启动 Web/桌面开发版，调试后端和前端 |
-| 发布维护者 | [packaging/README.packaging.md](./packaging/README.packaging.md) 和 [docs.installer.md](./docs.installer.md) | 构建版本化安装器，发布新版覆盖旧版 |
-| 桌面壳调试 | [desktop/README.desktop.md](./desktop/README.desktop.md) | 调试 Electron 启动、URL 解析和桌面端问题 |
-| 迁移部署 | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | 打包源码、迁移到另一台机器、启动服务 |
+| Product user | "How Product Users Use It" below | Install the app, configure API settings, upload images, update, or uninstall |
+| Developer | [README.developer.md](./README.developer.md) and [docs.development.md](./docs.development.md) | Run the web/desktop development app from source and debug backend/frontend behavior |
+| Release maintainer | [packaging/README.packaging.md](./packaging/README.packaging.md) and [docs.installer.md](./docs.installer.md) | Build versioned installers and release updates that overwrite older installs |
+| Desktop shell debugging | [desktop/README.desktop.md](./desktop/README.desktop.md) | Debug Electron startup, URL resolution, and desktop-specific issues |
+| Migration/deployment | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | Package the source tree, move it to another machine, and start the service |
 
-## 项目简介
+## Project Overview
 
-这个项目的目标是把 raster 图片转换为更容易编辑、复用和检查的 SVG 结构。
+The project converts raster images into SVG structures that are easier to edit, reuse, and inspect.
 
-典型流程是：
+Typical flow:
 
 ```text
-上传 raster 图片
--> 模型识别图像中的对象、区域和几何关系
--> 后端生成结构化转换结果
--> 前端展示预览、过程信息和 SVG 产物
--> 用户导出或继续编辑 SVG
+upload a raster image
+-> model recognizes objects, regions, and geometric relationships
+-> backend creates structured conversion results
+-> frontend shows preview, process information, and SVG artifacts
+-> user exports or continues editing the SVG
 ```
 
-当前应用形态包括：
+Current application pieces:
 
-- FastAPI 后端
-- Web 前端
-- Electron 桌面壳
-- Windows NSIS 安装器
+- FastAPI backend
+- Web frontend
+- Electron desktop shell
+- Windows NSIS installer
 
-## 产品用户如何使用
+## How Product Users Use It
 
-产品用户不需要安装 Python、Node.js 或开发环境。
+Product users do not need Python, Node.js, or a developer environment.
 
-### 第一次安装
+### First Install
 
-拿到安装器后，双击运行：
+After receiving the installer, double-click:
 
 ```text
 Raster to SVG Setup 0.1.0.exe
 ```
 
-安装时可以选择安装目录，也可以直接使用默认目录。
+You can choose an install directory during setup, or keep the default directory.
 
-安装完成后，从开始菜单或桌面快捷方式打开：
+After installation, open:
 
 ```text
 Raster to SVG
 ```
 
-### 基本使用流程
+from the Start Menu or desktop shortcut.
 
-1. 打开 Raster to SVG。
-2. 在应用界面里填写 API Key / Base URL。
-3. 上传需要转换的图片。
-4. 启动转换。
-5. 查看生成结果、运行日志和 SVG 产物。
+### Basic Usage
 
-安装版会自动启动内置后端，用户不需要打开 terminal，也不需要手动运行服务。
+1. Open Raster to SVG.
+2. Fill in API Key / Base URL in the app UI.
+3. Upload the image you want to convert.
+4. Start conversion.
+5. Review the generated result, logs, and SVG artifacts.
 
-### 更新到新版
+The installed app starts its bundled backend automatically. Users do not need to open a terminal or manually run a service.
 
-如果已经安装过旧版，收到新版安装器后：
+### Update To A New Version
 
-1. 关闭正在运行的 Raster to SVG。
-2. 双击新版安装器，例如：
+If an older version is already installed and you receive a newer installer:
+
+1. Close Raster to SVG if it is running.
+2. Double-click the new installer, for example:
 
 ```text
 Raster to SVG Setup 0.1.1.exe
 ```
 
-3. 按安装向导完成安装。
-4. 重新打开应用。
+3. Finish the installer wizard.
+4. Reopen the app.
 
-新版安装器会覆盖旧程序文件。用户配置、API 设置、生成结果和日志默认保留。
+The new installer replaces old program files. User configuration, API settings, generated results, and logs are preserved by default.
 
-### 卸载
+### Uninstall
 
-可以从 Windows 设置或开始菜单卸载：
-
-```text
-Windows 设置 -> 应用 -> 已安装的应用 -> Raster to SVG
-```
-
-交互式卸载时，卸载器会询问是否同时清理用户数据。选择保留时，只删除程序文件；选择清理时，会删除保存设置、生成结果和日志。
-
-### 用户数据位置
-
-Windows 上用户数据通常位于：
+Uninstall from Windows Settings or the Start Menu:
 
 ```text
-C:\Users\<用户名>\AppData\Roaming\Raster to SVG\
+Windows Settings -> Apps -> Installed apps -> Raster to SVG
 ```
 
-常见内容包括：
+During interactive uninstall, the uninstaller asks whether to remove user data. Keeping user data removes only program files. Removing user data also deletes saved settings, generated results, and logs.
+
+### User Data Location
+
+On Windows, user data is usually stored under:
+
+```text
+C:\Users\<user>\AppData\Roaming\Raster to SVG\
+```
+
+Common contents:
 
 ```text
 .frontend_runtime_overrides.json
@@ -107,20 +109,20 @@ artifacts/runs/
 logs/backend.log
 ```
 
-如果应用打不开，可以优先查看：
+If the app fails to open, check:
 
 ```text
-C:\Users\<用户名>\AppData\Roaming\Raster to SVG\logs\backend.log
+C:\Users\<user>\AppData\Roaming\Raster to SVG\logs\backend.log
 ```
 
-## 开发者如何使用
+## How Developers Use It
 
-开发者可以从源码启动 Web 版或桌面开发版。详细说明见：
+Developers can run the web app or desktop development app from source. See:
 
 - [README.developer.md](./README.developer.md)
 - [docs.development.md](./docs.development.md)
 
-快速启动 Web 开发版：
+Quickly start the web development app:
 
 Windows:
 
@@ -135,13 +137,13 @@ chmod +x start-dev.sh
 ./start-dev.sh
 ```
 
-启动后通常访问：
+The frontend is usually available at:
 
 ```text
 http://127.0.0.1:8120/
 ```
 
-快速启动桌面开发版：
+Quickly start the desktop development app:
 
 Windows:
 
@@ -155,9 +157,9 @@ macOS/Linux:
 ./start-dev.sh --desktop
 ```
 
-开发环境的 API 配置位于项目根目录 `.env`。如果 `.env` 不存在，启动脚本会基于 `.env.example` 创建。
+Development API settings live in the project-root `.env`. If `.env` does not exist, the startup scripts create it from `.env.example`.
 
-至少需要检查：
+At minimum, review:
 
 ```env
 API_KEY=your-real-api-key
@@ -166,85 +168,85 @@ API_PROVIDER=openai_compatible
 API_FORMAT=openai_chat_completions
 ```
 
-没有真实 API 配置时，前端页面仍可打开，但实际模型转换会失败。
+Without real API settings, the frontend can still open, but actual model-backed conversion will fail.
 
-## 构建安装包
+## Build Installers
 
-Windows 安装包由 `packaging/` 目录下的脚本生成。详细说明见：
+Windows installers are generated by scripts under `packaging/`. See:
 
 - [packaging/README.packaging.md](./packaging/README.packaging.md)
 - [docs.installer.md](./docs.installer.md)
 
-构建当前版本安装器：
+Build an installer for the current version:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-构建可发布的新版本安装器，例如发布 `0.1.1`：
+Build a release installer, for example version `0.1.1`:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
 ```
 
-如果 Python 后端依赖发生变化：
+If Python backend dependencies changed:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
 ```
 
-输出位置：
+Output:
 
 ```text
 dist/installers/Raster to SVG Setup <version>.exe
 ```
 
-## 当前平台状态
+## Platform Status
 
-Windows：
+Windows:
 
-- 已完成安装器最小闭环
-- 支持自定义安装目录
-- 支持卸载
-- 卸载时可选择是否清理用户数据
-- 支持新版安装器覆盖旧版安装
+- Minimal installer loop is complete
+- Custom install directory is supported
+- Uninstall is supported
+- Uninstall can optionally remove user data
+- New installers can overwrite older installations
 
-macOS/Linux：
+macOS/Linux:
 
-- 开发启动脚本已提供
-- Electron 配置里已有 `dmg`、`AppImage`、`deb` 目标
-- 正式安装包仍需要在对应系统上构建、签名、测试和发布
+- Development startup scripts exist
+- Electron config already includes `dmg`, `AppImage`, and `deb` targets
+- Production installers still need to be built, signed, tested, and released on their target OS
 
-## 文档入口
+## Documentation Index
 
-除主 README 外，项目自有 README 都带有语义后缀：
+All project-owned README files except this main README use semantic suffixes:
 
-- [README.developer.md](./README.developer.md)：开发者入口文档
-- [packaging/README.packaging.md](./packaging/README.packaging.md)：打包、版本发布、覆盖安装、依赖体积说明
-- [desktop/README.desktop.md](./desktop/README.desktop.md)：Electron 桌面壳说明
-- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)：迁移、部署和目标机器 bootstrap
+- [README.developer.md](./README.developer.md): developer entrypoint
+- [packaging/README.packaging.md](./packaging/README.packaging.md): packaging, release builds, overwrite updates, and dependency-size notes
+- [desktop/README.desktop.md](./desktop/README.desktop.md): Electron desktop shell notes
+- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): migration, deployment, and target-machine bootstrap
 
-其他详细文档：
+Other detailed documents:
 
-- [docs.development.md](./docs.development.md)：详细开发环境、启动方式和故障排查
-- [docs.installer.md](./docs.installer.md)：安装器实现和已安装模式说明
+- [docs.development.md](./docs.development.md): detailed development environment, startup modes, and troubleshooting
+- [docs.installer.md](./docs.installer.md): installer implementation and installed-mode behavior
 
-## 推荐阅读路径
+## Recommended Reading Paths
 
-产品用户：
+Product users:
 
-1. 阅读本 README 的“产品用户如何使用”。
-2. 安装 `Raster to SVG Setup <version>.exe`。
-3. 打开应用并填写 API 配置。
+1. Read "How Product Users Use It" in this README.
+2. Install `Raster to SVG Setup <version>.exe`.
+3. Open the app and fill API settings.
 
-开发者：
+Developers:
 
-1. 阅读 [README.developer.md](./README.developer.md)。
-2. 再阅读 [docs.development.md](./docs.development.md)。
-3. 用 `start-dev` 脚本启动开发环境。
+1. Read [README.developer.md](./README.developer.md).
+2. Then read [docs.development.md](./docs.development.md).
+3. Start the development environment with the `start-dev` scripts.
 
-发布维护者：
+Release maintainers:
 
-1. 阅读 [packaging/README.packaging.md](./packaging/README.packaging.md)。
-2. 使用 `build-release-windows.ps1` 构建版本化安装器。
-3. 发布新版安装器给用户覆盖安装。
+1. Read [packaging/README.packaging.md](./packaging/README.packaging.md).
+2. Build a versioned installer with `build-release-windows.ps1`.
+3. Release the new installer so users can overwrite-update their existing install.
