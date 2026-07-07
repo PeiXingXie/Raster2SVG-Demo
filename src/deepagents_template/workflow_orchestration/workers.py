@@ -13,6 +13,9 @@ from deepagents_template.checklist import (
 from deepagents_template.geometry import build_region_context, build_region_recognition_context
 from deepagents_template.modeling.executor import summarize_exception
 from deepagents_template.prompt import (
+    build_object_bbox_candidate_generation_prompts,
+    build_object_bbox_candidate_selection_prompts,
+    build_object_initial_bbox_prompts,
     build_checklist_plan_prompts,
     build_fusion_combined_policy_prompts,
     build_integrated_svg_repair_prompts,
@@ -35,6 +38,9 @@ from deepagents_template.schemas import (
     FusionCombinedPolicyModelResult,
     IntegratedSvgRepairResult,
     LayoutDetectionResult,
+    ObjectBboxCandidateGenerationResult,
+    ObjectBboxCandidateSelectionResult,
+    ObjectInitialBboxResult,
     ObjectCandidate,
     ObjectCombinedPolicyModelResult,
     ObjectSvgGenerationResult,
@@ -80,7 +86,7 @@ class BboxAdjustmentWorkerAgent(BaseWorkflowAgent):
         height: int,
         regions: list[dict],
         memory_summary: dict | None,
-        retry_state: dict,
+        retry_state: dict | None = None,
     ) -> tuple[BboxAdjustmentResult, str]:
         system_prompt, user_prompt = build_layout_bbox_adjustment_prompts(
             width=width,
@@ -105,7 +111,9 @@ class BboxAdjustmentWorkerAgent(BaseWorkflowAgent):
         recognized_objects: list[dict],
         validation_feedback: list[dict] | None,
         memory_summary: dict | None,
-        retry_state: dict,
+        retry_state: dict | None = None,
+        exempted_issue_ids: list[str] | None = None,
+        recently_resolved_issue_ids: list[str] | None = None,
     ) -> tuple[BboxAdjustmentResult, str]:
         system_prompt, user_prompt = build_recognition_bbox_adjustment_prompts(
             region=region,
@@ -113,12 +121,83 @@ class BboxAdjustmentWorkerAgent(BaseWorkflowAgent):
             validation_feedback=validation_feedback,
             memory_summary=memory_summary,
             retry_state=retry_state,
+            exempted_issue_ids=exempted_issue_ids,
+            recently_resolved_issue_ids=recently_resolved_issue_ids,
         )
         return self.pipeline.region_caller.call_json(
             BboxAdjustmentResult,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_paths=[crop_path, overlay_path],
+        )
+
+    def run_initial_object_bboxes(
+        self,
+        *,
+        crop_path: Path,
+        grid_path: Path,
+        region: dict,
+        recognized_objects: list[dict],
+        checklist_criteria: list[dict] | None = None,
+    ) -> tuple[ObjectInitialBboxResult, str]:
+        system_prompt, user_prompt = build_object_initial_bbox_prompts(
+            region=region,
+            recognized_objects=recognized_objects,
+            checklist_criteria=checklist_criteria or [],
+        )
+        return self.pipeline.region_caller.call_json(
+            ObjectInitialBboxResult,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[crop_path, grid_path],
+        )
+
+    def run_object_bbox_candidates(
+        self,
+        *,
+        crop_path: Path,
+        grid_path: Path,
+        overlay_path: Path,
+        region: dict,
+        recognized_objects: list[dict],
+        current_issues: list[dict],
+    ) -> tuple[ObjectBboxCandidateGenerationResult, str]:
+        system_prompt, user_prompt = build_object_bbox_candidate_generation_prompts(
+            region=region,
+            recognized_objects=recognized_objects,
+            current_issues=current_issues,
+        )
+        return self.pipeline.region_caller.call_json(
+            ObjectBboxCandidateGenerationResult,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[crop_path, grid_path, overlay_path],
+        )
+
+    def run_object_bbox_candidate_selection(
+        self,
+        *,
+        crop_path: Path,
+        current_overlay_path: Path,
+        candidate_overlay_path: Path,
+        region: dict,
+        target_object: dict,
+        issue: dict,
+        candidates: list[dict],
+        current_objects: list[dict],
+    ) -> tuple[ObjectBboxCandidateSelectionResult, str]:
+        system_prompt, user_prompt = build_object_bbox_candidate_selection_prompts(
+            region=region,
+            target_object=target_object,
+            issue=issue,
+            candidates=candidates,
+            current_objects=current_objects,
+        )
+        return self.pipeline.region_caller.call_json(
+            ObjectBboxCandidateSelectionResult,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[crop_path, current_overlay_path, candidate_overlay_path],
         )
 
 
@@ -137,8 +216,8 @@ class BboxCombinedPolicyModelWorker(BaseWorkflowAgent):
         candidate_regions: list[dict],
         proposal_result: dict,
         memory_summary: dict | None,
-        retry_state: dict,
         candidate_changed: bool,
+        retry_state: dict | None = None,
     ) -> tuple[BboxCombinedPolicyModelResult, str]:
         system_prompt, user_prompt = build_layout_bbox_combined_policy_prompts(
             width=width,
@@ -147,8 +226,8 @@ class BboxCombinedPolicyModelWorker(BaseWorkflowAgent):
             candidate_regions=candidate_regions,
             proposal_result=proposal_result,
             memory_summary=memory_summary,
-            retry_state=retry_state,
             candidate_changed=candidate_changed,
+            retry_state=retry_state,
         )
         return self.pipeline.final_caller.call_json(
             BboxCombinedPolicyModelResult,
@@ -169,8 +248,8 @@ class BboxCombinedPolicyModelWorker(BaseWorkflowAgent):
         proposal_result: dict,
         validation_feedback: list[dict] | None,
         memory_summary: dict | None,
-        retry_state: dict,
         candidate_changed: bool,
+        retry_state: dict | None = None,
     ) -> tuple[BboxCombinedPolicyModelResult, str]:
         system_prompt, user_prompt = build_recognition_bbox_combined_policy_prompts(
             region=region,
@@ -179,8 +258,8 @@ class BboxCombinedPolicyModelWorker(BaseWorkflowAgent):
             proposal_result=proposal_result,
             validation_feedback=validation_feedback,
             memory_summary=memory_summary,
-            retry_state=retry_state,
             candidate_changed=candidate_changed,
+            retry_state=retry_state,
         )
         return self.pipeline.region_caller.call_json(
             BboxCombinedPolicyModelResult,

@@ -38,26 +38,31 @@ def build_region_recognition_prompts(
         - Output valid JSON without markdown fences.
         - The image input is only the crop for this region, not the full source image.
         - description states what the object is and its visible role.
+        - included_elements lists concrete visible parts semantically owned by the object.
         - generation_focus states what later SVG generation must preserve for that object.
         - recognized_objects must be a list of object records.
         - Use the applicable checklist criteria as high-level guidance only.
         - Recognize only element types that visibly exist in this cropped region.
         - object_type must be one of: background, icon, text, container, connector, diagram, fig.
-        - Include bbox when you can estimate the object bounds in crop-local coordinates.
+        - Do not include object bbox coordinates in this recognition step; bbox localization is handled by a later dedicated worker.
         - recognized_objects must cover all visible content in the region except the region wrapper itself.
         - Every visible primitive should belong to exactly one object, either standalone or via a same-class collection object.
+        - Assign semantic ownership before listing objects: output only root-level independently editable semantic units.
+        - Attached labels, markers, internal strokes, annotations, and decorative parts belong in the subject object's included_elements when they do not function independently.
+        - Do not create a separate object for an element already listed in another object's included_elements.
+        - Object bboxes are not part of recognition; do not reason about overlap or spatial intersection when deciding ownership.
         - Use a compact, high-signal writing style and avoid low-value adjectives.
         - observation should stay short and focused, ideally within 1-2 short sentences.
         - Each object description should stay compact and high-signal rather than exhaustive.
+        - included_elements must contain at most 6 short concrete visible parts.
         - generation_focus must contain at most 3 short items.
-        - When you provide bbox, it must fully enclose all visible pixels of that object, including strokes, endpoints, and text descenders.
-        - Use a slightly generous bbox by default: keep a visible safety margin between the content and every bbox edge rather than tracing the content too tightly.
-        - Never let a bbox edge cut through visible content; if uncertain, expand the box outward instead of risking a tight crop.
-        - Treat bbox overlap with the object's own visible content as a hard error, not a cosmetic issue.
-        - Prefer a stable roomy box that cleanly contains the full object over a tight minimal box that hugs the silhouette.
+        - relative_position should describe where the object sits in the crop using semantic landmarks.
+        - extent_hint should describe what a later bbox must include or avoid, without numeric coordinates.
+        - For extent_hint, name important extremities such as text descenders, icon strokes, connector endpoints, or panel borders.
 
         2. Object granularity
         - Keep object granularity semantically meaningful: each object should be a relatively complete unit.
+        - Prefer one object for a subject plus its attached sub-elements when those parts are edited together in practice.
         - Do not split one tightly coupled semantic unit into many tiny objects.
         - Strongly related and spatially adjacent elements may be grouped into one object when they form one semantic unit. (For example, stacked CNN layers may be treated as one object)
         - Annotation text, icon labels, captions, or other local labels that primarily describe one nearby object should usually be grouped with that object rather than recognized as a separate text object.
@@ -98,7 +103,7 @@ def build_region_recognition_prompts(
         - fig: natural image, barcode, or QR code; use color-block placeholders, not forced detail.
         {json_output_contract(
             required_fields=("region_id", "observation", "recognized_objects"),
-            array_fields=("recognized_objects", "generation_focus"),
+            array_fields=("recognized_objects", "recognized_objects[].included_elements", "generation_focus"),
             closed_value_fields={
                 "recognized_objects[].object_type": ("background", "icon", "text", "container", "connector", "diagram", "fig"),
             },
@@ -125,8 +130,10 @@ def build_region_recognition_prompts(
               "object_id": "meaningful_object_name",
               "object_type": "text",
               "description": "readable text content and visual role, or visible object content and traits",
+              "included_elements": ["main visible part", "attached local label or marker"],
               "generation_focus": ["preserve wording", "preserve bold emphasis"],
-              "bbox": {{"x": 0, "y": 0, "width": 100, "height": 40}}
+              "relative_position": "centered below the icon row",
+              "extent_hint": "single-line heading only; do not include subtitle text"
             }}
           ]
         }}
@@ -157,6 +164,7 @@ def build_region_svg_generation_prompts(
         - svg_elements must contain only inner SVG elements for the region group, not an outer <svg>.
         - The image input is only the crop for this region, not the full source image.
         - The recognition result is an object index and preservation brief, not a fresh instruction to re-plan the region.
+        - Each recognized object's included_elements are owned by that object and should render inside that object's group.
         - If current SVG source text is provided inline, treat it as the editable base to update rather than something to re-describe.
         - Failed items define the current repair target; do not invent unrelated new issues.
         - Convert crop-local positions to global SVG coordinates by adding bbox.x and bbox.y.
@@ -170,6 +178,7 @@ def build_region_svg_generation_prompts(
         - Organize SVG as a human-friendly region-object hierarchy.
         - Return exactly one top-level region wrapper group for the region.
         - Every visible child under the region wrapper must belong to a top-level object group with data-object-id and data-object-type.
+        - Do not create sibling object groups for sub-elements owned through another object's included_elements.
         - Do not place visible shapes, text, or images directly under the region wrapper outside an object group.
         - Non-visual metadata such as comments or defs are allowed, but visible rendering content must be object-scoped.
         - Same-class grouped sets are allowed for fragmented content such as background pieces, connector networks, decorative clusters, and main/subtitle text systems.
@@ -259,10 +268,15 @@ def build_region_review_prompts(
         - Evaluate every recognized object for quality and completeness.
 
         2. Issue routing
-        - Put whole-region problems in global_repairs as {criterion, reason}.
-        - Put localized single-object problems in object_issues as {object_id, criterion, reason}.
+        - Put whole-region problems in global_repairs as {criterion, reason, severity}.
+        - Put localized single-object problems in object_issues as {object_id, criterion, reason, severity}.
         - criterion should state the generic acceptance rule being violated, preferably in reusable object-type terms, not in image-specific subject terms.
         - Put the concrete object identity, side, or local context in reason and object_id, not in criterion.
+        - severity must be exactly one of "low", "medium", or "high".
+        - Judge severity by visual/material impact, not by wording style.
+        - low: cosmetic differences only; identity, structure, readability, containment, and editability remain intact.
+        - medium: visible mismatch weakens fidelity but preserves identity, core structure, and readability.
+        - high: missing/wrong/generic object, broken structure, unreadable text, clipped/out-of-bounds content, wrong identity, or layout hierarchy failure.
         - If a checklist violation is caused by a specific object, put it only in object_issues.
         - Keep global_repairs and object_issues clearly separated with no duplicated issue content.
         - Use global_repairs only for region-wide structure, cross-object alignment, coverage,
@@ -275,6 +289,10 @@ def build_region_review_prompts(
         - When an icon differs in recognizable shape, silhouette structure, or internal simplification, record that fidelity problem explicitly instead of collapsing it into a generic spacing issue.
         - For icons and symbolic marks, preserve semantic recognizability, silhouette agreement, and structural simplicity before optimizing small whitespace preferences or tiny proportion tweaks.
         - If a reported layout issue is mainly a consequence of one object's incorrect shape or visual weight, still mention the underlying object fidelity problem explicitly.
+        - For every recognized icon object, explicitly judge icon fidelity against the raster before passing the region.
+        - Do not pass an icon merely because its broad semantic category is recognizable.
+        - Put an icon in object_issues when its outer silhouette, distinctive lobes/windows/nodes, internal strokes, or key emblem parts are missing, generic, or materially different.
+        - Treat generic icon substitution as an object fidelity failure even when placement and size are acceptable.
 
         3. Review tolerance
         - Be tolerant of minor low-impact differences when the overall standalone region semantics
@@ -320,14 +338,16 @@ def build_region_review_prompts(
                   "global_repairs": [
                     {{
                       "criterion": "criterion text",
-                      "reason": "A brief description of the problem"
+                      "reason": "A brief description of the problem",
+                      "severity": "medium"
                     }}
                   ],
                   "object_issues": [
                     {{
                       "object_id": "object_id",
                       "criterion": "criterion text",
-                      "reason": "A brief description of the problem"
+                      "reason": "A brief description of the problem",
+                      "severity": "medium"
                     }}
                   ]
                 }}

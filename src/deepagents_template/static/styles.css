@@ -1617,12 +1617,13 @@ button:disabled {
   display: grid;
   gap: 10px;
   min-width: 0;
-  width: max-content;
+  width: auto;
 }
 
 .workflow-trace-lane.root-lane > .workflow-trace-card {
-  width: 100%;
-  max-width: none;
+  width: var(--trace-card-max-width);
+  max-width: var(--trace-card-max-width);
+  justify-self: start;
 }
 
 .workflow-trace-lane.root-lane > .workflow-trace-card::after {
@@ -1646,7 +1647,8 @@ button:disabled {
   margin-left: 6px;
   padding-left: 10px;
   border-left: 1px dashed rgba(111, 87, 67, 0.22);
-  width: max-content;
+  width: auto;
+  min-width: 0;
 }
 
 .workflow-trace-branch.parallel {
@@ -1683,9 +1685,11 @@ button:disabled {
 }
 
 .workflow-trace-card {
+  --trace-card-max-width: 260px;
   position: relative;
   min-width: 208px;
-  max-width: 260px;
+  width: var(--trace-card-max-width);
+  max-width: var(--trace-card-max-width);
   padding: 12px;
   border-radius: 14px;
   border: 1px solid rgba(111, 87, 67, 0.12);
@@ -1693,21 +1697,23 @@ button:disabled {
   color: var(--text);
   text-align: left;
   box-shadow: 0 10px 24px rgba(72, 45, 26, 0.08);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .workflow-trace-card.region {
+  --trace-card-max-width: 340px;
   min-width: 280px;
-  max-width: 340px;
 }
 
 .workflow-trace-card.loop {
+  --trace-card-max-width: 420px;
   min-width: 340px;
-  max-width: 420px;
 }
 
 body[data-ui-mode="simple"] .workflow-trace-card {
+  --trace-card-max-width: 300px;
   min-width: 240px;
-  max-width: 300px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.95);
 }
@@ -1757,19 +1763,24 @@ button.workflow-trace-card {
 
 .workflow-trace-branch.sidecar-loop .workflow-trace-card.loop {
   min-width: 300px;
-  max-width: 360px;
+  --trace-card-max-width: 360px;
 }
 
 .workflow-trace-card-top {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
 
 .workflow-trace-card-title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-weight: 700;
   line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .workflow-trace-stage {
@@ -1777,9 +1788,9 @@ button.workflow-trace-card {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: var(--muted);
 }
 
@@ -1804,9 +1815,18 @@ button.workflow-trace-card {
   color: var(--muted);
 }
 
+.workflow-trace-duration {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .workflow-trace-summary-text {
   margin-top: 8px;
   line-height: 1.5;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .workflow-trace-badges {
@@ -1986,6 +2006,28 @@ button.workflow-trace-card {
   justify-content: flex-start;
 }
 
+.output-preview-buffer {
+  position: relative;
+  display: grid;
+  align-items: start;
+  justify-content: stretch;
+  width: 100%;
+}
+
+.output-preview-layer {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  opacity: 1;
+  transition: opacity 180ms ease;
+}
+
+.output-preview-layer.is-pending,
+.output-preview-layer.is-exiting {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .compare-stage {
   display: flex;
   flex-direction: column;
@@ -2000,6 +2042,18 @@ button.workflow-trace-card {
   gap: 12px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.compare-stage-title-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.compare-stage-inline-meta {
+  font-size: 12px;
 }
 
 .compare-stage-actions {
@@ -2192,6 +2246,22 @@ button.workflow-trace-card {
   display: grid;
   gap: 8px;
   margin-top: 10px;
+}
+
+.structure-object-details {
+  margin-top: 10px;
+}
+
+.structure-object-details > summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.structure-object-details > summary::-webkit-details-marker {
+  display: none;
 }
 
 .structure-object {

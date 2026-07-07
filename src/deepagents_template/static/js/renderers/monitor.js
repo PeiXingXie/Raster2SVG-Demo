@@ -285,20 +285,122 @@ export function renderTimeline(run, messages, selectedEventIndex, onEventSelect)
   renderState.timelineSig = signature;
 }
 
-export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, onReturnLive) {
+function getHistoryFilterLabel(status) {
+  if (status === "all") {
+    return "projects";
+  }
+  return `${status} projects`;
+}
+
+function runMatchesHistoryFilter(run, filterStatus) {
+  if (filterStatus === "all") {
+    return true;
+  }
+  if (filterStatus === "paused") {
+    return String(run.status || "").startsWith("paused");
+  }
+  return run.status === filterStatus;
+}
+
+function updateDesktopHistoryPagination(pagination, pageInfo) {
+  const root = document.getElementById("desktop-history-pagination");
+  const prevButton = document.getElementById("desktop-history-prev");
+  const nextButton = document.getElementById("desktop-history-next");
+  const status = document.getElementById("desktop-history-page-status");
+  if (!root || !prevButton || !nextButton || !status) {
+    return;
+  }
+  const visible = Boolean(pagination?.enabled && pageInfo.totalRuns > 0);
+  root.classList.toggle("hidden", !visible);
+  if (!visible) {
+    return;
+  }
+  const filterLabel = getHistoryFilterLabel(pagination.filterStatus || "all");
+  status.textContent = `${pageInfo.startItem}-${pageInfo.endItem} of ${pageInfo.totalRuns} ${filterLabel} | Page ${pageInfo.page} / ${pageInfo.totalPages}`;
+  prevButton.disabled = pageInfo.page <= 1;
+  nextButton.disabled = pageInfo.page >= pageInfo.totalPages;
+}
+
+function getRunSearchText(run) {
+  return [
+    run.project_name,
+    run.status,
+    run.current_stage,
+    run.run_id,
+    run.artifact_revision,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function sortRunsForLibrary(runs, sortKey) {
+  const sorted = [...runs];
+  if (sortKey === "name_asc") {
+    sorted.sort((a, b) => String(a.project_name || "Untitled project").localeCompare(String(b.project_name || "Untitled project")));
+    return sorted;
+  }
+  if (sortKey === "status_asc") {
+    sorted.sort((a, b) => String(a.status || "").localeCompare(String(b.status || "")) || new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime());
+    return sorted;
+  }
+  sorted.sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime());
+  return sorted;
+}
+
+function formatProjectStatus(status) {
+  const normalized = String(status || "unknown").replaceAll("_", " ");
+  return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, onReturnLive, options = {}) {
+  const pagination = options.pagination || null;
+  const filterStatus = pagination?.filterStatus || "all";
+  const isDesktopPaginated = Boolean(pagination?.enabled);
+  const searchQuery = String(pagination?.search || "").trim().toLowerCase();
+  const statusFilteredRuns = isDesktopPaginated && filterStatus !== "all"
+    ? runs.filter((run) => runMatchesHistoryFilter(run, filterStatus))
+    : runs;
+  const searchedRuns = searchQuery
+    ? statusFilteredRuns.filter((run) => getRunSearchText(run).includes(searchQuery))
+    : statusFilteredRuns;
+  const filteredRuns = isDesktopPaginated
+    ? sortRunsForLibrary(searchedRuns, pagination?.sort || "updated_desc")
+    : searchedRuns;
+  const pageSize = Math.max(1, Number.parseInt(pagination?.pageSize || filteredRuns.length || 1, 10));
+  const totalPages = Math.max(1, Math.ceil(filteredRuns.length / pageSize));
+  const requestedPage = Math.max(1, Number.parseInt(pagination?.page || 1, 10));
+  const page = Math.min(requestedPage, totalPages);
+  const pageStartIndex = isDesktopPaginated ? (page - 1) * pageSize : 0;
+  const pageRuns = isDesktopPaginated ? filteredRuns.slice(pageStartIndex, pageStartIndex + pageSize) : filteredRuns;
+  const pageInfo = {
+    page,
+    pageSize,
+    totalPages,
+    totalRuns: filteredRuns.length,
+    startItem: filteredRuns.length ? pageStartIndex + 1 : 0,
+    endItem: pageStartIndex + pageRuns.length,
+  };
   const signature = stableStringify({
-    runs,
+    runs: pageRuns,
     selectedRunId,
+    filterStatus,
+    searchQuery,
+    sort: pagination?.sort || "updated_desc",
+    pageInfo,
   });
   if (renderState.recentRunsSig === signature) {
+    updateDesktopHistoryPagination(pagination, pageInfo);
     return;
   }
 
   elements.recentRuns.innerHTML = "";
-  if (!runs.length) {
-    elements.recentRuns.textContent = "No runs yet.";
+  if (!filteredRuns.length) {
+    elements.recentRuns.textContent = searchQuery
+      ? "No projects match your search."
+      : isDesktopPaginated && filterStatus !== "all"
+        ? `No ${filterStatus} projects.`
+        : "No saved projects yet.";
     elements.recentRuns.className = "recent-runs recent-runs-sidebar empty-state";
     elements.recentRunsClearSelection.classList.add("hidden");
+    updateDesktopHistoryPagination(pagination, pageInfo);
     renderState.recentRunsSig = signature;
     return;
   }
@@ -306,21 +408,36 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
   elements.recentRuns.className = "recent-runs recent-runs-sidebar";
   elements.recentRunsClearSelection.classList.toggle("hidden", !selectedRunId);
   elements.recentRunsClearSelection.onclick = () => onReturnLive();
-  const selectedRun = runs.find((run) => run.run_id === selectedRunId) || runs[0];
+  const selectedRun = pageRuns.find((run) => run.run_id === selectedRunId) || (isDesktopPaginated ? null : pageRuns[0]);
+  const isDesktop = document.body.classList.contains("desktop-body");
 
-  for (const run of runs) {
+  for (const run of pageRuns) {
     const card = document.createElement("article");
     card.className = `run-chip ${run.status}${selectedRun?.run_id === run.run_id ? " selected" : ""}`;
+    card.dataset.runId = run.run_id || "";
     card.innerHTML = `
       <div class="run-chip-top">
-        <strong>${run.status}</strong>
+        <strong>${formatProjectStatus(run.status)}</strong>
         <span>${formatDuration(run)}</span>
       </div>
-      <div class="run-chip-project">${escapeHtml(run.project_name || "Unnamed project")}</div>
+      <div class="run-chip-project">${escapeHtml(run.project_name || "Untitled project")}</div>
+      ${isDesktop ? `
+        <div class="run-chip-preview" data-preview-state="loading">
+          <div class="run-chip-preview-pane">
+            <div class="run-chip-preview-label">Input</div>
+            <div class="run-chip-preview-frame"><div class="run-chip-preview-empty">Loading</div></div>
+          </div>
+          <div class="run-chip-preview-pane">
+            <div class="run-chip-preview-label">Output</div>
+            <div class="run-chip-preview-frame"><div class="run-chip-preview-empty">Loading</div></div>
+          </div>
+        </div>
+      ` : ""}
       <div class="run-chip-meta-row">
         <span class="run-chip-stage">${escapeHtml(run.current_stage || "-")}</span>
         <span class="run-chip-time">${formatDate(run.updated_at)}</span>
       </div>
+      ${run.artifact_revision ? `<div class="run-chip-meta-row"><span class="run-chip-stage">rev ${escapeHtml(String(run.artifact_revision).slice(0, 8))}</span></div>` : ""}
     `;
 
     const actions = document.createElement("div");
@@ -329,7 +446,7 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
     const reviewBtn = document.createElement("button");
     reviewBtn.className = "ghost-btn";
     reviewBtn.type = "button";
-    reviewBtn.textContent = selectedRun?.run_id === run.run_id ? "Viewing" : "Review";
+    reviewBtn.textContent = "Open";
     reviewBtn.disabled = selectedRun?.run_id === run.run_id;
     reviewBtn.addEventListener("click", () => onReviewRun(run.run_id));
     actions.appendChild(reviewBtn);
@@ -347,5 +464,9 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
     elements.recentRuns.appendChild(card);
   }
 
+  updateDesktopHistoryPagination(pagination, pageInfo);
+  if (isDesktopPaginated && typeof pagination?.onPageResolved === "function") {
+    pagination.onPageResolved(page);
+  }
   renderState.recentRunsSig = signature;
 }

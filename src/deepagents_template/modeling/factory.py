@@ -1,8 +1,9 @@
-"""Overview: Factories for low-level OpenAI-compatible clients and LangChain chat models."""
+"""Overview: Factories for low-level OpenAI-compatible clients and optional chat models."""
 
 from __future__ import annotations
 
-from langchain_openai import ChatOpenAI
+from typing import Any
+
 from openai import OpenAI
 
 from deepagents_template.config import Settings, get_settings
@@ -17,8 +18,10 @@ def build_chat_model(
     max_retries: int | None = None,
     use_previous_response_id: bool | None = None,
     settings: Settings | None = None,
-) -> ChatOpenAI:
+) -> Any:
     """Build a ChatOpenAI instance for OpenAI-compatible APIs."""
+
+    from langchain_openai import ChatOpenAI
 
     settings = settings or get_settings()
     model_kwargs: dict = {}

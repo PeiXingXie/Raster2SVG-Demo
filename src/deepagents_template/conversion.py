@@ -89,12 +89,30 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             request.supervisor_memory_persist_enabled
         )
         self.strategy_enabled = settings.resolved_strategy_enabled(request.strategy_enabled)
+        self.recognition_bbox_refine_mode = settings.resolved_recognition_bbox_refine_mode(
+            request.recognition_bbox_refine_mode
+        )
+        self.sam_provider_mode = settings.resolved_sam_provider_mode(request.sam_provider_mode)
+        self.sam_remote_url = settings.resolved_sam_remote_url(request.sam_remote_url)
+        self.sam_enabled = settings.resolved_sam_enabled(request.sam_enabled)
+        self.sam_fallback_to_llm = settings.resolved_sam_fallback_to_llm(
+            request.sam_fallback_to_llm
+        )
         self.region_processing_mode = settings.resolved_region_processing_mode(
             request.region_processing_mode
         )
         self.region_concurrency = settings.resolved_region_concurrency(
             request.region_processing_mode,
             request.region_concurrency,
+        )
+        self.bbox_issue_concurrency = settings.resolved_bbox_issue_concurrency(
+            request.bbox_issue_concurrency
+        )
+        self.bbox_issue_stagnation_rounds = settings.resolved_bbox_issue_stagnation_rounds(
+            request.bbox_issue_stagnation_rounds
+        )
+        self.bbox_global_stagnation_rounds = settings.resolved_bbox_global_stagnation_rounds(
+            request.bbox_global_stagnation_rounds
         )
         self.workflow_mode = settings.resolved_workflow_mode(request.workflow_mode)
         self.root_input_dir = artifact_dir / "input"
@@ -130,6 +148,14 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "supervisor_memory_enabled": self.supervisor_memory_enabled,
             "supervisor_memory_persist_enabled": self.supervisor_memory_persist_enabled,
             "strategy_enabled": self.strategy_enabled,
+            "recognition_bbox_refine_mode": self.recognition_bbox_refine_mode,
+            "sam_provider_mode": self.sam_provider_mode,
+            "sam_remote_url": self.sam_remote_url,
+            "sam_enabled": self.sam_enabled,
+            "sam_fallback_to_llm": self.sam_fallback_to_llm,
+            "bbox_issue_concurrency": self.bbox_issue_concurrency,
+            "bbox_issue_stagnation_rounds": self.bbox_issue_stagnation_rounds,
+            "bbox_global_stagnation_rounds": self.bbox_global_stagnation_rounds,
         }
         for directory in (
             self.root_input_dir,
@@ -575,6 +601,14 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "strategy_enabled": self.strategy_enabled,
             "region_processing_mode": self.region_processing_mode,
             "region_concurrency": self.region_concurrency,
+            "recognition_bbox_refine_mode": self.recognition_bbox_refine_mode,
+            "sam_provider_mode": self.sam_provider_mode,
+            "sam_remote_url": self.sam_remote_url,
+            "sam_enabled": self.sam_enabled,
+            "sam_fallback_to_llm": self.sam_fallback_to_llm,
+            "bbox_issue_concurrency": self.bbox_issue_concurrency,
+            "bbox_issue_stagnation_rounds": self.bbox_issue_stagnation_rounds,
+            "bbox_global_stagnation_rounds": self.bbox_global_stagnation_rounds,
             "workflow_mode": self.workflow_mode,
             "request_message": self.user_message,
             "run_elapsed_ms": run_elapsed_ms,
@@ -828,6 +862,11 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
     ) -> bool:
         objects_by_id = {obj.object_id for obj in recognition.recognized_objects}
         with self._retry_lock:
+            if not object_issues:
+                return any(
+                    self._retry_counts.get(self._object_retry_task_name(region_id, object_id), 0) < self.max_retry
+                    for object_id in objects_by_id
+                )
             for issue in object_issues:
                 if issue.object_id not in objects_by_id:
                     continue

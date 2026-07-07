@@ -1,13 +1,14 @@
-"""Supervisor implementations for the raster-to-SVG workflow."""
+﻿"""Supervisor implementations for the raster-to-SVG workflow."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from threading import current_thread
 
-from deepagents_template.bbox_overflow import summarize_bbox_batch_overflow
-from deepagents_template.bbox_validation import validate_crop_local_bbox
+from PIL import Image, ImageDraw
+
 from deepagents_template.checklist import (
     final_review_spatial_logical_issues,
     fusion_review_issue_id,
@@ -22,14 +23,19 @@ from deepagents_template.policy import BboxPolicyEngine, FusionPolicyEngine, Obj
 from deepagents_template.recognition_grouping import group_oversegmented_recognition
 from deepagents_template.schemas import (
     BboxAdjustmentResult,
+    BboxGlobalRoundSummary,
+    BboxIssueThreadSummary,
     BboxSupervisorMemory,
     FinalReviewResult,
     FusionSupervisorMemory,
     LayoutDetectionResult,
+    ObjectBboxCandidateSelectionResult,
+    ObjectInitialBboxResult,
     LayoutSupervisorMemory,
     ObjectRepairSupervisorMemory,
     ObjectCandidate,
     RegionRecognitionResult,
+    RegionBoundingBox,
     RegionRepairResult,
     RegionReviewResult,
     RegionSupervisorMemory,
@@ -40,7 +46,6 @@ from deepagents_template.svg_bbox_validation import build_region_bbox_review_fee
 from deepagents_template.utils.planning import summarize_conversion_requirements
 from deepagents_template.utils.bbox_visualization import render_bbox_overlay
 from deepagents_template.utils.context_payloads import (
-    build_bbox_feedback_payload,
     build_fusion_previous_decision_delta,
     build_object_index_payload,
     build_object_policy_payload,
@@ -71,6 +76,13 @@ from .workers import (
 )
 
 
+_CANDIDATE_BBOX_COLORS = {
+    "compact": "#e63946",
+    "balanced": "#1d3557",
+    "roomy": "#2a9d8f",
+}
+
+
 class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
     """Supervisor loop for bbox proposal, candidate execution, and policy judgement."""
 
@@ -94,6 +106,27 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                     scope=result.scope,
                     region_id=result.region_id or None,
                 ),
+                "strategy_label": self._truncate_text(result.strategy_label or "", max_words=8, max_chars=64) or None,
+                "strategy_rationale": self._truncate_text(result.strategy_rationale or "", max_words=24, max_chars=160) or None,
+                "changes_applied": self._sanitize_changes(result.changes_applied),
+                "target_ids": result.target_ids[:6],
+            }
+        )
+
+    def _sanitize_result_without_issue_budget(self, result: BboxAdjustmentResult) -> BboxAdjustmentResult:
+        return result.model_copy(
+            update={
+                "overview": self._truncate_text(result.overview, max_words=28, max_chars=180),
+                "issues": [
+                    issue.model_copy(
+                        update={
+                            "criterion": self._truncate_text(issue.criterion, max_words=12, max_chars=72),
+                            "reason": self._truncate_text(issue.reason, max_words=20, max_chars=120),
+                        }
+                    )
+                    for issue in result.issues
+                    if issue.criterion and issue.reason
+                ],
                 "strategy_label": self._truncate_text(result.strategy_label or "", max_words=8, max_chars=64) or None,
                 "strategy_rationale": self._truncate_text(result.strategy_rationale or "", max_words=24, max_chars=160) or None,
                 "changes_applied": self._sanitize_changes(result.changes_applied),
@@ -156,6 +189,79 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
             output_path=output_path,
         )
 
+    def _render_grid_reference(self, *, crop_path: Path, output_path: Path, scale: int = 2) -> Path:
+        """Render a readable coordinate grid while preserving original crop coordinates."""
+
+        with Image.open(crop_path) as source:
+            image = source.convert("RGBA")
+        scale = max(1, int(scale))
+        if scale > 1:
+            image = image.resize((image.width * scale, image.height * scale))
+        draw = ImageDraw.Draw(image)
+        width, height = image.size
+        original_width = max(1, width // scale)
+        original_height = max(1, height // scale)
+        minor = 10
+        major = 20
+        for x in range(0, original_width + 1, minor):
+            sx = x * scale
+            color = (80, 80, 80, 90) if x % major == 0 else (120, 120, 120, 45)
+            draw.line((sx, 0, sx, height), fill=color, width=1)
+            if x % major == 0:
+                draw.text((sx + 2, 2), str(x), fill=(30, 30, 30, 220))
+        for y in range(0, original_height + 1, minor):
+            sy = y * scale
+            color = (80, 80, 80, 90) if y % major == 0 else (120, 120, 120, 45)
+            draw.line((0, sy, width, sy), fill=color, width=1)
+            if y % major == 0:
+                draw.text((2, sy + 2), str(y), fill=(30, 30, 30, 220))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        return output_path
+
+    @staticmethod
+    def _coerce_crop_bbox(bbox, *, crop_path: Path) -> RegionBoundingBox | None:
+        if bbox is None:
+            return None
+        payload = bbox.model_dump(mode="json") if hasattr(bbox, "model_dump") else dict(bbox)
+        with Image.open(crop_path) as image:
+            crop_width, crop_height = image.size
+        x = max(0, min(int(payload.get("x", 0)), max(crop_width - 1, 0)))
+        y = max(0, min(int(payload.get("y", 0)), max(crop_height - 1, 0)))
+        width = max(1, min(int(payload.get("width", 1)), max(crop_width - x, 1)))
+        height = max(1, min(int(payload.get("height", 1)), max(crop_height - y, 1)))
+        return RegionBoundingBox(x=x, y=y, width=width, height=height)
+
+    def _render_candidate_overlay(
+        self,
+        *,
+        crop_path: Path,
+        output_path: Path,
+        object_id: str,
+        candidates: list[dict],
+    ) -> Path:
+        boxes = []
+        for item in candidates:
+            candidate_id = str(item.get("candidate_id") or "candidate")
+            boxes.append(
+                {
+                    "id": candidate_id,
+                    "label": f"{object_id}:{candidate_id}",
+                    "bbox": item.get("bbox") or {},
+                    "color": _CANDIDATE_BBOX_COLORS.get(candidate_id),
+                }
+            )
+        with Image.open(crop_path) as image:
+            min_dimension = min(image.size)
+        line_width = max(1, min(2, round(min_dimension * 0.004)))
+        return render_bbox_overlay(
+            image_path=crop_path,
+            boxes=boxes,
+            output_path=output_path,
+            line_width=line_width,
+            draw_labels=False,
+        )
+
     def _collect_recognition_validation_feedback(
         self,
         *,
@@ -163,20 +269,7 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
         recognition: RegionRecognitionResult,
         target_ids: set[str] | None = None,
     ) -> list[dict]:
-        feedback_items = []
-        for obj in recognition.recognized_objects:
-            if obj.bbox is None:
-                continue
-            if target_ids and obj.object_id not in target_ids:
-                continue
-            feedback_items.append(
-                validate_crop_local_bbox(
-                    crop_path=crop_path,
-                    target_id=obj.object_id,
-                    bbox=obj.bbox.model_dump(mode="json"),
-                )
-            )
-        return build_bbox_feedback_payload(feedback_items)
+        return []
 
     def _apply_recognition_updates(
         self,
@@ -186,7 +279,16 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
     ) -> RegionRecognitionResult:
         if not updates:
             return recognition
-        update_by_id = {item.target_id: item.bbox for item in updates}
+        update_by_id = {}
+        for item in updates:
+            if isinstance(item, dict):
+                target_id = item.get("target_id")
+                bbox = item.get("bbox")
+            else:
+                target_id = getattr(item, "target_id", None)
+                bbox = getattr(item, "bbox", None)
+            if target_id:
+                update_by_id[target_id] = bbox
         adjusted_objects = []
         for obj in recognition.recognized_objects:
             replacement_bbox = update_by_id.get(obj.object_id)
@@ -195,33 +297,519 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
             )
         return recognition.model_copy(update={"recognized_objects": adjusted_objects})
 
-    def _persist_bbox_trace(self, path: Path, payload: dict) -> None:
-        self.pipeline._write_json(path, payload)
+    @staticmethod
+    def _recognition_objects_payload(recognition: RegionRecognitionResult) -> list[dict]:
+        return [
+            {
+                "object_id": obj.object_id,
+                "description": obj.description,
+                "included_elements": obj.included_elements,
+                "generation_focus": obj.generation_focus,
+                "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+            }
+            for obj in recognition.recognized_objects
+        ]
 
-    def _warn_bbox_batch_overflow(self, *, region_id: str, iteration: int, overflow_summary: dict) -> None:
+    @staticmethod
+    def _bbox_issue_key(issue) -> tuple[str, str]:
+        return (issue.target_id, issue.issue_code or issue.canonical_issue_id or issue.criterion)
+
+    @staticmethod
+    def _bbox_issue_score(issue) -> int:
+        severity_score = {"high": 30, "medium": 12, "low": 4}.get(issue.severity, 8)
+        criterion = (issue.criterion or "").lower()
+        reason = (issue.reason or "").lower()
+        bonus = 0
+        if "clip" in criterion or "clip" in reason:
+            bonus += 6
+        if "text" in criterion or "text" in reason:
+            bonus += 2
+        if "border" in criterion or "border" in reason:
+            bonus += 1
+        return severity_score + bonus
+
+    @staticmethod
+    def _issue_ids(issues: list) -> list[str]:
+        return [item.canonical_issue_id or f"{item.target_id}:{item.criterion}" for item in issues]
+
+    def _select_ranked_bbox_issues(
+        self,
+        issues: list,
+        *,
+        exempted_issue_ids: set[str],
+        limit: int = 3,
+    ) -> list:
+        selected = []
+        seen_target_ids: set[str] = set()
+        seen_issue_ids: set[str] = set()
+        for issue in sorted(issues, key=self._bbox_issue_score, reverse=True):
+            canonical_id = issue.canonical_issue_id or f"{issue.target_id}:{issue.issue_code or issue.criterion}"
+            if not canonical_id or canonical_id in exempted_issue_ids or canonical_id in seen_issue_ids:
+                continue
+            # One issue thread per target per global round avoids same-object thread conflicts.
+            if issue.target_id in seen_target_ids:
+                continue
+            selected.append(issue)
+            seen_target_ids.add(issue.target_id)
+            seen_issue_ids.add(canonical_id)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _bbox_artifact_dir(self, *, region_dir: Path) -> Path:
+        path = region_dir / "bbox"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _bbox_round_name(round_index: int) -> str:
+        return f"g{round_index:02d}"
+
+    @staticmethod
+    def _bbox_iteration_name(iteration: int) -> str:
+        return f"i{iteration:02d}"
+
+    @staticmethod
+    def _bbox_issue_dir_name(issue) -> str:
+        safe_target = (getattr(issue, "target_id", "") or "target").replace(":", "_").replace("/", "_").replace("\\", "_")
+        safe_target = "_".join(part for part in safe_target.split("_") if part)
+        if len(safe_target) > 16:
+            safe_target = safe_target[:16].rstrip("_")
+        digest_source = getattr(issue, "canonical_issue_id", None) or f"{getattr(issue, 'target_id', '')}:{getattr(issue, 'issue_code', '')}"
+        digest = hashlib.sha1(str(digest_source).encode("utf-8")).hexdigest()[:8]
+        return f"i_{safe_target or 'target'}_{digest}"
+
+    def _bbox_round_dir(self, *, region_dir: Path, round_index: int) -> Path:
+        path = self._bbox_artifact_dir(region_dir=region_dir) / self._bbox_round_name(round_index)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _bbox_issue_dir(self, *, region_dir: Path, round_index: int, issue) -> Path:
+        path = self._bbox_round_dir(region_dir=region_dir, round_index=round_index) / "issues" / self._bbox_issue_dir_name(issue)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _memory_summary_payload(memory: BboxSupervisorMemory, enabled: bool) -> dict | None:
+        if not enabled:
+            return None
+        return {
+            "iteration": memory.iteration,
+            "attempted_adjustment_types": memory.attempted_adjustment_types[-4:],
+            "accepted_changes": memory.accepted_changes[-4:],
+            "rejected_changes": memory.rejected_changes[-4:],
+        }
+
+    @staticmethod
+    def _hard_bbox_issues(issues: list) -> list:
+        return [
+            item
+            for item in issues
+            if getattr(item, "issue_code", "") in {"target_not_contained", "target_clipped", "invalid_bbox"}
+        ]
+
+    def _apply_initial_bbox_result(
+        self,
+        *,
+        recognition: RegionRecognitionResult,
+        initial_result: ObjectInitialBboxResult,
+        crop_path: Path,
+    ) -> RegionRecognitionResult:
+        updates = []
+        known_ids = {obj.object_id for obj in recognition.recognized_objects}
+        for item in initial_result.object_bboxes:
+            if item.object_id not in known_ids:
+                continue
+            bbox = self._coerce_crop_bbox(item.bbox, crop_path=crop_path)
+            if bbox is not None:
+                updates.append({"target_id": item.object_id, "bbox": bbox})
+        return self._apply_recognition_updates(recognition=recognition, updates=updates)
+
+    @staticmethod
+    def _objects_missing_bboxes(recognition: RegionRecognitionResult) -> list[str]:
+        return [obj.object_id for obj in recognition.recognized_objects if obj.bbox is None]
+
+    @staticmethod
+    def _clear_recognition_bboxes(recognition: RegionRecognitionResult) -> RegionRecognitionResult:
+        return recognition.model_copy(
+            update={
+                "recognized_objects": [
+                    obj.model_copy(update={"bbox": None})
+                    for obj in recognition.recognized_objects
+                ]
+            }
+        )
+
+    def _push_bbox_warning(self, *, region_id: str, title: str, detail: str, payload: dict) -> None:
         push_event = getattr(self.pipeline, "_push_event", None)
-        if not callable(push_event):
+        if callable(push_event):
+            push_event(
+                "bbox-review",
+                title,
+                detail,
+                payload={"region_id": region_id, **payload},
+                status="running",
+                level="warning",
+            )
+
+    def _warn_missing_issue_edges(self, *, region_id: str, issues: list) -> None:
+        missing = [
+            {
+                "canonical_issue_id": issue.canonical_issue_id,
+                "object_id": issue.target_id,
+                "issue_family": issue.issue_code,
+                "severity": issue.severity,
+            }
+            for issue in issues
+            if issue.issue_code in {"target_not_contained", "target_clipped"} and not issue.edges
+        ]
+        if not missing:
             return
-        push_event(
-            "region-process",
-            f"Bbox refine batch overflow for {region_id}",
-            (
-                "Recognition bbox refine returned more objects than the current batch budget allows; "
-                "kept the highest-priority prefix and recorded dropped targets in trace."
-            ),
-            payload={
-                "region_id": region_id,
-                "iteration": iteration,
-                "budget_limits": {
-                    "target_ids": 6,
-                    "adjusted_object_bboxes": 12,
-                    "changes_applied": 4,
+        self._push_bbox_warning(
+            region_id=region_id,
+            title="Bbox issue missing concrete edge",
+            detail="BBox issue omitted concrete edge values; no hard edge inference was applied.",
+            payload={"issues": missing},
+        )
+
+    @staticmethod
+    def _issue_payload(issue) -> dict:
+        payload = issue.model_dump(mode="json") if hasattr(issue, "model_dump") else dict(issue)
+        payload["object_id"] = payload.get("target_id") or payload.get("object_id")
+        payload["issue_family"] = payload.get("issue_code") or payload.get("issue_family")
+        payload.pop("canonical_issue_id", None)
+        return payload
+
+    def _candidate_set_for_issue(self, candidate_result, issue) -> object | None:
+        issue_code = getattr(issue, "issue_code", "")
+        issue_edges = list(getattr(issue, "edges", []) or [])
+        for item in candidate_result.candidate_sets:
+            if item.object_id != issue.target_id:
+                continue
+            if item.issue_code and item.issue_code != issue_code:
+                continue
+            if list(item.edges or []) and list(item.edges or []) != issue_edges:
+                continue
+            return item
+        for item in candidate_result.candidate_sets:
+            if item.object_id == issue.target_id:
+                return item
+        return None
+
+    @staticmethod
+    def _selection_to_issue_summary(*, issue, selection: ObjectBboxCandidateSelectionResult) -> BboxIssueThreadSummary:
+        return BboxIssueThreadSummary(
+            canonical_issue_id=issue.canonical_issue_id,
+            target_id=issue.target_id,
+            issue_code=issue.issue_code,
+            severity=issue.severity,
+            status="resolved" if selection.issue_resolved else "progressive",
+            stop_reason=selection.selection_rationale or "selected best bbox candidate",
+            iterations=1,
+            committed=True,
+            stagnation_count=0,
+        )
+
+    def _review_recognition_v2(
+        self,
+        *,
+        crop_path: Path,
+        region: dict,
+        recognition: RegionRecognitionResult,
+        region_dir: Path,
+    ) -> tuple[RegionRecognitionResult, BboxAdjustmentResult]:
+        scope_key = f"recognition:{region['region_id']}"
+        memory = self._memory_for(scope_key, "recognition")
+        bbox_dir = self._bbox_artifact_dir(region_dir=region_dir)
+        grid_path = bbox_dir / "grid_reference.png"
+        self._render_grid_reference(crop_path=crop_path, output_path=grid_path)
+
+        current_recognition = self._clear_recognition_bboxes(recognition)
+        if current_recognition.recognized_objects:
+            initial_result, initial_raw = self.worker.run_initial_object_bboxes(
+                crop_path=crop_path,
+                grid_path=grid_path,
+                region=region,
+                recognized_objects=self._recognition_objects_payload(current_recognition),
+                checklist_criteria=[],
+            )
+            current_recognition = self._apply_initial_bbox_result(
+                recognition=current_recognition,
+                initial_result=initial_result,
+                crop_path=crop_path,
+            )
+            self.pipeline._write_text(bbox_dir / "initial_bbox_raw.txt", initial_raw)
+            self.pipeline._write_json(bbox_dir / "initial_bbox.json", initial_result.model_dump(mode="json"))
+            missing_object_ids = self._objects_missing_bboxes(current_recognition)
+            if missing_object_ids:
+                missing_objects = [
+                    obj
+                    for obj in self._recognition_objects_payload(current_recognition)
+                    if obj.get("object_id") in set(missing_object_ids)
+                ]
+                retry_result, retry_raw = self.worker.run_initial_object_bboxes(
+                    crop_path=crop_path,
+                    grid_path=grid_path,
+                    region=region,
+                    recognized_objects=missing_objects,
+                    checklist_criteria=[],
+                )
+                current_recognition = self._apply_initial_bbox_result(
+                    recognition=current_recognition,
+                    initial_result=retry_result,
+                    crop_path=crop_path,
+                )
+                self.pipeline._write_text(bbox_dir / "initial_bbox_missing_retry_raw.txt", retry_raw)
+                self.pipeline._write_json(
+                    bbox_dir / "initial_bbox_missing_retry.json",
+                    {
+                        "missing_object_ids": missing_object_ids,
+                        "result": retry_result.model_dump(mode="json"),
+                    },
+                )
+                remaining_missing = self._objects_missing_bboxes(current_recognition)
+                if remaining_missing:
+                    self._push_bbox_warning(
+                        region_id=region["region_id"],
+                        title="Initial object bbox missing after retry",
+                        detail="Initial bbox generation still omitted recognized objects after targeted retry.",
+                        payload={"missing_object_ids": remaining_missing},
+                    )
+
+        latest_result = BboxAdjustmentResult(scope="recognition", region_id=region["region_id"], overview="", issues=[], needs_adjustment=False)
+        resolved_issue_ids: set[str] = set()
+        exempted_issue_ids: set[str] = set()
+        global_rounds: list[BboxGlobalRoundSummary] = []
+        previous_issue_signature: tuple[str, ...] = ()
+        repeated_rounds = 0
+        soft_only_rounds = 0
+        round_index = 0
+
+        while True:
+            round_dir = self._bbox_round_dir(region_dir=region_dir, round_index=round_index)
+            scan_dir = round_dir / "scan"
+            scan_dir.mkdir(parents=True, exist_ok=True)
+            overlay_path = scan_dir / "cur.png"
+            self._render_recognition_overlay(crop_path, current_recognition, overlay_path)
+            current_objects = self._recognition_objects_payload(current_recognition)
+            scan_result, scan_raw = self.worker.run_recognition(
+                crop_path=crop_path,
+                overlay_path=overlay_path,
+                region=region,
+                recognized_objects=current_objects,
+                validation_feedback=[],
+                memory_summary=self._memory_summary_payload(memory, self.use_supervisor_memory),
+                exempted_issue_ids=sorted(exempted_issue_ids),
+                recently_resolved_issue_ids=sorted(resolved_issue_ids),
+            )
+            scan_result = self._sanitize_result_without_issue_budget(scan_result)
+            self.pipeline._write_text(scan_dir / "scan.txt", scan_raw)
+            self.pipeline._write_json(scan_dir / "scan.json", scan_result.model_dump(mode="json"))
+
+            ranked_issues = self._select_ranked_bbox_issues(scan_result.issues, exempted_issue_ids=exempted_issue_ids, limit=3)
+            self._warn_missing_issue_edges(region_id=region["region_id"], issues=ranked_issues)
+            hard_issues = self._hard_bbox_issues(ranked_issues)
+            soft_only_rounds = soft_only_rounds + 1 if ranked_issues and not hard_issues else 0
+            issue_signature = tuple(self._issue_ids(ranked_issues))
+            repeated_rounds = repeated_rounds + 1 if issue_signature and issue_signature == previous_issue_signature else 0
+            previous_issue_signature = issue_signature
+
+            if not ranked_issues or (not hard_issues and soft_only_rounds >= 1):
+                latest_result = scan_result.model_copy(update={"issues": ranked_issues, "needs_adjustment": bool(hard_issues)})
+                stop_reason = "no bbox issues selected" if not ranked_issues else "only soft bbox issues remain"
+                round_summary = BboxGlobalRoundSummary(
+                    round_index=round_index,
+                    proposed_issue_ids=list(issue_signature),
+                    resolved_issue_ids=sorted(resolved_issue_ids),
+                    exempted_issue_ids=sorted(exempted_issue_ids),
+                    committed_issue_ids=[],
+                    stop_reason=stop_reason,
+                    stagnated=False,
+                )
+                global_rounds.append(round_summary)
+                self.pipeline._write_json(round_dir / "summary.json", round_summary.model_dump(mode="json"))
+                memory.stop_reason = stop_reason
+                break
+
+            if repeated_rounds >= self.pipeline.bbox_global_stagnation_rounds:
+                latest_result = scan_result.model_copy(update={"issues": ranked_issues, "needs_adjustment": True})
+                round_summary = BboxGlobalRoundSummary(
+                    round_index=round_index,
+                    proposed_issue_ids=list(issue_signature),
+                    resolved_issue_ids=sorted(resolved_issue_ids),
+                    exempted_issue_ids=sorted(exempted_issue_ids),
+                    committed_issue_ids=[],
+                    stop_reason="global bbox issue set stagnated across rounds",
+                    stagnated=True,
+                )
+                global_rounds.append(round_summary)
+                self.pipeline._write_json(round_dir / "summary.json", round_summary.model_dump(mode="json"))
+                memory.stop_reason = round_summary.stop_reason
+                break
+
+            retry_task = f"bbox:recognition:{region['region_id']}:round"
+            if not self.pipeline._begin_retry(retry_task):
+                latest_result = scan_result.model_copy(update={"issues": ranked_issues, "needs_adjustment": True})
+                memory.stop_reason = "region bbox retry budget exhausted"
+                break
+
+            candidates_dir = round_dir / "candidates"
+            candidates_dir.mkdir(parents=True, exist_ok=True)
+            candidate_result, candidate_raw = self.worker.run_object_bbox_candidates(
+                crop_path=crop_path,
+                grid_path=grid_path,
+                overlay_path=overlay_path,
+                region=region,
+                recognized_objects=current_objects,
+                current_issues=[self._issue_payload(issue) for issue in ranked_issues],
+            )
+            self.pipeline._write_text(candidates_dir / "candidates_raw.txt", candidate_raw)
+            self.pipeline._write_json(candidates_dir / "candidates.json", candidate_result.model_dump(mode="json"))
+
+            updates = []
+            committed_in_round: list[str] = []
+            selections = []
+            objects_by_id = {obj["object_id"]: obj for obj in current_objects}
+            for issue in ranked_issues:
+                candidate_set = self._candidate_set_for_issue(candidate_result, issue)
+                if candidate_set is None or not candidate_set.candidates:
+                    exempted_issue_ids.add(issue.canonical_issue_id)
+                    continue
+                candidates_payload = [item.model_dump(mode="json") for item in candidate_set.candidates]
+                candidate_overlay = candidates_dir / f"{self._bbox_issue_dir_name(issue)}_overlay.png"
+                self._render_candidate_overlay(
+                    crop_path=crop_path,
+                    output_path=candidate_overlay,
+                    object_id=issue.target_id,
+                    candidates=candidates_payload,
+                )
+                selection, selection_raw = self.worker.run_object_bbox_candidate_selection(
+                    crop_path=crop_path,
+                    current_overlay_path=overlay_path,
+                    candidate_overlay_path=candidate_overlay,
+                    region=region,
+                    target_object=objects_by_id.get(issue.target_id, {"object_id": issue.target_id}),
+                    issue=self._issue_payload(issue),
+                    candidates=candidates_payload,
+                    current_objects=current_objects,
+                )
+                selected_bbox = self._coerce_crop_bbox(selection.selected_bbox, crop_path=crop_path)
+                if selected_bbox is None:
+                    exempted_issue_ids.add(issue.canonical_issue_id)
+                    continue
+                updates.append({"target_id": issue.target_id, "bbox": selected_bbox})
+                committed_in_round.append(issue.canonical_issue_id)
+                if selection.issue_resolved:
+                    resolved_issue_ids.add(issue.canonical_issue_id)
+                selection_payload = selection.model_dump(mode="json")
+                selection_payload["canonical_issue_id"] = issue.canonical_issue_id
+                selections.append(selection_payload)
+                issue_dir = round_dir / "issues" / self._bbox_issue_dir_name(issue)
+                issue_dir.mkdir(parents=True, exist_ok=True)
+                self.pipeline._write_text(issue_dir / "selection_raw.txt", selection_raw)
+                self.pipeline._write_json(issue_dir / "selection.json", selection_payload)
+                summary = self._selection_to_issue_summary(issue=issue, selection=selection)
+                self.pipeline._write_json(issue_dir / "summary.json", summary.model_dump(mode="json"))
+                memory.iteration += 1
+                memory.issue_history.append(
+                    SupervisorIssueMemory(
+                        issue_id=issue.canonical_issue_id,
+                        scope="object",
+                        target_id=issue.target_id,
+                        criterion=issue.criterion,
+                        reason=issue.reason,
+                        status="resolved" if selection.issue_resolved else "attempted",
+                        attempts=1,
+                        source_iteration=str(round_index),
+                    )
+                )
+                memory.accepted_changes.append(f"selected {selection.selected_candidate_id} for {issue.target_id}")
+
+            if updates:
+                current_recognition = self._apply_recognition_updates(recognition=current_recognition, updates=updates)
+                latest_result = BboxAdjustmentResult(
+                    scope="recognition",
+                    region_id=region["region_id"],
+                    overview="selected best bbox candidates for current region issues",
+                    issues=ranked_issues,
+                    adjustment_type="mixed",
+                    target_ids=[item["target_id"] for item in updates],
+                    adjusted_object_bboxes=updates,
+                    changes_applied=[f"updated {item['target_id']}" for item in updates][:4],
+                    needs_adjustment=True,
+                )
+            else:
+                latest_result = scan_result.model_copy(update={"issues": ranked_issues, "needs_adjustment": True})
+
+            round_summary = BboxGlobalRoundSummary(
+                round_index=round_index,
+                proposed_issue_ids=list(issue_signature),
+                resolved_issue_ids=sorted(resolved_issue_ids),
+                exempted_issue_ids=sorted(exempted_issue_ids),
+                committed_issue_ids=committed_in_round,
+                stop_reason="completed bbox candidate selection batch",
+                stagnated=False,
+            )
+            global_rounds.append(round_summary)
+            self.pipeline._write_json(round_dir / "summary.json", round_summary.model_dump(mode="json"))
+            self.pipeline._write_json(
+                round_dir / "index.json",
+                {
+                    "schema_version": 3,
+                    "region_id": region["region_id"],
+                    "round_index": round_index,
+                    "scan_dir_name": "scan",
+                    "candidate_dir_name": "candidates",
+                    "proposed_issue_ids": list(issue_signature),
+                    "committed_issue_ids": committed_in_round,
+                    "selections": selections,
                 },
-                "batch_overflow": overflow_summary,
+            )
+            if not updates:
+                memory.stop_reason = "no bbox candidate selection could be applied"
+                break
+            round_index += 1
+
+        self.pipeline._write_json(region_dir / "recognition_bbox_adjustment.json", latest_result.model_dump(mode="json"))
+        self.pipeline._write_json(
+            region_dir / "recognition_bbox_summary.json",
+            {
+                "schema_version": 3,
+                "issues": [item.model_dump(mode="json") for item in latest_result.issues],
+                "changes_applied": latest_result.changes_applied,
+                "needs_adjustment": latest_result.needs_adjustment,
+                "stop_reason": memory.stop_reason,
+                "global_rounds": [item.model_dump(mode="json") for item in global_rounds],
+                "resolved_issue_ids": sorted(resolved_issue_ids),
+                "exempted_issue_ids": sorted(exempted_issue_ids),
+            },
+        )
+        self.pipeline._write_json(
+            bbox_dir / "index.json",
+            {
+                "schema_version": 3,
+                "region_id": region["region_id"],
+                "grid_reference": "grid_reference.png",
+                "global_rounds": [item.model_dump(mode="json") for item in global_rounds],
+            },
+        )
+        self.pipeline._push_event(
+            "region-process",
+            f"Completed bbox supervisor loop for {region['region_id']}",
+            f"bbox loop finished after {len(global_rounds)} region round(s) with {len(latest_result.issues)} residual issue(s).",
+            payload={
+                "region_id": region["region_id"],
+                "issues": [item.model_dump(mode="json") for item in latest_result.issues],
+                "changes_applied": latest_result.changes_applied,
+                "stop_reason": memory.stop_reason,
             },
             status="running",
-            level="warning",
         )
+        self._persist_memory(region_dir / "recognition_bbox_supervisor_memory.json", memory)
+        return current_recognition, latest_result
+
+    def _persist_bbox_trace(self, path: Path, payload: dict) -> None:
+        self.pipeline._write_json(path, payload)
 
     @staticmethod
     def _candidate_changed(current_payload: list[dict], candidate_payload: list[dict]) -> bool:
@@ -258,7 +846,6 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
         while True:
             overlay_path = self.pipeline.root_intermediate_dir / f"layout_bbox_overlay_iter_{iteration}.png"
             self._render_layout_overlay(copied_input_path, current_regions, overlay_path)
-            retry_state = self.pipeline._retry_state(retry_task)
             result, raw = self.worker.run_layout(
                 copied_input_path=copied_input_path,
                 overlay_path=overlay_path,
@@ -275,7 +862,6 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                     if self.use_supervisor_memory
                     else None
                 ),
-                retry_state=retry_state,
             )
             result = self._sanitize_result(result)
             latest_result = result
@@ -324,7 +910,6 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                 height=height,
                 current_regions=current_regions,
                 candidate_regions=candidate_regions,
-                retry_state=self.pipeline._retry_state(retry_task),
                 candidate_changed=candidate_changed,
             )
             memory.decision_notes.append(
@@ -382,187 +967,13 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
         recognition: RegionRecognitionResult,
         region_dir: Path,
     ) -> tuple[RegionRecognitionResult, BboxAdjustmentResult]:
-        scope_key = f"recognition:{region['region_id']}"
-        memory = self._memory_for(scope_key, "recognition")
-        retry_task = f"bbox:region:{region['region_id']}:repair"
-        current_recognition = recognition
-        latest_result = BboxAdjustmentResult(scope="recognition", region_id=region["region_id"], overview="", issues=[], needs_adjustment=False)
-        iteration = 0
-        while True:
-            overlay_path = region_dir / f"recognition_bbox_overlay_iter_{iteration}.png"
-            self._render_recognition_overlay(crop_path, current_recognition, overlay_path)
-            retry_state = self.pipeline._retry_state(retry_task)
-            current_objects = [
-                {
-                    "object_id": obj.object_id,
-                    "description": obj.description,
-                    "generation_focus": obj.generation_focus,
-                    "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
-                }
-                for obj in current_recognition.recognized_objects
-            ]
-            current_validation_feedback = self._collect_recognition_validation_feedback(
-                crop_path=crop_path,
-                recognition=current_recognition,
-            )
-            result, raw = self.worker.run_recognition(
-                crop_path=crop_path,
-                overlay_path=overlay_path,
-                region=region,
-                recognized_objects=current_objects,
-                validation_feedback=current_validation_feedback,
-                memory_summary=(
-                    {
-                        "iteration": memory.iteration,
-                        "attempted_adjustment_types": memory.attempted_adjustment_types[-4:],
-                        "accepted_changes": memory.accepted_changes[-4:],
-                        "rejected_changes": memory.rejected_changes[-4:],
-                    }
-                    if self.use_supervisor_memory
-                    else None
-                ),
-                retry_state=retry_state,
-            )
-            result = self._sanitize_result(result)
-            raw_payload = None
-            try:
-                raw_payload = json.loads(raw)
-            except Exception:
-                raw_payload = None
-            overflow_summary = summarize_bbox_batch_overflow(
-                raw_payload=raw_payload,
-                target_id_limit=6,
-                object_update_limit=12,
-                changes_limit=4,
-            )
-            latest_result = result
-            self.pipeline._write_text(region_dir / f"recognition_bbox_adjustment_iter_{iteration}_raw.txt", raw)
-            self._persist_bbox_trace(
-                region_dir / f"recognition_bbox_adjustment_iter_{iteration}.json",
-                {
-                    **result.model_dump(mode="json"),
-                    "batch_overflow": overflow_summary,
-                },
-            )
-            if overflow_summary.get("has_overflow"):
-                self._warn_bbox_batch_overflow(
-                    region_id=region["region_id"],
-                    iteration=iteration,
-                    overflow_summary=overflow_summary,
-                )
-            memory.iteration += 1
-            memory.attempted_adjustment_types.append(result.adjustment_type)
-            memory.issue_history.extend(
-                [
-                    SupervisorIssueMemory(
-                        issue_id=f"bbox:{region['region_id']}:{issue.target_id}:{issue.criterion}",
-                        scope="object",
-                        target_id=issue.target_id,
-                        criterion=issue.criterion,
-                        reason=issue.reason,
-                        status="unresolved",
-                        source_iteration=str(iteration),
-                    )
-                    for issue in result.issues
-                ]
-            )
-            candidate_recognition = self._apply_recognition_updates(
-                recognition=current_recognition,
-                updates=result.adjusted_object_bboxes if result.needs_adjustment else [],
-            )
-            candidate_objects = [
-                {
-                    "object_id": obj.object_id,
-                    "description": obj.description,
-                    "generation_focus": obj.generation_focus,
-                    "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
-                }
-                for obj in candidate_recognition.recognized_objects
-            ]
-            candidate_changed = self._candidate_changed(current_objects, candidate_objects)
-            candidate_overlay_path = region_dir / f"recognition_bbox_candidate_overlay_iter_{iteration}.png"
-            self._render_recognition_overlay(crop_path, candidate_recognition, candidate_overlay_path)
-            candidate_validation_feedback = self._collect_recognition_validation_feedback(
-                crop_path=crop_path,
-                recognition=candidate_recognition,
-                target_ids={item for item in result.target_ids if item} or None,
-            )
-            decision = self.policy.evaluate(
-                scope="recognition",
-                proposal=result,
-                memory=memory,
-                retry_exhausted=self.pipeline._retry_exhausted(retry_task),
-                iteration=str(iteration),
-                crop_path=crop_path,
-                current_overlay_path=overlay_path,
-                candidate_overlay_path=candidate_overlay_path,
-                region=region,
-                current_objects=current_objects,
-                candidate_objects=candidate_objects,
-                validation_feedback=candidate_validation_feedback,
-                retry_state=self.pipeline._retry_state(retry_task),
-                candidate_changed=candidate_changed,
-                region_dir=region_dir,
-            )
-            memory.decision_notes.append(
-                self._decision(
-                    iteration=str(iteration),
-                    actor="bbox-policy",
-                    action=(
-                        "recognition-continue"
-                        if decision.continue_refinement
-                        else ("recognition-accept" if decision.accept_current_result else "recognition-stop")
-                    ),
-                    rationale=decision.final_reason,
-                    related_issues=[item.issue_id for item in memory.issue_history[-4:]],
-                )
-            )
-            candidate_review_result = self._decision_review_as_result(base_result=result, policy_review=decision.review)
-            if decision.accept_current_result and candidate_changed:
-                current_recognition = candidate_recognition
-                latest_result = candidate_review_result
-                memory.accepted_changes.extend(result.changes_applied[:2])
-            elif decision.accept_current_result:
-                latest_result = candidate_review_result
-            elif result.changes_applied:
-                memory.rejected_changes.extend(result.changes_applied[:2])
-            if decision.continue_refinement:
-                if self.pipeline._begin_retry(retry_task):
-                    iteration += 1
-                    continue
-                memory.stop_reason = "bbox retry budget exhausted after policy requested continuation"
-                break
-            memory.stop_reason = decision.final_reason or (
-                "bbox policy accepted current state" if decision.accept_current_result else "bbox policy stopped further retries"
-            )
-            break
-        self.pipeline._write_json(region_dir / "recognition_bbox_adjustment.json", latest_result.model_dump(mode="json"))
-        self.pipeline._write_json(
-            region_dir / "recognition_bbox_summary.json",
-            {
-                "issues": [item.model_dump(mode="json") for item in latest_result.issues],
-                "changes_applied": latest_result.changes_applied,
-                "needs_adjustment": latest_result.needs_adjustment,
-                "stop_reason": memory.stop_reason,
-                "policy_action": memory.decision_notes[-1].action if memory.decision_notes else "",
-                "validation_feedback": candidate_validation_feedback if 'candidate_validation_feedback' in locals() else [],
-                "batch_overflow": overflow_summary if 'overflow_summary' in locals() else {"has_overflow": False},
-            },
+        return self._review_recognition_v2(
+            crop_path=crop_path,
+            region=region,
+            recognition=recognition,
+            region_dir=region_dir,
         )
-        self.pipeline._push_event(
-            "region-process",
-            f"Completed bbox supervisor loop for {region['region_id']}",
-            f"bbox loop finished after {memory.iteration} iteration(s) with {len(latest_result.issues)} residual issue(s).",
-            payload={
-                "region_id": region["region_id"],
-                "issues": [item.model_dump(mode="json") for item in latest_result.issues],
-                "changes_applied": latest_result.changes_applied,
-                "stop_reason": memory.stop_reason,
-            },
-            status="running",
-        )
-        self._persist_memory(region_dir / "recognition_bbox_supervisor_memory.json", memory)
-        return current_recognition, latest_result
+
 
 
 class LayoutPlanningSupervisorAgent(BaseWorkflowAgent):
@@ -718,6 +1129,7 @@ class ObjectRepairSupervisorAgent(BaseWorkflowAgent):
                 object_id=obj.object_id,
                 object_type=obj.object_type,
                 description=obj.description,
+                included_elements=obj.included_elements,
                 generation_focus=obj.generation_focus,
                 region_id=region["region_id"],
                 bbox=obj.bbox.model_dump(mode="json") if obj.bbox else None,
@@ -1069,18 +1481,7 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
         crop_path: Path,
         recognition: RegionRecognitionResult,
     ) -> list[dict]:
-        feedback_items = []
-        for obj in recognition.recognized_objects:
-            if obj.bbox is None:
-                continue
-            feedback_items.append(
-                validate_crop_local_bbox(
-                    crop_path=crop_path,
-                    target_id=obj.object_id,
-                    bbox=obj.bbox.model_dump(mode="json"),
-                )
-            )
-        return build_bbox_feedback_payload(feedback_items)
+        return []
 
     def _emit_region_semantic_stage(
         self,
@@ -1178,9 +1579,19 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 region_dir / "recognition_grouping.json",
                 grouping_summary.to_payload(),
             )
+        existing_bbox_summary = {}
+        bbox_summary_path = region_dir / "recognition_bbox_summary.json"
+        if bbox_summary_path.is_file():
+            try:
+                loaded_summary = json.loads(bbox_summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                loaded_summary = {}
+            if isinstance(loaded_summary, dict):
+                existing_bbox_summary = loaded_summary
         self.pipeline._write_json(
-            region_dir / "recognition_bbox_summary.json",
+            bbox_summary_path,
             {
+                **existing_bbox_summary,
                 "issues": [item.model_dump(mode="json") for item in bbox_result.issues],
                 "changes_applied": bbox_result.changes_applied,
                 "needs_adjustment": bbox_result.needs_adjustment,
@@ -1594,3 +2005,4 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
             }
         )
         return merged_svg, final_review, final_review_raw
+

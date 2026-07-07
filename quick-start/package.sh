@@ -42,11 +42,18 @@ echo "Output root:  ${OUTPUT_ROOT}"
 echo "Package name: ${PACKAGE_NAME}"
 
 copy_path "${PROJECT_ROOT}/src" "${STAGE_DIR}/src"
+copy_path "${PROJECT_ROOT}/desktop" "${STAGE_DIR}/desktop"
 copy_path "${PROJECT_ROOT}/quick-start" "${STAGE_DIR}/quick-start"
 copy_path "${PROJECT_ROOT}/pyproject.toml" "${STAGE_DIR}/pyproject.toml"
 copy_path "${PROJECT_ROOT}/README.md" "${STAGE_DIR}/README.md"
+copy_path "${PROJECT_ROOT}/README.developer.md" "${STAGE_DIR}/README.developer.md"
+copy_path "${PROJECT_ROOT}/docs.development.md" "${STAGE_DIR}/docs.development.md"
+copy_path "${PROJECT_ROOT}/docs.installer.md" "${STAGE_DIR}/docs.installer.md"
 copy_path "${PROJECT_ROOT}/.env.example" "${STAGE_DIR}/.env.example"
 copy_path "${PROJECT_ROOT}/environment.yml" "${STAGE_DIR}/environment.yml"
+copy_path "${PROJECT_ROOT}/start-dev.ps1" "${STAGE_DIR}/start-dev.ps1"
+copy_path "${PROJECT_ROOT}/start-dev.bat" "${STAGE_DIR}/start-dev.bat"
+copy_path "${PROJECT_ROOT}/start-dev.sh" "${STAGE_DIR}/start-dev.sh"
 copy_path "${PROJECT_ROOT}/start-service.ps1" "${STAGE_DIR}/start-service.ps1"
 copy_path "${PROJECT_ROOT}/start-service.bat" "${STAGE_DIR}/start-service.bat"
 
@@ -81,14 +88,18 @@ Included runtime overrides: ${INCLUDE_RUNTIME_OVERRIDES}
 
 Quick start:
   Windows:
+    powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
     cd quick-start
     powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
     powershell -ExecutionPolicy Bypass -File .\start-api.ps1
+    powershell -ExecutionPolicy Bypass -File ..\desktop\start-desktop.ps1
   Linux/macOS:
+    ./start-dev.sh
     cd quick-start
     chmod +x bootstrap.sh start-api.sh
     ./bootstrap.sh
     ./start-api.sh
+    ../desktop/start-desktop.sh
 EOF
 
 tar -czf "${ARCHIVE_PATH}" -C "${OUTPUT_ROOT}" "${PACKAGE_NAME}"

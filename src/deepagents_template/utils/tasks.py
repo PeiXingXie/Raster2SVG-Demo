@@ -36,6 +36,7 @@ def create_object_task(
     object_type: str,
     description: str,
     *,
+    included_elements: list[str] | None = None,
     generation_focus: list[str] | None = None,
     region_id: str = "",
     bbox: dict | None = None,
@@ -48,6 +49,7 @@ def create_object_task(
         object_id=object_id,
         object_type=object_type,
         description=description,
+        included_elements=included_elements or [],
         generation_focus=generation_focus or [],
         bbox=bbox,
     )

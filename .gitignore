@@ -1,6 +1,11 @@
 .env
+.runtime_startup.env
+.bootstrap_backend_state.env
+.dev_session.json
+.dev_desktop.pid
 .venv/
 .venv_test/
+.venv_package/
 __pycache__/
 *.pyc
 *.pyo
@@ -16,6 +21,11 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+node_modules/
+desktop/node_modules/
+desktop/dist/
+desktop/out/
 
 .frontend_runtime_overrides.json
 

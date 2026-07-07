@@ -5,17 +5,15 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
-
-from deepagents_template.agent import build_agent
 from deepagents_template.memory import ThreadStore
 from deepagents_template.schemas import ApprovalRequest
 
 
 @lru_cache(maxsize=1)
-def get_checkpointer() -> MemorySaver:
+def get_checkpointer() -> Any:
     """Shared in-memory checkpointer for short-term agent memory."""
+
+    from langgraph.checkpoint.memory import MemorySaver
 
     return MemorySaver()
 
@@ -31,6 +29,8 @@ def get_thread_store() -> ThreadStore:
 def get_agent():
     """Build a singleton agent bound to the shared checkpointer."""
 
+    from deepagents_template.agent import build_agent
+
     return build_agent(checkpointer=get_checkpointer())
 
 
@@ -40,8 +40,10 @@ def build_thread_config(thread_id: str) -> dict[str, dict[str, str]]:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def approval_decision_to_command(decision: str, comment: str | None) -> Command:
+def approval_decision_to_command(decision: str, comment: str | None) -> Any:
     """Convert an approval decision into a LangGraph resume command."""
+
+    from langgraph.types import Command
 
     payload = {"decision": decision}
     if comment:

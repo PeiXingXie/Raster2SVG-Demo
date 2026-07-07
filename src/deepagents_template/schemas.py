@@ -71,6 +71,14 @@ OBJECT_TYPE_ALIASES = {
 }
 
 OBJECT_TYPES = {"background", "icon", "text", "container", "connector", "diagram", "fig"}
+BBOX_ISSUE_CODES = (
+    "target_not_contained",
+    "target_clipped",
+    "excessive_padding",
+    "off_center",
+    "invalid_bbox",
+)
+BBOX_ISSUE_EDGES = ("left", "top", "right", "bottom")
 CHECKLIST_SCOPE_ALIASES = {
     "common": "common",
     "global": "common",
@@ -115,6 +123,106 @@ def _normalize_object_type(value: str) -> str | None:
     if any(token in normalized for token in ("fig", "figure", "image", "picture", "photo", "barcode", "qr")):
         return "fig"
     return None
+
+
+def _normalize_bbox_issue_edges(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [
+            item.strip()
+            for item in value.replace("/", ",").replace("|", ",").replace(";", ",").split(",")
+        ]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raw_items = [str(value).strip()]
+    expanded: list[str] = []
+    for item in raw_items:
+        token = item.lower().replace("-", "_").replace(" ", "_")
+        if token in BBOX_ISSUE_EDGES:
+            expanded.append(token)
+    ordered: list[str] = []
+    for edge in BBOX_ISSUE_EDGES:
+        if edge in expanded and edge not in ordered:
+            ordered.append(edge)
+    return ordered
+
+
+def _normalize_bbox_issue_code(value: object, *, criterion: str = "", reason: str = "") -> str:
+    text = " ".join(
+        part
+        for part in [
+            str(value or ""),
+            criterion,
+            reason,
+        ]
+        if part
+    ).strip().lower()
+    token = (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
+    token = "_".join(part for part in token.split("_") if part)
+    if token in BBOX_ISSUE_CODES:
+        return token
+
+    haystack = text.replace("-", "_")
+    if any(word in haystack for word in ("invalid", "malformed", "missing_bbox", "bbox_missing", "no_bbox")):
+        return "invalid_bbox"
+    if any(word in haystack for word in ("off_center", "offcenter", "miscenter", "not_centered", "biased")):
+        return "off_center"
+    if any(
+        word in haystack
+        for word in (
+            "padding",
+            "overreach",
+            "over_reach",
+            "oversized",
+            "too_large",
+            "too big",
+            "includes_unrelated",
+            "unrelated content",
+            "spills",
+            "spill",
+        )
+    ):
+        return "excessive_padding"
+    if any(
+        word in haystack
+        for word in (
+            "not_contained",
+            "undercovered",
+            "under_covered",
+            "outside",
+            "missing_content",
+            "omitted",
+            "falls outside",
+            "leaves",
+        )
+    ):
+        return "target_not_contained"
+    if any(
+        word in haystack
+        for word in (
+            "clip",
+            "clipped",
+            "cut",
+            "truncat",
+            "intersect",
+            "touch",
+            "pressed",
+            "too_tight",
+            "tight",
+            "edge",
+        )
+    ):
+        return "target_clipped"
+    return "target_clipped"
 
 
 class ChecklistItem(BaseModel):
@@ -201,7 +309,13 @@ class ObjectCandidate(BaseModel):
     object_id: str
     object_type: Literal["background", "icon", "text", "container", "connector", "diagram", "fig"]
     description: str
+    included_elements: list[str] = Field(
+        default_factory=list,
+        description="Concrete visible sub-elements semantically owned by this object.",
+    )
     generation_focus: list[str] = Field(default_factory=list, description="Short structured preservation goals for generation.")
+    relative_position: str = Field(default="", description="Crop-local semantic position hint for later bbox localization.")
+    extent_hint: str = Field(default="", description="Short hint describing what the later bbox should include or avoid.")
     bbox: RegionBoundingBox | None = Field(
         default=None,
         description="Optional crop-local bounding box for this object inside the region crop.",
@@ -229,10 +343,22 @@ class ObjectCandidate(BaseModel):
                 data["generation_focus"] = [generation_focus]
             elif not isinstance(generation_focus, list):
                 data["generation_focus"] = []
+            included_elements = data.get("included_elements")
+            if isinstance(included_elements, str):
+                data["included_elements"] = [included_elements]
+            elif not isinstance(included_elements, list):
+                data["included_elements"] = []
             if not data.get("generation_focus"):
                 if parts:
                     data["generation_focus"] = parts
         return data
+
+    @field_validator("relative_position", "extent_hint", mode="before")
+    @classmethod
+    def normalize_optional_hint(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
 
 
 class RegionTask(BaseModel):
@@ -278,6 +404,7 @@ class RegionCheckItem(BaseModel):
 
     criterion: str
     reason: str
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
 
     @model_validator(mode="before")
     @classmethod
@@ -292,6 +419,7 @@ class RegionReviewIssue(BaseModel):
 
     criterion: str
     reason: str
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
 
     @model_validator(mode="before")
     @classmethod
@@ -412,9 +540,22 @@ class BboxQualityIssue(BaseModel):
     """A high-level bbox quality issue focused on position or size."""
 
     target_id: str
+    issue_code: str = Field(default="")
+    canonical_issue_id: str = Field(default="")
+    edges: list[Literal["left", "top", "right", "bottom"]] = Field(default_factory=list)
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
+
+    @field_validator("issue_code", mode="before")
+    @classmethod
+    def normalize_issue_code(cls, value: object) -> str:
+        return _normalize_bbox_issue_code(value)
+
+    @field_validator("edges", mode="before")
+    @classmethod
+    def normalize_edges(cls, value: object) -> list[str]:
+        return _normalize_bbox_issue_edges(value)
 
     @field_validator("criterion", "reason", mode="before")
     @classmethod
@@ -424,12 +565,195 @@ class BboxQualityIssue(BaseModel):
         text = " ".join(str(value).strip().split())
         return text
 
+    @model_validator(mode="before")
+    @classmethod
+    def populate_issue_identity(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if not normalized.get("target_id") and normalized.get("object_id"):
+            normalized["target_id"] = normalized.get("object_id")
+        if not normalized.get("issue_code") and normalized.get("issue_family"):
+            normalized["issue_code"] = normalized.get("issue_family")
+        target_id = str(normalized.get("target_id") or "").strip()
+        criterion = str(normalized.get("criterion") or "").strip().lower()
+        reason = str(normalized.get("reason") or "").strip().lower()
+        issue_code = _normalize_bbox_issue_code(
+            normalized.get("issue_code"),
+            criterion=criterion,
+            reason=reason,
+        )
+        edges = _normalize_bbox_issue_edges(normalized.get("edges"))
+        normalized["issue_code"] = issue_code
+        normalized["edges"] = edges
+        if target_id and issue_code:
+            suffix = f":{','.join(edges)}" if edges else ""
+            normalized["canonical_issue_id"] = f"{target_id}:{issue_code}{suffix}"
+        else:
+            normalized["canonical_issue_id"] = ""
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_identity_after_field_validators(self):
+        self.issue_code = _normalize_bbox_issue_code(
+            self.issue_code,
+            criterion=self.criterion,
+            reason=self.reason,
+        )
+        self.edges = _normalize_bbox_issue_edges(self.edges)
+        suffix = f":{','.join(self.edges)}" if self.edges else ""
+        self.canonical_issue_id = f"{self.target_id}:{self.issue_code}{suffix}" if self.target_id else ""
+        return self
+
 
 class BboxTargetBoxUpdate(BaseModel):
     """Minimal bbox-only update payload for one existing target."""
 
     target_id: str
     bbox: RegionBoundingBox
+
+
+class ObjectInitialBbox(BaseModel):
+    """Initial single generous bbox produced after semantic recognition."""
+
+    object_id: str
+    bbox: RegionBoundingBox
+    coverage_confidence: Literal["low", "medium", "high"] = Field(default="medium")
+    overlap_risk: Literal["low", "medium", "high"] = Field(default="medium")
+    rationale: str = Field(default="")
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def normalize_rationale(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+
+class ObjectInitialBboxResult(BaseModel):
+    """Batch initial bbox output for all objects in one region."""
+
+    region_id: str
+    object_bboxes: list[ObjectInitialBbox] = Field(default_factory=list)
+
+
+class ObjectBboxCandidate(BaseModel):
+    """One model-proposed bbox candidate for a target issue."""
+
+    candidate_id: Literal["compact", "balanced", "roomy"]
+    bbox: RegionBoundingBox
+    intent: str = Field(default="")
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def normalize_intent(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+
+class ObjectBboxCandidateSet(BaseModel):
+    """Compact/balanced/roomy candidates for one bbox issue."""
+
+    object_id: str
+    issue_code: str = Field(default="")
+    edges: list[Literal["left", "top", "right", "bottom"]] = Field(default_factory=list)
+    candidates: list[ObjectBboxCandidate] = Field(default_factory=list)
+
+    @field_validator("issue_code", mode="before")
+    @classmethod
+    def normalize_issue_code(cls, value: object) -> str:
+        return _normalize_bbox_issue_code(value)
+
+    @field_validator("edges", mode="before")
+    @classmethod
+    def normalize_edges(cls, value: object) -> list[str]:
+        return _normalize_bbox_issue_edges(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_fields(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if not normalized.get("object_id") and normalized.get("target_id"):
+            normalized["object_id"] = normalized.get("target_id")
+        if not normalized.get("issue_code") and normalized.get("issue_family"):
+            normalized["issue_code"] = normalized.get("issue_family")
+        return normalized
+
+    @model_validator(mode="after")
+    def keep_one_candidate_per_id(self):
+        seen: set[str] = set()
+        deduped: list[ObjectBboxCandidate] = []
+        for candidate in self.candidates:
+            if candidate.candidate_id in seen:
+                continue
+            seen.add(candidate.candidate_id)
+            deduped.append(candidate)
+        self.candidates = deduped
+        return self
+
+
+class ObjectBboxCandidateGenerationResult(BaseModel):
+    """Batch candidate generation output for selected bbox issues."""
+
+    region_id: str
+    candidate_sets: list[ObjectBboxCandidateSet] = Field(default_factory=list)
+
+
+class ObjectBboxResidualIssue(BaseModel):
+    """Residual bbox issue after selecting the best candidate."""
+
+    issue_code: str = Field(default="")
+    edges: list[Literal["left", "top", "right", "bottom"]] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
+    reason: str = Field(default="")
+
+    @field_validator("issue_code", mode="before")
+    @classmethod
+    def normalize_issue_code(cls, value: object) -> str:
+        return _normalize_bbox_issue_code(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_fields(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if not normalized.get("issue_code") and normalized.get("issue_family"):
+            normalized["issue_code"] = normalized.get("issue_family")
+        return normalized
+
+    @field_validator("edges", mode="before")
+    @classmethod
+    def normalize_edges(cls, value: object) -> list[str]:
+        return _normalize_bbox_issue_edges(value)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def normalize_reason(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+
+class ObjectBboxCandidateSelectionResult(BaseModel):
+    """Object-level policy choice among bbox candidates."""
+
+    object_id: str
+    selected_candidate_id: Literal["compact", "balanced", "roomy"]
+    selected_bbox: RegionBoundingBox
+    issue_resolved: bool = Field(default=False)
+    residual_issue: ObjectBboxResidualIssue | None = Field(default=None)
+    selection_rationale: str = Field(default="")
+
+    @field_validator("selection_rationale", mode="before")
+    @classmethod
+    def normalize_selection_rationale(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
 
 
 class BboxAdjustmentResult(BaseModel):
@@ -558,6 +882,32 @@ class BboxAdjustmentResult(BaseModel):
         return self
 
 
+class BboxIssueThreadSummary(BaseModel):
+    """Lifecycle summary for one independently refined bbox issue."""
+
+    canonical_issue_id: str
+    target_id: str
+    issue_code: str = Field(default="")
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
+    status: Literal["resolved", "acceptable", "progressive", "failed", "skipped"] = Field(default="failed")
+    stop_reason: str = Field(default="")
+    iterations: int = Field(default=0, ge=0)
+    committed: bool = Field(default=False)
+    stagnation_count: int = Field(default=0, ge=0)
+
+
+class BboxGlobalRoundSummary(BaseModel):
+    """Summary for one recognition bbox global scan round."""
+
+    round_index: int = Field(default=0, ge=0)
+    proposed_issue_ids: list[str] = Field(default_factory=list)
+    resolved_issue_ids: list[str] = Field(default_factory=list)
+    exempted_issue_ids: list[str] = Field(default_factory=list)
+    committed_issue_ids: list[str] = Field(default_factory=list)
+    stop_reason: str = Field(default="")
+    stagnated: bool = Field(default=False)
+
+
 class BboxCandidateReview(BaseModel):
     """Policy-stage review of one bbox candidate state."""
 
@@ -637,6 +987,7 @@ class RegionObjectIssue(BaseModel):
     object_id: str
     criterion: str
     reason: str
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
 
     @model_validator(mode="before")
     @classmethod
@@ -1123,6 +1474,24 @@ class AgentRequest(BaseModel):
             "Each active region reserves one worker; any leftover workers may be borrowed for object-level parallelism."
         ),
     )
+    bbox_issue_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        le=8,
+        description="Maximum number of independent bbox issue refine threads that may run concurrently inside one region.",
+    )
+    bbox_issue_stagnation_rounds: int | None = Field(
+        default=None,
+        ge=1,
+        le=8,
+        description="Early-stop threshold for one bbox issue thread when improvement remains below the local stagnation threshold.",
+    )
+    bbox_global_stagnation_rounds: int | None = Field(
+        default=None,
+        ge=1,
+        le=8,
+        description="Early-stop threshold for recognition bbox global scan rounds when the issue set keeps repeating with low gain.",
+    )
     workflow_mode: Literal["initial_only", "region", "region_object"] | None = Field(
         default=None,
         description=(
@@ -1171,6 +1540,26 @@ class AgentRequest(BaseModel):
     strategy_enabled: bool | None = Field(
         default=None,
         description="Enable optional strategy hints inside combined policy-model decisions.",
+    )
+    recognition_bbox_refine_mode: Literal["llm", "sam", "hybrid"] | None = Field(
+        default=None,
+        description="Select how issue-level object bbox refinement runs after region recognition.",
+    )
+    sam_provider_mode: Literal["local", "remote"] | None = Field(
+        default=None,
+        description="Choose whether SAM-backed refinement should use a local runtime or a remote service.",
+    )
+    sam_remote_url: str | None = Field(
+        default=None,
+        description="Optional SAM remote service URL override for this run.",
+    )
+    sam_enabled: bool | None = Field(
+        default=None,
+        description="Whether SAM-backed bbox refinement is enabled for this run.",
+    )
+    sam_fallback_to_llm: bool | None = Field(
+        default=None,
+        description="Whether SAM-backed refinement should fall back to the existing LLM refine path.",
     )
     thread_id: str | None = Field(
         default=None,
@@ -1302,6 +1691,7 @@ class ExecutionRun(BaseModel):
     failure_diagnostic: FailureDiagnostic | None = Field(default=None)
     project_name: str = Field(description="Project label associated with this run.")
     artifact_dir: str | None = Field(default=None, description="Filesystem directory for run artifacts.")
+    artifact_revision: str | None = Field(default=None)
     worker_statuses: list[WorkerStatus] = Field(default_factory=list)
     events: list[ExecutionEvent] = Field(default_factory=list)
 
@@ -1370,6 +1760,9 @@ class FrontendDefaultsResponse(BaseModel):
     max_retries: int = Field(default=0)
     region_processing_mode: str = Field(default="serial")
     region_concurrency: int = Field(default=1)
+    bbox_issue_concurrency: int = Field(default=1)
+    bbox_issue_stagnation_rounds: int = Field(default=1)
+    bbox_global_stagnation_rounds: int = Field(default=1)
     workflow_mode: str = Field(default="region_object")
     agent_model: str = Field(default="")
     subagent_model: str = Field(default="")
@@ -1380,16 +1773,43 @@ class FrontendDefaultsResponse(BaseModel):
     supervisor_memory_enabled: bool = Field(default=False)
     supervisor_memory_persist_enabled: bool = Field(default=True)
     strategy_enabled: bool = Field(default=True)
+    recognition_bbox_refine_mode: str = Field(default="llm")
+    sam_provider_mode: str = Field(default="remote")
+    sam_remote_url: str | None = Field(default=None)
+    sam_enabled: bool = Field(default=False)
+    sam_fallback_to_llm: bool = Field(default=True)
+
+
+class FrontendHostInfoResponse(BaseModel):
+    """Small host-capability payload consumed by both web and desktop shells."""
+
+    host_mode: Literal["web", "desktop"] = Field(default="web")
+    desktop_shell_supported: bool = Field(default=True)
+    desktop_client_hint: str = Field(default="")
+    web_monitor_hint: str = Field(default="")
+    frontend_url: str | None = Field(default=None)
+    platform: str | None = Field(default=None)
+    can_open_local_file_picker: bool = Field(default=False)
 
 
 class RuntimeOverridesPayload(BaseModel):
     """Persisted global runtime overrides shared by invoke and manual adjustment."""
 
     api_key: str | None = Field(default=None)
+    api_key_configured: bool | None = Field(
+        default=None,
+        description="Read-only frontend hint indicating an API key override exists without echoing the secret.",
+    )
     base_url: str | None = Field(default=None)
     api_provider: str | None = Field(default=None)
     api_format: str | None = Field(default=None)
     max_retries: int | None = Field(default=None, ge=0)
+    workflow_mode: Literal["initial_only", "region", "region_object"] | None = Field(default=None)
+    region_processing_mode: Literal["serial", "parallel"] | None = Field(default=None)
+    region_concurrency: int | None = Field(default=None, ge=1, le=16)
+    bbox_issue_concurrency: int | None = Field(default=None, ge=1, le=8)
+    bbox_issue_stagnation_rounds: int | None = Field(default=None, ge=1, le=8)
+    bbox_global_stagnation_rounds: int | None = Field(default=None, ge=1, le=8)
     agent_model: str | None = Field(default=None)
     subagent_model: str | None = Field(default=None)
     agent_name: str | None = Field(default=None)
@@ -1399,6 +1819,26 @@ class RuntimeOverridesPayload(BaseModel):
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
     strategy_enabled: bool | None = Field(default=None)
+    recognition_bbox_refine_mode: Literal["llm", "sam", "hybrid"] | None = Field(default=None)
+    sam_provider_mode: Literal["local", "remote"] | None = Field(default=None)
+    sam_remote_url: str | None = Field(default=None)
+    sam_enabled: bool | None = Field(default=None)
+    sam_fallback_to_llm: bool | None = Field(default=None)
+
+
+class ObjectBboxRefinementResult(BaseModel):
+    """Normalized result returned by one issue-level object bbox refinement provider call."""
+
+    provider: str
+    mode: Literal["llm", "sam_local", "sam_remote"]
+    status: Literal["applied", "skipped", "unavailable", "failed"]
+    target_id: str
+    bbox: RegionBoundingBox | None = Field(default=None)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reason: str = Field(default="")
+    issue: BboxQualityIssue | None = Field(default=None)
+    raw_text: str = Field(default="")
+    artifacts: dict = Field(default_factory=dict)
 
 
 class BudgetSnapshot(BaseModel):
@@ -1539,6 +1979,9 @@ class ArtifactRequestSummary(BaseModel):
     max_retries: int | None = Field(default=None)
     region_processing_mode: str | None = Field(default=None)
     region_concurrency: int | None = Field(default=None)
+    bbox_issue_concurrency: int | None = Field(default=None)
+    bbox_issue_stagnation_rounds: int | None = Field(default=None)
+    bbox_global_stagnation_rounds: int | None = Field(default=None)
     workflow_mode: str | None = Field(default=None)
     project_name: str | None = Field(default=None)
     agent_model: str | None = Field(default=None)
@@ -1550,6 +1993,11 @@ class ArtifactRequestSummary(BaseModel):
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
     strategy_enabled: bool | None = Field(default=None)
+    recognition_bbox_refine_mode: str | None = Field(default=None)
+    sam_provider_mode: str | None = Field(default=None)
+    sam_remote_url: str | None = Field(default=None)
+    sam_enabled: bool | None = Field(default=None)
+    sam_fallback_to_llm: bool | None = Field(default=None)
 
 
 class ArtifactBox(BaseModel):
@@ -1617,6 +2065,8 @@ class ArtifactManualAdjustmentVersion(BaseModel):
     base_title: str | None = Field(default=None)
     base_preview_url: str | None = Field(default=None)
     base_download_url: str | None = Field(default=None)
+    workflow_trace: "WorkflowTrace" = Field(default_factory=lambda: WorkflowTrace())
+    adjustment_error: dict | None = Field(default=None)
 
 
 class WorkflowTraceNode(BaseModel):
@@ -1655,6 +2105,8 @@ class WorkflowTraceSummary(BaseModel):
     direct_accept_regions: int = Field(default=0, ge=0)
     total_duration_ms: int | None = Field(default=None)
     loop_iterations_total: int = Field(default=0, ge=0)
+    budget_used: int | None = Field(default=None, ge=0)
+    budget_limit: int | None = Field(default=None, ge=0)
 
 
 class WorkflowTrace(BaseModel):
@@ -1678,7 +2130,9 @@ class ArtifactSnapshot(BaseModel):
     current_stage: str | None = Field(default=None)
     failure_stage: str | None = Field(default=None)
     artifact_dir: str | None = Field(default=None)
+    artifact_revision: str | None = Field(default=None)
     request: ArtifactRequestSummary | None = Field(default=None)
+    messages: list[ChatMessage] = Field(default_factory=list)
     overview: dict = Field(default_factory=dict)
     canvas_width: int | None = Field(default=None)
     canvas_height: int | None = Field(default=None)

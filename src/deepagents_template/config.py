@@ -1,6 +1,7 @@
 """Overview: Central environment-backed settings and runtime option resolution."""
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,17 +11,34 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-load_dotenv()
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_OVERRIDE_PATH = PROJECT_ROOT / ".frontend_runtime_overrides.json"
+
+
+def _resolve_app_config_dir() -> Path:
+    configured_dir = os.getenv("APP_CONFIG_DIR", "").strip()
+    if configured_dir:
+        return Path(configured_dir).expanduser()
+    return PROJECT_ROOT
+
+
+APP_CONFIG_DIR = _resolve_app_config_dir()
+RUNTIME_OVERRIDE_PATH = APP_CONFIG_DIR / ".frontend_runtime_overrides.json"
+
+load_dotenv(PROJECT_ROOT / ".env")
+if APP_CONFIG_DIR != PROJECT_ROOT:
+    load_dotenv(APP_CONFIG_DIR / ".env", override=True)
 RUNTIME_OVERRIDE_FIELDS = {
     "api_key",
     "base_url",
     "api_provider",
     "api_format",
     "max_retries",
+    "workflow_mode",
+    "region_processing_mode",
+    "region_concurrency",
+    "bbox_issue_concurrency",
+    "bbox_issue_stagnation_rounds",
+    "bbox_global_stagnation_rounds",
     "agent_model",
     "subagent_model",
     "agent_name",
@@ -30,6 +48,11 @@ RUNTIME_OVERRIDE_FIELDS = {
     "supervisor_memory_enabled",
     "supervisor_memory_persist_enabled",
     "strategy_enabled",
+    "recognition_bbox_refine_mode",
+    "sam_provider_mode",
+    "sam_remote_url",
+    "sam_enabled",
+    "sam_fallback_to_llm",
 }
 
 
@@ -51,6 +74,7 @@ def save_runtime_overrides(overrides: dict) -> dict:
     """Persist normalized runtime overrides and return the stored payload."""
 
     normalized = {key: overrides[key] for key in RUNTIME_OVERRIDE_FIELDS if key in overrides}
+    RUNTIME_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_OVERRIDE_PATH.write_text(json.dumps(normalized, ensure_ascii=True, indent=2), encoding="utf-8")
     return normalized
 
@@ -58,7 +82,11 @@ def save_runtime_overrides(overrides: dict) -> dict:
 class Settings(BaseSettings):
     """Application settings loaded from the environment."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(APP_CONFIG_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     api_key: str = Field(
         default="",
@@ -90,8 +118,16 @@ class Settings(BaseSettings):
     supervisor_memory_enabled: bool = Field(default=False, alias="SUPERVISOR_MEMORY_ENABLED")
     supervisor_memory_persist_enabled: bool = Field(default=True, alias="SUPERVISOR_MEMORY_PERSIST_ENABLED")
     strategy_enabled: bool = Field(default=True, alias="STRATEGY_ENABLED")
+    recognition_bbox_refine_mode: str = Field(default="llm", alias="RECOGNITION_BBOX_REFINE_MODE")
+    sam_provider_mode: str = Field(default="remote", alias="SAM_PROVIDER_MODE")
+    sam_remote_url: str | None = Field(default=None, alias="SAM_REMOTE_URL")
+    sam_enabled: bool = Field(default=False, alias="SAM_ENABLED")
+    sam_fallback_to_llm: bool = Field(default=True, alias="SAM_FALLBACK_TO_LLM")
     default_region_processing_mode: str = Field(default="parallel", alias="REGION_PROCESSING_MODE")
     default_region_concurrency: int = Field(default=8, alias="REGION_CONCURRENCY")
+    default_bbox_issue_concurrency: int = Field(default=2, alias="BBOX_ISSUE_CONCURRENCY")
+    bbox_issue_stagnation_rounds: int = Field(default=3, ge=1, alias="BBOX_ISSUE_STAGNATION_ROUNDS")
+    bbox_global_stagnation_rounds: int = Field(default=2, ge=1, alias="BBOX_GLOBAL_STAGNATION_ROUNDS")
     default_workflow_mode: str = Field(default="region_object", alias="WORKFLOW_MODE")
 
     def _runtime_override(self, key: str):
@@ -175,7 +211,14 @@ class Settings(BaseSettings):
         return self.use_previous_response_id
 
     def resolved_region_processing_mode(self, override: str | None = None) -> str:
-        value = override.strip() if override and override.strip() else self.default_region_processing_mode
+        runtime_override = self._runtime_override("region_processing_mode")
+        value = (
+            override.strip()
+            if isinstance(override, str) and override.strip()
+            else runtime_override.strip()
+            if isinstance(runtime_override, str) and runtime_override.strip()
+            else self.default_region_processing_mode
+        )
         if value not in {"serial", "parallel"}:
             raise ValueError("REGION_PROCESSING_MODE must be either 'serial' or 'parallel'.")
         return value
@@ -188,16 +231,113 @@ class Settings(BaseSettings):
         mode = self.resolved_region_processing_mode(mode_override)
         if mode == "serial":
             return 1
-        value = concurrency_override if concurrency_override is not None else self.default_region_concurrency
+        runtime_override = self._runtime_override("region_concurrency")
+        value = (
+            concurrency_override
+            if concurrency_override is not None
+            else runtime_override
+            if runtime_override is not None
+            else self.default_region_concurrency
+        )
         return max(1, min(int(value), 16))
 
     def resolved_workflow_mode(self, override: str | None = None) -> str:
-        value = override.strip() if override and override.strip() else self.default_workflow_mode
+        runtime_override = self._runtime_override("workflow_mode")
+        value = (
+            override.strip()
+            if isinstance(override, str) and override.strip()
+            else runtime_override.strip()
+            if isinstance(runtime_override, str) and runtime_override.strip()
+            else self.default_workflow_mode
+        )
         if value not in {"initial_only", "region", "region_object"}:
             raise ValueError(
                 "WORKFLOW_MODE must be one of 'initial_only', 'region', or 'region_object'."
             )
         return value
+
+    def resolved_recognition_bbox_refine_mode(self, override: str | None = None) -> str:
+        runtime_override = self._runtime_override("recognition_bbox_refine_mode")
+        value = (
+            override.strip()
+            if isinstance(override, str) and override.strip()
+            else runtime_override.strip()
+            if isinstance(runtime_override, str) and runtime_override.strip()
+            else self.recognition_bbox_refine_mode
+        )
+        if value not in {"llm", "sam", "hybrid"}:
+            raise ValueError("RECOGNITION_BBOX_REFINE_MODE must be one of 'llm', 'sam', or 'hybrid'.")
+        return value
+
+    def resolved_sam_provider_mode(self, override: str | None = None) -> str:
+        runtime_override = self._runtime_override("sam_provider_mode")
+        value = (
+            override.strip()
+            if isinstance(override, str) and override.strip()
+            else runtime_override.strip()
+            if isinstance(runtime_override, str) and runtime_override.strip()
+            else self.sam_provider_mode
+        )
+        if value not in {"local", "remote"}:
+            raise ValueError("SAM_PROVIDER_MODE must be either 'local' or 'remote'.")
+        return value
+
+    def resolved_sam_remote_url(self, override: str | None = None) -> str | None:
+        runtime_override = self._runtime_override("sam_remote_url")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+        if isinstance(runtime_override, str) and runtime_override.strip():
+            return runtime_override.strip()
+        return self.sam_remote_url
+
+    def resolved_sam_enabled(self, override: bool | None = None) -> bool:
+        if override is not None:
+            return bool(override)
+        runtime_override = self._runtime_override("sam_enabled")
+        if runtime_override is not None:
+            return bool(runtime_override)
+        return self.sam_enabled
+
+    def resolved_sam_fallback_to_llm(self, override: bool | None = None) -> bool:
+        if override is not None:
+            return bool(override)
+        runtime_override = self._runtime_override("sam_fallback_to_llm")
+        if runtime_override is not None:
+            return bool(runtime_override)
+        return self.sam_fallback_to_llm
+
+    def resolved_bbox_issue_concurrency(self, override: int | None = None) -> int:
+        runtime_override = self._runtime_override("bbox_issue_concurrency")
+        value = (
+            override
+            if override is not None
+            else runtime_override
+            if runtime_override is not None
+            else self.default_bbox_issue_concurrency
+        )
+        return max(1, min(int(value), 8))
+
+    def resolved_bbox_issue_stagnation_rounds(self, override: int | None = None) -> int:
+        runtime_override = self._runtime_override("bbox_issue_stagnation_rounds")
+        value = (
+            override
+            if override is not None
+            else runtime_override
+            if runtime_override is not None
+            else self.bbox_issue_stagnation_rounds
+        )
+        return max(1, min(int(value), 8))
+
+    def resolved_bbox_global_stagnation_rounds(self, override: int | None = None) -> int:
+        runtime_override = self._runtime_override("bbox_global_stagnation_rounds")
+        value = (
+            override
+            if override is not None
+            else runtime_override
+            if runtime_override is not None
+            else self.bbox_global_stagnation_rounds
+        )
+        return max(1, min(int(value), 8))
 
 
     def resolved_max_retry(self, override: int | None = None) -> int:

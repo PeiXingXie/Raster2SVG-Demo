@@ -63,11 +63,18 @@ Write-Host "Output root:  $OutputRoot"
 Write-Host "Package name: $PackageName"
 
 Copy-OptionalPath (Join-Path $ProjectRoot "src") (Join-Path $StageDir "src")
+Copy-OptionalPath (Join-Path $ProjectRoot "desktop") (Join-Path $StageDir "desktop")
 Copy-OptionalPath (Join-Path $ProjectRoot "quick-start") (Join-Path $StageDir "quick-start")
 Copy-OptionalPath (Join-Path $ProjectRoot "pyproject.toml") (Join-Path $StageDir "pyproject.toml")
 Copy-OptionalPath (Join-Path $ProjectRoot "README.md") (Join-Path $StageDir "README.md")
+Copy-OptionalPath (Join-Path $ProjectRoot "README.developer.md") (Join-Path $StageDir "README.developer.md")
+Copy-OptionalPath (Join-Path $ProjectRoot "docs.development.md") (Join-Path $StageDir "docs.development.md")
+Copy-OptionalPath (Join-Path $ProjectRoot "docs.installer.md") (Join-Path $StageDir "docs.installer.md")
 Copy-OptionalPath (Join-Path $ProjectRoot ".env.example") (Join-Path $StageDir ".env.example")
 Copy-OptionalPath (Join-Path $ProjectRoot "environment.yml") (Join-Path $StageDir "environment.yml")
+Copy-OptionalPath (Join-Path $ProjectRoot "start-dev.ps1") (Join-Path $StageDir "start-dev.ps1")
+Copy-OptionalPath (Join-Path $ProjectRoot "start-dev.bat") (Join-Path $StageDir "start-dev.bat")
+Copy-OptionalPath (Join-Path $ProjectRoot "start-dev.sh") (Join-Path $StageDir "start-dev.sh")
 Copy-OptionalPath (Join-Path $ProjectRoot "start-service.ps1") (Join-Path $StageDir "start-service.ps1")
 Copy-OptionalPath (Join-Path $ProjectRoot "start-service.bat") (Join-Path $StageDir "start-service.bat")
 
@@ -102,15 +109,19 @@ Included artifacts: $($IncludeArtifacts.IsPresent)
 Included runtime overrides: $($IncludeRuntimeOverrides.IsPresent)
 
 Quick start on Windows:
+  powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
   cd quick-start
   powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
   powershell -ExecutionPolicy Bypass -File .\start-api.ps1
+  powershell -ExecutionPolicy Bypass -File ..\desktop\start-desktop.ps1
 
 Quick start on Linux/macOS:
+  ./start-dev.sh
   cd quick-start
   chmod +x bootstrap.sh start-api.sh
   ./bootstrap.sh
   ./start-api.sh
+  ../desktop/start-desktop.sh
 "@ | Set-Content -LiteralPath $InfoFile -Encoding UTF8
 
 Compress-Archive -LiteralPath $StageDir -DestinationPath $ArchivePath -CompressionLevel Optimal

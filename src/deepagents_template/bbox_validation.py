@@ -96,7 +96,7 @@ def validate_crop_local_bbox(
     target_id: str,
     bbox: dict | None,
     foreground_threshold: int = 235,
-    edge_ratio_threshold: float = 0.05,
+    edge_ratio_threshold: float = 0.22,
 ) -> BboxValidationFeedback:
     if not crop_path.is_file():
         return BboxValidationFeedback(
@@ -143,16 +143,19 @@ def validate_crop_local_bbox(
             failures.append(
                 BboxEdgeEvidence(
                     edge=edge,
-                    issue_type="edge_overlaps_foreground",
-                    detail=f"{edge} edge touches visible foreground pixels (ratio={ratio:.3f}).",
+                    issue_type="edge_intersects_foreground",
+                    detail=(
+                        f"{edge} edge intersects visible foreground pixels (ratio={ratio:.3f}). "
+                        "Review whether the intersected content belongs to the target object."
+                    ),
                 )
             )
 
     passed = not failures
     summary = (
-        "bbox edges stay clear of visible foreground"
+        "bbox edges do not intersect visible foreground"
         if passed
-        else "bbox edge evidence suggests overlap or clipping risk"
+        else "bbox edge evidence suggests visible foreground intersects the box boundary"
     )
     return BboxValidationFeedback(
         target_id=target_id,

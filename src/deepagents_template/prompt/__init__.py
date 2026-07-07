@@ -1,6 +1,9 @@
 """Overview: Aggregated exports for all multimodal prompt-construction helpers."""
 
 from deepagents_template.prompt.bbox import (
+    build_object_bbox_candidate_generation_prompts,
+    build_object_bbox_candidate_selection_prompts,
+    build_object_initial_bbox_prompts,
     build_layout_bbox_adjustment_prompts,
     build_layout_bbox_combined_policy_prompts,
     build_recognition_bbox_adjustment_prompts,
@@ -45,6 +48,9 @@ __all__ = [
     "build_manual_adjustment_review_prompts",
     "build_manual_adjustment_worker_mode_prompts",
     "build_object_combined_policy_prompts",
+    "build_object_bbox_candidate_generation_prompts",
+    "build_object_bbox_candidate_selection_prompts",
+    "build_object_initial_bbox_prompts",
     "build_object_review_prompts",
     "build_object_svg_generation_prompts",
     "build_recognition_bbox_adjustment_prompts",

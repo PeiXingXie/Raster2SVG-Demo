@@ -1,0 +1,71 @@
+{
+  "name": "raster-svg-desktop-client",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Raster to SVG Contributors",
+  "description": "Electron desktop shell for the shared Raster-to-SVG frontend.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.local.rastertosvg",
+    "productName": "Raster to SVG",
+    "artifactName": "${productName} Setup ${version}.${ext}",
+    "directories": {
+      "output": "../dist/installers"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "assets/icon.png",
+      "assets/icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Graphics"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "include": "build/installer.nsh",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "allowToChangeInstallationDirectory": true,
+      "createStartMenuShortcut": true,
+      "menuCategory": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

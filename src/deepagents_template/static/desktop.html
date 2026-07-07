@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Editable Graphics Workspace</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/desktop.css?v=desktop-history-layout-fit-1" />
+  </head>
+  <body class="desktop-body" data-desktop-page="start" data-ui-mode="simple">
+    <main id="app-shell" class="desktop-shell" data-ui-mode="simple">
+      <header class="desktop-titlebar">
+        <div class="desktop-brand">
+          <span class="desktop-brand-mark">E</span>
+          <div>
+            <h1>Editable Graphics Workspace</h1>
+            <p class="desktop-kicker">Turn static images into structured, editable SVG assets.</p>
+          </div>
+        </div>
+        <nav class="desktop-nav" aria-label="Desktop workspace">
+          <button class="desktop-nav-btn is-active" type="button" data-desktop-page-target="start">Start</button>
+          <button class="desktop-nav-btn" type="button" data-desktop-page-target="history">History</button>
+          <button class="desktop-nav-btn" type="button" data-desktop-page-target="workspace">Workspace</button>
+          <button class="desktop-nav-btn" type="button" data-desktop-page-target="settings">Settings</button>
+        </nav>
+        <div class="desktop-titlebar-actions"></div>
+      </header>
+
+      <aside class="desktop-case-rail">
+        <section class="desktop-rail-card">
+          <div class="card-header-row">
+            <p class="card-label">Current Project</p>
+            <span id="shell-mode-badge" class="status-pill queued">local workspace</span>
+          </div>
+          <div class="card-header-row">
+              <p class="card-label">Interface</p>
+            <span id="ui-mode-badge" class="status-pill queued">guided</span>
+          </div>
+          <p id="thread-id" class="thread-id">Not created yet</p>
+          <button id="new-thread" class="secondary-btn desktop-wide-btn" type="button">New Project</button>
+        </section>
+
+        <section id="desktop-case-library" class="desktop-rail-card recent-runs-sidebar-card">
+          <div class="desktop-library-header">
+            <div>
+              <p class="card-label">Project Library</p>
+              <h2>Saved Projects</h2>
+            </div>
+            <div class="desktop-library-tools">
+              <label class="desktop-history-search">
+                <span>Search</span>
+                <input id="desktop-history-search" type="search" placeholder="Search projects" />
+              </label>
+              <label class="desktop-history-sort">
+                <span>Sort</span>
+                <select id="desktop-history-sort">
+                  <option value="updated_desc">Recent</option>
+                  <option value="name_asc">Name</option>
+                  <option value="status_asc">Status</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="card-header-row desktop-library-filters">
+            <div class="desktop-history-tabs" role="tablist" aria-label="Filter history by status">
+              <button class="desktop-history-filter is-active" type="button" role="tab" aria-selected="true" data-history-status="all">All</button>
+              <button class="desktop-history-filter" type="button" role="tab" aria-selected="false" data-history-status="completed">Completed</button>
+              <button class="desktop-history-filter" type="button" role="tab" aria-selected="false" data-history-status="failed">Failed</button>
+              <button class="desktop-history-filter" type="button" role="tab" aria-selected="false" data-history-status="paused">Paused</button>
+            </div>
+            <button id="recent-runs-clear-selection" class="ghost-btn compact-btn hidden" type="button">Current Project</button>
+          </div>
+          <div id="recent-runs" class="recent-runs recent-runs-sidebar empty-state">No saved projects yet.</div>
+          <div id="desktop-history-pagination" class="desktop-history-pagination" aria-label="History pagination">
+            <button id="desktop-history-prev" class="ghost-btn compact-btn" type="button">Previous</button>
+            <span id="desktop-history-page-status" class="desktop-history-page-status">Page 1 / 1</span>
+            <button id="desktop-history-next" class="ghost-btn compact-btn" type="button">Next</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="desktop-main">
+        <section id="desktop-helper" class="desktop-helper">
+          <section class="guide-card guide-card-primary desktop-guide-card desktop-process-guide">
+            <div class="desktop-process-header">
+              <div>
+                <p class="card-label">Process Guide</p>
+                <h2 id="guide-title" class="guide-title">How it works</h2>
+                <p class="guide-body">Follow the four-step flow from source image to editable SVG asset.</p>
+              </div>
+            </div>
+            <div id="step-bar" class="desktop-process-tabs" role="tablist" aria-label="Task process guide">
+              <button class="desktop-process-tab is-active step-item" type="button" role="tab" aria-selected="true" data-step="upload" data-process-target="upload">
+                <span class="step-index">1</span>
+                <span>Upload</span>
+              </button>
+              <button class="desktop-process-tab step-item" type="button" role="tab" aria-selected="false" data-step="trace" data-process-target="trace">
+                <span class="step-index">2</span>
+                <span>Trace</span>
+              </button>
+              <button class="desktop-process-tab step-item" type="button" role="tab" aria-selected="false" data-step="manual" data-process-target="manual">
+                <span class="step-index">3</span>
+                <span>Refine</span>
+              </button>
+              <button class="desktop-process-tab step-item" type="button" role="tab" aria-selected="false" data-step="download" data-process-target="download">
+                <span class="step-index">4</span>
+                <span>Export</span>
+              </button>
+            </div>
+            <div class="desktop-process-stage" aria-live="polite">
+              <div class="desktop-process-visual" aria-hidden="true">
+                <img class="desktop-process-illustration is-active" data-process-panel="upload" src="/static/assets/process-guide/upload-start.png" alt="" />
+                <img class="desktop-process-illustration" data-process-panel="trace" src="/static/assets/process-guide/auto-trace.png" alt="" />
+                <img class="desktop-process-illustration" data-process-panel="manual" src="/static/assets/process-guide/manual-adjust.png" alt="" />
+                <img class="desktop-process-illustration" data-process-panel="download" src="/static/assets/process-guide/export-save.png" alt="" />
+              </div>
+              <div class="desktop-process-copy">
+                <p id="desktop-process-eyebrow" class="desktop-process-eyebrow">Step 1</p>
+                <h3 id="desktop-process-title">Upload</h3>
+                <p id="guide-body" class="guide-body">Add a source image and describe the target.</p>
+                <ul id="desktop-process-notes" class="desktop-process-notes">
+                  <li>Paste or choose an image.</li>
+                  <li>Pick a task preset.</li>
+                  <li>Start the conversion.</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="desktop-invocation-area" class="desktop-run-row">
+          <section id="invocation-section" class="conversation panel-card desktop-invocation-card">
+            <div class="section-header">
+              <div>
+                <h2>Start a Conversion</h2>
+                <p class="section-note">Choose a source image and describe the editable SVG you want.</p>
+              </div>
+            </div>
+
+            <form id="composer" class="composer form-stack">
+              <div class="simple-mode-intro">
+                <div class="simple-mode-intro-title">New SVG Conversion</div>
+                <p>Upload or paste an image, choose a task preset, then start the conversion.</p>
+              </div>
+
+              <div class="invocation-primary-grid">
+                <div
+                  id="upload-preview-panel"
+                  class="upload-preview-panel upload-preview-empty-state"
+                  role="button"
+                  tabindex="0"
+                  aria-label="Input thumbnail upload surface"
+                >
+                  <input id="upload-file-input" class="hidden-input" type="file" accept="image/*" />
+                  <div class="upload-preview-copy">
+                    <div class="upload-preview-heading">
+                      <span class="field-label">Source Image</span>
+                      <span id="upload-preview-meta" class="upload-preview-meta"></span>
+                    </div>
+                  </div>
+                  <div class="upload-preview-stage">
+                    <div id="upload-preview-empty" class="upload-preview-empty">
+                      Click to focus and paste with Ctrl+V, or choose a file below.
+                    </div>
+                    <img id="upload-preview-image" class="upload-preview-image hidden" alt="Uploaded input preview" />
+                  </div>
+                  <div class="upload-preview-actions">
+                    <button id="upload-file-button" class="secondary-btn" type="button">Choose Image</button>
+                    <span id="upload-status" class="dropzone-status"></span>
+                  </div>
+                </div>
+
+                <div class="field invocation-message-field" data-field-id="message-input">
+                  <span class="field-heading">
+                    <span class="field-label">Conversion Goal</span>
+                    <span id="effective-message-input" class="field-effective"></span>
+                  </span>
+                  <div id="message-preset-bar" class="message-preset-bar" role="group" aria-label="Task message presets">
+                    <button id="message-preset-default" class="message-preset-chip is-active" type="button" data-preset="default">Balanced</button>
+                    <button id="message-preset-icon-faithful" class="message-preset-chip" type="button" data-preset="iconFaithful">Faithful</button>
+                    <button id="message-preset-relaxed" class="message-preset-chip" type="button" data-preset="relaxed">Flexible</button>
+                  </div>
+                  <textarea id="message-input" rows="4" placeholder="Convert this image into SVG format"></textarea>
+                  <div class="invocation-message-actions">
+                    <button id="send-btn" class="primary-btn start-run-btn start-run-btn-inline" type="submit">Convert</button>
+                  </div>
+                </div>
+              </div>
+
+              <div id="start-settings-hint" class="start-settings-hint">
+                <div class="start-settings-copy">
+                  <strong id="start-settings-title">Default settings are ready.</strong>
+                  <span id="start-settings-body">Tune model, budget, or workflow if needed.</span>
+                </div>
+                <button class="ghost-btn compact-btn start-settings-link" type="button" data-desktop-page-target="settings">Adjust</button>
+              </div>
+
+              <details id="invocation-advanced-panel" class="advanced-panel invocation-advanced-panel" data-persist-key="invocation-advanced-panel">
+                <summary>Advanced Input Options</summary>
+                <p class="section-note">These settings apply only to this conversion.</p>
+                <div class="invocation-config-grid">
+                  <div class="invocation-config-card">
+                    <div class="compare-title">Input Setup</div>
+                    <div class="field-grid two-up invocation-path-grid">
+                      <label class="field" data-field-id="image-path">
+                        <span class="field-heading">
+                          <span class="field-label">Image Path</span>
+                          <span id="effective-image-path" class="field-effective"></span>
+                        </span>
+                        <input id="image-path" type="text" placeholder="For example: test\Flow2.png or an uploaded local path" />
+                      </label>
+                      <label class="field" data-field-id="project-name">
+                        <span class="field-heading">
+                          <span class="field-label">Project Name</span>
+                          <span id="effective-project-name" class="field-effective"></span>
+                        </span>
+                        <input id="project-name" type="text" placeholder="Optional artifact directory label" />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="invocation-config-card">
+                    <div class="compare-title">Workflow Controls</div>
+                    <div class="field-grid invocation-workflow-grid">
+                      <label class="field" data-field-id="workflow-mode">
+                        <span class="field-heading">
+                          <span class="field-label">Workflow Mode</span>
+                          <span id="effective-workflow-mode" class="field-effective"></span>
+                        </span>
+                        <select id="workflow-mode">
+                          <option value="">Use default</option>
+                          <option value="initial_only">initial_only</option>
+                          <option value="region">region</option>
+                          <option value="region_object">region_object</option>
+                        </select>
+                      </label>
+                      <label class="field" data-field-id="region-processing-mode">
+                        <span class="field-heading">
+                          <span class="field-label">Region Mode</span>
+                          <span id="effective-region-processing-mode" class="field-effective"></span>
+                        </span>
+                        <select id="region-processing-mode">
+                          <option value="">Use default</option>
+                          <option value="serial">serial</option>
+                          <option value="parallel">parallel</option>
+                        </select>
+                      </label>
+                      <label class="field" data-field-id="region-concurrency">
+                        <span class="field-heading">
+                          <span class="field-label">Region Concurrency</span>
+                          <span id="effective-region-concurrency" class="field-effective"></span>
+                        </span>
+                        <input id="region-concurrency" type="number" min="1" max="16" placeholder="1-16" />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <div id="approval-box" class="approval-box hidden">
+                <div class="approval-header">
+                  <div>
+                    <p class="approval-title">Waiting for Approval</p>
+                    <p id="approval-summary" class="approval-summary"></p>
+                  </div>
+                  <span class="approval-badge">Approval needed</span>
+                </div>
+                <details class="collapsible open-by-default">
+                  <summary>View approval payload</summary>
+                  <pre id="approval-payload" class="approval-payload"></pre>
+                </details>
+                <textarea id="approval-comment" rows="3" placeholder="Optional reviewer note or rejection reason"></textarea>
+                <div class="approval-actions">
+                  <button id="reject-btn" class="danger-btn" type="button">Reject</button>
+                  <button id="approve-btn" class="primary-btn" type="button">Approve and continue</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section id="desktop-stage-area" class="artifact-panel panel-card desktop-stage-card">
+          <div class="artifact-header">
+            <div>
+              <h3>Workspace Canvas</h3>
+              <p id="artifact-status" class="artifact-status">No artifact is available for this thread yet.</p>
+            </div>
+            <div class="artifact-header-actions">
+              <label class="resume-budget-field">
+                <span>Extra Budget</span>
+                <div class="budget-input-wrap">
+                  <input id="resume-extra-budget" type="number" min="0" value="30" placeholder="30" />
+                  <span class="budget-input-unit">calls</span>
+                </div>
+              </label>
+              <button id="resume-run" class="secondary-btn" type="button">Resume</button>
+              <button id="refresh-artifacts" class="ghost-btn" type="button">Refresh</button>
+              <button id="export-svg-button" class="primary-btn" type="button" disabled>Export SVG</button>
+              <span id="export-status" class="desktop-action-hint">Final SVG pending</span>
+              <button id="desktop-refine-toggle" class="primary-btn" type="button" aria-expanded="false">Refine</button>
+              <span id="refine-status" class="desktop-action-hint">Available after first preview</span>
+            </div>
+          </div>
+
+          <section class="workflow-trace-panel simple-trace-panel desktop-trace-card">
+            <div class="trace-panel-header">
+              <div class="compare-title">Process Trace</div>
+              <span id="status-text" class="status-text">Ready</span>
+            </div>
+            <div id="pipeline-status-bar" class="pipeline-status-bar" aria-live="polite">
+              <div class="pipeline-status-item pipeline-current-step">
+                <span class="pipeline-status-label">Current Step</span>
+                <strong id="pipeline-current-step">Waiting to start</strong>
+              </div>
+              <div class="pipeline-status-item">
+                <span class="pipeline-status-label">Progress</span>
+                <strong id="pipeline-progress">0 / 0</strong>
+              </div>
+              <div class="pipeline-status-item pipeline-latest-update">
+                <span class="pipeline-status-label">Latest Update</span>
+                <strong id="pipeline-latest-update">No activity yet</strong>
+              </div>
+              <div class="pipeline-status-item pipeline-next-step">
+                <span class="pipeline-status-label">Next Step</span>
+                <strong id="pipeline-next-step">Start a conversion</strong>
+              </div>
+              <div class="pipeline-status-item pipeline-elapsed">
+                <span class="pipeline-status-label">Elapsed</span>
+                <strong id="pipeline-elapsed">0s</strong>
+              </div>
+            </div>
+            <div id="workflow-trace" class="workflow-trace empty-state">
+              Process trace appears here when the conversion starts.
+            </div>
+          </section>
+
+          <div class="compare-grid compare-grid-below desktop-compare-grid">
+            <section class="compare-card">
+              <div class="compare-card-head">
+                <div class="compare-title">Input</div>
+              </div>
+              <div id="compare-input-message" class="workspace-context-card empty-state">No instruction yet.</div>
+              <div id="compare-input" class="compare-body empty-state">No input preview yet.</div>
+              <details id="artifact-structure-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="artifact-structure-panel" open>
+                <summary class="compare-subtitle">Regions And Objects</summary>
+                <div id="artifact-structure" class="artifact-structure empty-state">No region split yet.</div>
+              </details>
+            </section>
+
+            <section class="compare-card compare-card-output">
+              <div class="compare-card-head">
+                <div class="compare-title">Output</div>
+              </div>
+              <div class="output-preview-toolbar desktop-output-strip workspace-context-card">
+                <div class="output-progress-control">
+                  <div class="output-control-label">Output Timeline</div>
+                  <div id="output-progress-slider" class="output-progress output-progress-inline empty-state">No output frames yet.</div>
+                </div>
+                <div class="output-version-picker">
+                  <div class="output-control-label">Manual Versions</div>
+                  <div id="output-version-select" class="output-version-buttons"></div>
+                </div>
+              </div>
+              <div id="compare-output" class="compare-body empty-state">No output preview yet.</div>
+              <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel">
+                <summary class="compare-subtitle">Output Progress</summary>
+                <div id="output-progress" class="output-progress empty-state">No progressive output frames yet.</div>
+                <div id="output-progress-details" class="output-progress-details empty-state">
+                  Move the slider to inspect what changed in that update and which issues still remained.
+                </div>
+              </details>
+            </section>
+          </div>
+
+        </section>
+      </section>
+
+      <aside class="desktop-inspector">
+        <section id="runtime-config-section" class="runtime-config panel-card desktop-inspector-card">
+          <div class="section-header">
+            <div>
+              <h2>Processing Defaults</h2>
+              <p class="section-note">Shared by new conversions and refinements.</p>
+            </div>
+            <div class="header-actions">
+              <span id="runtime-config-status" class="status-text">Not saved yet</span>
+              <button id="runtime-config-save" class="primary-btn" type="button">Update</button>
+            </div>
+          </div>
+          <details id="runtime-config-panel" class="runtime-config-panel" data-persist-key="runtime-config-panel" open>
+            <summary>Default Processing Settings</summary>
+            <div class="runtime-config-body">
+              <div id="runtime-config-summary" class="effective-summary"></div>
+              <section class="settings-group settings-group-primary">
+                <div class="settings-group-header">
+                  <div>
+                    <h3>Connection And Models</h3>
+                    <p class="section-note">Defaults used by new conversions and local edits.</p>
+                  </div>
+                </div>
+                <div class="settings-field-grid">
+                  <label class="field" data-field-id="api-key">
+                    <span class="field-heading">
+                      <span class="field-label">API Key</span>
+                      <span id="effective-api-key" class="field-effective"></span>
+                    </span>
+                    <input id="api-key" type="password" placeholder="Leave blank to inherit .env" />
+                  </label>
+                  <label class="field" data-field-id="base-url">
+                    <span class="field-heading">
+                      <span class="field-label">Base URL</span>
+                      <span id="effective-base-url" class="field-effective"></span>
+                    </span>
+                    <input id="base-url" type="text" placeholder="Leave blank to inherit .env" />
+                  </label>
+                  <label class="field" data-field-id="api-provider">
+                    <span class="field-heading">
+                      <span class="field-label">API Provider</span>
+                      <span id="effective-api-provider" class="field-effective"></span>
+                    </span>
+                    <input id="api-provider" type="text" placeholder="For example: openai_compatible" />
+                  </label>
+                  <label class="field" data-field-id="api-format">
+                    <span class="field-heading">
+                      <span class="field-label">API Format</span>
+                      <span id="effective-api-format" class="field-effective"></span>
+                    </span>
+                    <select id="api-format">
+                      <option value="">Use default</option>
+                      <option value="openai_chat_completions">openai_chat_completions</option>
+                      <option value="openai_responses">openai_responses</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="agent-model">
+                    <span class="field-heading">
+                      <span class="field-label">Coordinator Model</span>
+                      <span id="effective-agent-model" class="field-effective"></span>
+                    </span>
+                    <input id="agent-model" type="text" placeholder="Override AGENT_MODEL" />
+                  </label>
+                  <label class="field" data-field-id="subagent-model">
+                    <span class="field-heading">
+                      <span class="field-label">Worker Model</span>
+                      <span id="effective-subagent-model" class="field-effective"></span>
+                    </span>
+                    <input id="subagent-model" type="text" placeholder="Override SUBAGENT_MODEL" />
+                  </label>
+                </div>
+              </section>
+
+              <section class="settings-group">
+                <div class="settings-group-header">
+                  <div>
+                    <h3>Processing Defaults</h3>
+                    <p class="section-note">Global defaults for new runs; each invocation can still override them.</p>
+                  </div>
+                </div>
+                <div class="settings-field-grid">
+                  <label class="field" data-field-id="settings-workflow-mode">
+                    <span class="field-heading">
+                      <span class="field-label">Workflow Mode</span>
+                      <span id="effective-settings-workflow-mode" class="field-effective"></span>
+                    </span>
+                    <select id="settings-workflow-mode">
+                      <option value="">Use default</option>
+                      <option value="initial_only">initial_only</option>
+                      <option value="region">region</option>
+                      <option value="region_object">region_object</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="settings-region-processing-mode">
+                    <span class="field-heading">
+                      <span class="field-label">Region Mode</span>
+                      <span id="effective-settings-region-processing-mode" class="field-effective"></span>
+                    </span>
+                    <select id="settings-region-processing-mode">
+                      <option value="">Use default</option>
+                      <option value="serial">serial</option>
+                      <option value="parallel">parallel</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="settings-region-concurrency">
+                    <span class="field-heading">
+                      <span class="field-label">Region Concurrency</span>
+                      <span id="effective-settings-region-concurrency" class="field-effective"></span>
+                    </span>
+                    <input id="settings-region-concurrency" type="number" min="1" max="16" placeholder="1-16" />
+                  </label>
+                </div>
+              </section>
+
+              <section class="settings-group">
+                <div class="settings-group-header">
+                  <div>
+                    <h3>Quality And Budget</h3>
+                    <p class="section-note">Controls retry behavior, total model-call budget, and API retry tolerance.</p>
+                  </div>
+                </div>
+                <div class="settings-field-grid">
+                  <label class="field" data-field-id="max-budget">
+                    <span class="field-heading">
+                      <span class="field-label">Max Budget</span>
+                      <span id="effective-max-budget" class="field-effective"></span>
+                    </span>
+                    <input id="max-budget" type="number" min="0" placeholder="Override MAX_BUDGET" />
+                  </label>
+                  <label class="field" data-field-id="max-repair-retry">
+                    <span class="field-heading">
+                      <span class="field-label">Max Repair Retry</span>
+                      <span id="effective-max-repair-retry" class="field-effective"></span>
+                    </span>
+                    <input id="max-repair-retry" type="number" min="0" placeholder="Override MAX_RETRY" />
+                  </label>
+                  <label class="field" data-field-id="max-retries">
+                    <span class="field-heading">
+                      <span class="field-label">API Max Retries</span>
+                      <span id="effective-max-retries" class="field-effective"></span>
+                    </span>
+                    <input id="max-retries" type="number" min="0" placeholder="Low-level API retries" />
+                  </label>
+                  <label class="field" data-field-id="use-previous-response-id">
+                    <span class="field-heading">
+                      <span class="field-label">Reuse Response State</span>
+                      <span id="effective-use-previous-response-id" class="field-effective"></span>
+                    </span>
+                    <select id="use-previous-response-id">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                </div>
+              </section>
+
+              <details class="settings-group settings-collapsible-group">
+                <summary>
+                  <span>Advanced Recognition</span>
+                  <span class="settings-summary-note">BBox and SAM refinement</span>
+                </summary>
+                <div class="settings-field-grid">
+                  <label class="field" data-field-id="recognition-bbox-refine-mode">
+                    <span class="field-heading">
+                      <span class="field-label">BBox Refine Mode</span>
+                      <span id="effective-recognition-bbox-refine-mode" class="field-effective"></span>
+                    </span>
+                    <select id="recognition-bbox-refine-mode">
+                      <option value="">Use default</option>
+                      <option value="llm">llm</option>
+                      <option value="sam">sam</option>
+                      <option value="hybrid">hybrid</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="sam-enabled">
+                    <span class="field-heading">
+                      <span class="field-label">Enable SAM</span>
+                      <span id="effective-sam-enabled" class="field-effective"></span>
+                    </span>
+                    <select id="sam-enabled">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="sam-provider-mode">
+                    <span class="field-heading">
+                      <span class="field-label">SAM Provider</span>
+                      <span id="effective-sam-provider-mode" class="field-effective"></span>
+                    </span>
+                    <select id="sam-provider-mode">
+                      <option value="">Use default</option>
+                      <option value="local">local</option>
+                      <option value="remote">remote</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="sam-remote-url">
+                    <span class="field-heading">
+                      <span class="field-label">SAM Remote URL</span>
+                      <span id="effective-sam-remote-url" class="field-effective"></span>
+                    </span>
+                    <input id="sam-remote-url" type="text" placeholder="Optional remote SAM endpoint" />
+                  </label>
+                  <label class="field" data-field-id="sam-fallback-to-llm">
+                    <span class="field-heading">
+                      <span class="field-label">SAM Fallback To LLM</span>
+                      <span id="effective-sam-fallback-to-llm" class="field-effective"></span>
+                    </span>
+                    <select id="sam-fallback-to-llm">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="bbox-issue-concurrency">
+                    <span class="field-heading">
+                      <span class="field-label">BBox Issue Concurrency</span>
+                      <span id="effective-bbox-issue-concurrency" class="field-effective"></span>
+                    </span>
+                    <input id="bbox-issue-concurrency" type="number" min="1" max="8" placeholder="1-8" />
+                  </label>
+                  <label class="field" data-field-id="bbox-issue-stagnation-rounds">
+                    <span class="field-heading">
+                      <span class="field-label">Issue Stagnation Rounds</span>
+                      <span id="effective-bbox-issue-stagnation-rounds" class="field-effective"></span>
+                    </span>
+                    <input id="bbox-issue-stagnation-rounds" type="number" min="1" max="8" placeholder="1-8" />
+                  </label>
+                  <label class="field" data-field-id="bbox-global-stagnation-rounds">
+                    <span class="field-heading">
+                      <span class="field-label">Global Stagnation Rounds</span>
+                      <span id="effective-bbox-global-stagnation-rounds" class="field-effective"></span>
+                    </span>
+                    <input id="bbox-global-stagnation-rounds" type="number" min="1" max="8" placeholder="1-8" />
+                  </label>
+                </div>
+              </details>
+
+              <details class="settings-group settings-collapsible-group">
+                <summary>
+                  <span>Diagnostics And Experiments</span>
+                  <span class="settings-summary-note">Memory, strategy, and agent internals</span>
+                </summary>
+                <div class="settings-field-grid">
+                  <label class="field" data-field-id="agent-name">
+                    <span class="field-heading">
+                      <span class="field-label">Agent Name</span>
+                      <span id="effective-agent-name" class="field-effective"></span>
+                    </span>
+                    <input id="agent-name" type="text" placeholder="Override AGENT_NAME" />
+                  </label>
+                  <label class="field" data-field-id="supervisor-memory-enabled">
+                    <span class="field-heading">
+                      <span class="field-label">Supervisor Memory Use</span>
+                      <span id="effective-supervisor-memory-enabled" class="field-effective"></span>
+                    </span>
+                    <select id="supervisor-memory-enabled">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="supervisor-memory-persist-enabled">
+                    <span class="field-heading">
+                      <span class="field-label">Memory Artifact Persist</span>
+                      <span id="effective-supervisor-memory-persist-enabled" class="field-effective"></span>
+                    </span>
+                    <select id="supervisor-memory-persist-enabled">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field-id="strategy-enabled">
+                    <span class="field-heading">
+                      <span class="field-label">Strategy Hints</span>
+                      <span id="effective-strategy-enabled" class="field-effective"></span>
+                    </span>
+                    <select id="strategy-enabled">
+                      <option value="">Use default</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                </div>
+              </details>
+            </div>
+          </details>
+        </section>
+
+        <section id="artifact-summary" class="artifact-summary desktop-inspector-card">
+          <div class="desktop-inspector-heading">
+            <div class="compare-title">Asset Details</div>
+          </div>
+          <div id="artifact-summary-content" class="artifact-summary-content empty-state">
+            Export files, previews, and project details appear here.
+          </div>
+          <details id="artifact-monitor-panel" class="artifact-monitor-panel mode-advanced-section" data-persist-key="artifact-monitor-panel">
+            <summary>Execution Monitor</summary>
+            <div class="artifact-monitor-toolbar">
+              <div>
+                <div class="compare-title">Execution Monitor</div>
+                <p id="monitor-context" class="section-note">Live run view</p>
+              </div>
+              <button id="refresh-monitor" class="ghost-btn" type="button">Refresh</button>
+            </div>
+            <div id="run-summary" class="run-summary empty-state">
+              Submit a request to see live status, timing, worker activity, and linked execution events.
+            </div>
+            <div id="scheduler-summary" class="run-summary empty-state">
+              Parallel scheduler activity will appear here when region or object workers are active.
+            </div>
+            <div id="timeline" class="timeline empty-state">No execution events yet.</div>
+          </details>
+        </section>
+
+        <section id="manual-adjustment-section" class="manual-adjust-card desktop-manual-card">
+          <div class="manual-adjust-header">
+            <div class="compare-title">Refine</div>
+            <button id="desktop-refine-close" class="ghost-btn compact-btn" type="button" aria-label="Close refine sidebar">Close</button>
+          </div>
+
+          <div class="manual-adjust-grid">
+            <section id="manual-entry-bar" class="manual-entry-bar">
+              <div class="manual-entry-copy">
+                <div class="compare-title">Local Edit Entry</div>
+                <p id="manual-entry-text" class="section-note">Wait for the first usable output.</p>
+              </div>
+              <div id="manual-entry-status-row" class="manual-entry-status-row">
+                <span id="manual-entry-output" class="artifact-readiness-chip">Output pending</span>
+                <span id="manual-entry-target" class="artifact-readiness-chip">Target not selected</span>
+                <span id="manual-entry-goal" class="artifact-readiness-chip">Goal missing</span>
+                <span id="manual-entry-ready" class="artifact-readiness-chip">Not ready to apply</span>
+              </div>
+            </section>
+
+            <section id="manual-workflow-bar" class="manual-workflow-bar">
+              <div class="manual-workflow-bar-top">
+                <div class="manual-workflow-overview">
+                  <div class="compare-title">Current Edit Status</div>
+                </div>
+                <div class="manual-toolbar">
+                  <div class="manual-toolbar-block">
+                    <div class="manual-toolbar-label">Pick Target</div>
+                    <div class="manual-mode-group">
+                      <button id="manual-select-mode" class="primary-btn" type="button">Select</button>
+                      <button id="manual-draw-box" class="secondary-btn" type="button">Draw Box</button>
+                      <button id="manual-draw-freeform" class="secondary-btn" type="button">Draw Freeform</button>
+                    </div>
+                  </div>
+                  <div class="manual-toolbar-block">
+                    <div class="manual-toolbar-label">Apply Target</div>
+                    <div class="manual-action-group">
+                      <button id="manual-use-selection" class="secondary-btn" type="button">Use Overlay</button>
+                      <button id="manual-confirm-selection" class="secondary-btn" type="button">Confirm Selection</button>
+                      <button id="manual-clear-selection" class="ghost-btn" type="button">Clear</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="manual-workflow-status">
+                <div id="manual-guidance" class="manual-guidance">
+                  <div id="manual-guidance-title" class="manual-guidance-title">Select a target area.</div>
+                  <p id="manual-guidance-body" class="manual-guidance-body">
+                    Click an overlay or draw a selection, then describe the change.
+                  </p>
+                </div>
+
+                <div class="manual-adjust-copy manual-selection-summary-card">
+                  <div class="compare-title">Selection Status</div>
+                  <div id="manual-target-summary" class="manual-target-summary">
+                    Select a region or object, or draw a box on the output preview.
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <div id="manual-edit-core" class="manual-main-grid">
+              <section class="manual-column manual-editor-column">
+                <div class="manual-editor-card">
+                  <div class="manual-section-head">
+                    <div class="compare-title">Edit Goal</div>
+                    <p class="section-note">Describe exactly what should improve in the selected area.</p>
+                  </div>
+
+                  <label class="field">
+                    <span class="field-label">User Introduction / Goal</span>
+                    <textarea
+                      id="manual-user-introduction"
+                      rows="5"
+                      placeholder="Describe the target state to achieve"
+                    ></textarea>
+                  </label>
+
+                  <div class="manual-submit-card">
+                    <div class="manual-submit-copy">
+                      <span id="manual-submit-status" class="status-text">Refinement is ready when output is available.</span>
+                    </div>
+                    <button id="manual-apply-button" class="primary-btn" type="button">Apply Refinement</button>
+                  </div>
+                </div>
+
+                <div class="manual-selection-preview manual-confirmed-target-card">
+                  <div class="manual-section-head">
+                    <div class="compare-title">Confirmed Target</div>
+                  </div>
+                  <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
+                    Confirm a selection to pin the target region, objects, bbox, and base output frame.
+                  </div>
+                </div>
+
+                <details id="manual-advanced-panel" class="advanced-panel manual-advanced-panel" data-persist-key="manual-advanced-panel">
+                  <summary>Advanced Refinement Options</summary>
+                  <p class="section-note">These settings apply only to the selected refinement target.</p>
+                  <div class="manual-advanced-grid">
+                    <div class="field-grid four-up">
+                      <label class="field">
+                        <span class="field-label">Adjustment Mode</span>
+                        <select id="manual-mode">
+                          <option value="worker">Worker</option>
+                          <option value="agent">Agent</option>
+                        </select>
+                      </label>
+                      <label class="field">
+                        <span class="field-label">Agent Budget</span>
+                        <input id="manual-agent-budget" type="number" min="1" max="12" placeholder="4" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">Base Output Frame</span>
+                        <input id="manual-base-frame" type="text" readonly placeholder="Current slider frame" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">Region ID</span>
+                        <input id="manual-region-id" type="text" placeholder="Optional explicit single-region anchor" />
+                      </label>
+                    </div>
+
+                    <div class="field-grid two-up">
+                      <label class="field">
+                        <span class="field-label">Object IDs</span>
+                        <input id="manual-object-ids" type="text" placeholder="Comma-separated object ids" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">Target Description</span>
+                        <input id="manual-target-description" type="text" placeholder="Optional local-edit note" />
+                      </label>
+                    </div>
+
+                    <div class="field-grid four-up">
+                      <label class="field">
+                        <span class="field-label">BBox X</span>
+                        <input id="manual-bbox-x" type="number" min="0" placeholder="x" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">BBox Y</span>
+                        <input id="manual-bbox-y" type="number" min="0" placeholder="y" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">BBox Width</span>
+                        <input id="manual-bbox-width" type="number" min="1" placeholder="width" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">BBox Height</span>
+                        <input id="manual-bbox-height" type="number" min="1" placeholder="height" />
+                      </label>
+                    </div>
+                  </div>
+                </details>
+              </section>
+
+              <section class="manual-column manual-sidebar-column">
+                <details id="manual-reference-panel" class="manual-reference-panel" data-persist-key="manual-reference-panel">
+                  <summary>
+                    <span class="manual-reference-summary-title">Reference Images</span>
+                  </summary>
+                  <div class="manual-reference-upload">
+                    <div class="manual-reference-top">
+                      <div class="manual-section-head manual-reference-intro">
+                        <div class="compare-title">Reference Inputs</div>
+                      </div>
+                    </div>
+                    <input id="manual-upload-input" class="hidden-input" type="file" accept="image/*" multiple />
+                    <div class="manual-reference-settings">
+                      <div class="manual-reference-options">
+                        <label class="manual-checkbox">
+                          <input id="manual-use-reference-images" type="checkbox" checked />
+                          <span>Use references</span>
+                        </label>
+                        <label class="manual-checkbox">
+                          <input id="manual-include-default-crop" type="checkbox" checked />
+                          <span>Include default crop</span>
+                        </label>
+                      </div>
+                      <div id="manual-reference-selection-summary" class="manual-target-summary manual-reference-selection-card">
+                        You can draw a reference area directly on the Input image.
+                      </div>
+                    </div>
+                    <div class="manual-reference-tools">
+                      <div class="manual-toolbar-label">Reference Tools</div>
+                      <div class="manual-reference-actions">
+                        <button id="manual-reference-draw-box" class="secondary-btn" type="button">Draw Ref Box</button>
+                        <button id="manual-reference-draw-freeform" class="secondary-btn" type="button">Draw Ref Freeform</button>
+                        <button id="manual-reference-confirm-selection" class="secondary-btn" type="button">Confirm Ref Area</button>
+                        <button id="manual-reference-clear-selection" class="ghost-btn" type="button">Clear Ref</button>
+                      </div>
+                    </div>
+
+                    <div class="manual-reference-body">
+                      <div class="manual-reference-form">
+                        <details class="manual-reference-paths-panel">
+                          <summary>Add Existing Local Images</summary>
+                          <label class="field">
+                            <span class="field-label">Local Image Paths (Optional)</span>
+                            <textarea id="manual-reference-paths" rows="3" placeholder="Optional local paths, one per line"></textarea>
+                          </label>
+                        </details>
+                        <div
+                          id="manual-reference-pastezone"
+                          class="upload-preview-panel upload-preview-empty-state manual-reference-pastezone"
+                          role="button"
+                          tabindex="0"
+                          aria-label="Reference image thumbnail upload surface"
+                        >
+                          <div class="upload-preview-copy">
+                            <span class="field-label">Reference Thumbnail</span>
+                            <span id="manual-reference-preview-meta" class="upload-preview-meta">
+                              Focus here, then paste an image. You can also choose a file or capture from Input.
+                            </span>
+                          </div>
+                          <div class="upload-preview-stage">
+                            <div id="manual-reference-preview-empty" class="upload-preview-empty">
+                              Click to focus, then paste clipboard image
+                            </div>
+                            <img id="manual-reference-preview-image" class="upload-preview-image hidden" alt="Manual reference preview" />
+                          </div>
+                          <div class="upload-preview-actions manual-reference-upload-actions">
+                            <button id="manual-reference-capture-button" class="secondary-btn" type="button">Capture From Input</button>
+                            <button id="manual-paste-reference-button" class="secondary-btn" type="button">Paste Clipboard Image</button>
+                            <button id="manual-upload-button" class="secondary-btn" type="button">Choose Image</button>
+                            <span id="manual-upload-status" class="dropzone-status">No reference images uploaded.</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="manual-reference-assets">
+                        <div id="manual-reference-preview" class="manual-reference-preview empty-state">
+                          Reference previews appear here.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </section>
+            </div>
+
+            <section class="manual-output-section">
+              <div class="manual-section-head">
+                <div class="compare-title">Adjustment Result</div>
+              </div>
+              <div id="manual-adjustment-result" class="manual-adjustment-result empty-state">
+                Original and refined previews appear here after refinement.
+              </div>
+            </section>
+
+            <details id="manual-trace-panel" class="manual-trace-panel" data-persist-key="manual-trace-panel">
+              <summary>
+                <span class="manual-reference-summary-title">Refinement Trace</span>
+              </summary>
+              <section class="manual-trace-card">
+                <div id="manual-adjustment-trace" class="workflow-trace empty-state">
+                  Refinement trace appears here after you start it.
+                </div>
+                <div id="manual-adjustment-error" class="error-box hidden"></div>
+              </section>
+            </details>
+          </div>
+        </section>
+
+        <details id="artifact-files-panel" class="artifact-files-panel mode-advanced-section" data-persist-key="artifact-files-panel">
+          <summary class="artifact-files-summary">Export Files</summary>
+          <div class="artifact-files-wrap">
+            <div id="artifact-files" class="artifact-files empty-state">No export files yet.</div>
+          </div>
+        </details>
+      </aside>
+    </main>
+
+    <div id="image-lightbox" class="image-lightbox hidden" aria-hidden="true">
+      <div id="image-lightbox-backdrop" class="image-lightbox-backdrop"></div>
+      <div class="image-lightbox-dialog" role="dialog" aria-modal="true" aria-label="Image preview">
+        <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="Close image preview">
+          Close
+        </button>
+        <div class="image-lightbox-stage">
+          <img id="image-lightbox-image" class="image-lightbox-image" alt="Expanded preview" />
+        </div>
+        <div id="image-lightbox-caption" class="image-lightbox-caption"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/static/desktop-app.js?v=desktop-history-layout-fit-1"></script>
+  </body>
+</html>

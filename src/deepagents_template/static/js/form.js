@@ -65,6 +65,9 @@ function getApiKeyEffectiveValue() {
   if (elements.apiKey.value.trim()) {
     return "manual override";
   }
+  if (appState.runtimeOverrides?.api_key_configured) {
+    return "configured in settings";
+  }
   return appState.defaults?.api_key_configured ? "configured in .env" : "not configured";
 }
 
@@ -83,6 +86,9 @@ export const RUNTIME_FIELD_SPECS = [
   { id: "api-provider", key: "api_provider" },
   { id: "api-format", key: "api_format" },
   { id: "max-retries", key: "max_retries", summary: true },
+  { id: "settings-workflow-mode", key: "workflow_mode", summaryLabel: "workflow mode", summary: true },
+  { id: "settings-region-processing-mode", key: "region_processing_mode", summaryLabel: "region mode", summary: true },
+  { id: "settings-region-concurrency", key: "region_concurrency", summaryLabel: "region concurrency", summary: true },
   { id: "agent-model", key: "agent_model" },
   { id: "subagent-model", key: "subagent_model" },
   { id: "agent-name", key: "agent_name" },
@@ -92,6 +98,14 @@ export const RUNTIME_FIELD_SPECS = [
   { id: "supervisor-memory-enabled", key: "supervisor_memory_enabled" },
   { id: "supervisor-memory-persist-enabled", key: "supervisor_memory_persist_enabled" },
   { id: "strategy-enabled", key: "strategy_enabled" },
+  { id: "recognition-bbox-refine-mode", key: "recognition_bbox_refine_mode" },
+  { id: "sam-provider-mode", key: "sam_provider_mode" },
+  { id: "sam-remote-url", key: "sam_remote_url" },
+  { id: "sam-enabled", key: "sam_enabled" },
+  { id: "sam-fallback-to-llm", key: "sam_fallback_to_llm" },
+  { id: "bbox-issue-concurrency", key: "bbox_issue_concurrency" },
+  { id: "bbox-issue-stagnation-rounds", key: "bbox_issue_stagnation_rounds" },
+  { id: "bbox-global-stagnation-rounds", key: "bbox_global_stagnation_rounds" },
 ];
 
 export function getElementByFieldId(fieldId) {
@@ -104,10 +118,16 @@ export function getElementByFieldId(fieldId) {
       return elements.projectName;
     case "workflow-mode":
       return elements.workflowMode;
+    case "settings-workflow-mode":
+      return elements.settingsWorkflowMode;
     case "region-processing-mode":
       return elements.regionProcessingMode;
+    case "settings-region-processing-mode":
+      return elements.settingsRegionProcessingMode;
     case "region-concurrency":
       return elements.regionConcurrency;
+    case "settings-region-concurrency":
+      return elements.settingsRegionConcurrency;
     case "api-key":
       return elements.apiKey;
     case "base-url":
@@ -136,6 +156,22 @@ export function getElementByFieldId(fieldId) {
       return elements.supervisorMemoryPersistEnabled;
     case "strategy-enabled":
       return elements.strategyEnabled;
+    case "recognition-bbox-refine-mode":
+      return elements.recognitionBboxRefineMode;
+    case "sam-provider-mode":
+      return elements.samProviderMode;
+    case "sam-remote-url":
+      return elements.samRemoteUrl;
+    case "sam-enabled":
+      return elements.samEnabled;
+    case "sam-fallback-to-llm":
+      return elements.samFallbackToLlm;
+    case "bbox-issue-concurrency":
+      return elements.bboxIssueConcurrency;
+    case "bbox-issue-stagnation-rounds":
+      return elements.bboxIssueStagnationRounds;
+    case "bbox-global-stagnation-rounds":
+      return elements.bboxGlobalStagnationRounds;
     default:
       return null;
   }
@@ -180,14 +216,91 @@ function markOverrideState(element, hasOverride) {
   element.dataset.overrideActive = hasOverride ? "true" : "false";
 }
 
+function updateApiKeyPlaceholder() {
+  if (!elements.apiKey) {
+    return;
+  }
+  if (appState.runtimeOverrides?.api_key_configured) {
+    elements.apiKey.placeholder = "Configured in settings";
+    return;
+  }
+  elements.apiKey.placeholder = appState.defaults?.api_key_configured ? "Configured in .env" : "Not configured in .env";
+}
+
 function getRuntimeDefaultValue(spec) {
   if (spec.id === "api-key") {
+    if (appState.runtimeOverrides?.api_key_configured) {
+      return "configured in settings";
+    }
     return appState.defaults?.api_key_configured ? "configured in .env" : "not configured";
   }
   if (!spec.key) {
     return "-";
   }
   return normalizeDisplayValue(appState.defaults?.[spec.key]);
+}
+
+function hasConfiguredApiKey() {
+  return Boolean(
+    elements.apiKey.value.trim()
+    || appState.runtimeOverrides?.api_key
+    || appState.runtimeOverrides?.api_key_configured
+    || appState.defaults?.api_key_configured
+  );
+}
+
+function hasUsableRuntimeValue(fieldId) {
+  const spec = RUNTIME_FIELD_SPECS.find((item) => item.id === fieldId);
+  if (!spec) {
+    return false;
+  }
+  const value = getEffectiveValue(spec);
+  if (fieldId === "api-key") {
+    return hasConfiguredApiKey();
+  }
+  const normalized = value == null ? "" : String(value).trim();
+  return Boolean(normalized && normalized !== "default" && normalized !== "not configured");
+}
+
+export function getStartRuntimeReadiness() {
+  if (!appState.defaultsLoaded) {
+    return {
+      ready: false,
+      missing: ["runtime defaults"],
+      title: "Checking runtime settings...",
+      body: "Loading connection and model defaults before conversion can start.",
+    };
+  }
+
+  const requiredFields = [
+    ["api-key", "API key"],
+    ["base-url", "Base URL"],
+    ["api-provider", "API provider"],
+    ["api-format", "API format"],
+    ["agent-model", "Coordinator model"],
+    ["subagent-model", "Worker model"],
+  ];
+  const missing = requiredFields
+    .filter(([fieldId]) => !hasUsableRuntimeValue(fieldId))
+    .map(([, label]) => label);
+
+  if (missing.length) {
+    const visibleMissing = missing.slice(0, 3).join(", ");
+    const suffix = missing.length > 3 ? ` and ${missing.length - 3} more` : "";
+    return {
+      ready: false,
+      missing,
+      title: "Runtime settings need attention.",
+      body: `${visibleMissing}${suffix} ${missing.length === 1 ? "needs" : "need"} to be configured before conversion.`,
+    };
+  }
+
+  return {
+    ready: true,
+    missing: [],
+    title: "Default settings are ready.",
+    body: "Tune model, budget, or workflow if needed.",
+  };
 }
 
 function getFieldDisplayValue(spec) {
@@ -225,7 +338,7 @@ export function updateEffectiveValues() {
     if (spec.summary && RUNTIME_FIELD_SPECS.includes(spec)) {
       const targetParts = runtimeSummaryParts;
       targetParts.push({
-        label: spec.id.replaceAll("-", " "),
+        label: spec.summaryLabel || spec.id.replaceAll("-", " "),
         value: truncate(effectiveValue, 24),
       });
     }
@@ -257,7 +370,7 @@ export function applyFrontendDefaults(defaults) {
   setElementValue(elements.regionProcessingMode, defaults.region_processing_mode || "");
   setElementValue(elements.regionConcurrency, defaults.region_concurrency ?? "");
   setElementValue(elements.workflowMode, defaults.workflow_mode || "");
-  elements.apiKey.placeholder = defaults.api_key_configured ? "Configured in .env" : "Not configured in .env";
+  updateApiKeyPlaceholder();
   appState.defaultsLoaded = true;
   if (appState.runtimeOverrides) {
     applyRuntimeOverrides(appState.runtimeOverrides);
@@ -268,13 +381,14 @@ export function applyFrontendDefaults(defaults) {
 
 export function applyRuntimeOverrides(overrides) {
   appState.runtimeOverrides = overrides || {};
+  updateApiKeyPlaceholder();
   for (const spec of RUNTIME_FIELD_SPECS) {
     const element = getElementByFieldId(spec.id);
     if (!element) {
       continue;
     }
     const hasOverride = Object.prototype.hasOwnProperty.call(appState.runtimeOverrides || {}, spec.key || spec.id);
-    markOverrideState(element, hasOverride);
+    markOverrideState(element, spec.id === "api-key" ? Boolean(appState.runtimeOverrides?.api_key_configured) : hasOverride);
     const resolvedValue = getResolvedRuntimeValue(spec);
     if (element.tagName === "SELECT") {
       setElementValue(element, resolvedValue === "" ? String(appState.defaults?.[spec.key] ?? "") : resolvedValue);
@@ -293,10 +407,11 @@ export function clearUploadPreview() {
   elements.uploadPreviewImage.removeAttribute("src");
   elements.uploadPreviewImage.classList.add("hidden");
   elements.uploadPreviewEmpty.classList.remove("hidden");
-  elements.uploadPreviewMeta.textContent =
-    "Focus here, then paste with Ctrl+V or choose a file below.";
+  elements.uploadPreviewMeta.textContent = document.body.classList.contains("desktop-body")
+    ? ""
+    : "Focus here, then paste with Ctrl+V or choose a file below.";
   elements.uploadPreviewPanel.classList.add("upload-preview-empty-state");
-  elements.uploadStatus.textContent = "No local file uploaded.";
+  elements.uploadStatus.textContent = document.body.classList.contains("desktop-body") ? "" : "No local file uploaded.";
 }
 
 function setUploadPreview(file, objectUrl) {
@@ -335,6 +450,18 @@ export async function uploadLocalFile(file, setStatus) {
   setUploadPreview(normalizedFile, previewObjectUrl);
   updateEffectiveValues();
   setStatus("Upload complete");
+}
+
+export async function pickLocalFileFromHost() {
+  const host = window.desktopHost;
+  if (!host?.openLocalImage) {
+    return null;
+  }
+  const imagePath = await host.openLocalImage();
+  if (!imagePath) {
+    return null;
+  }
+  return imagePath;
 }
 
 export function bindFieldListeners() {
@@ -434,25 +561,37 @@ export function buildRuntimeOverridesPayload() {
 
   for (const [key, spec] of runtimeSpecsByKey.entries()) {
     const element = getElementByFieldId(spec.id);
-    if (!element || element.dataset.overrideActive !== "true") {
+    if (!element) {
       continue;
     }
     const rawValue = element.value?.trim?.() ?? element.value ?? "";
+    if (element.dataset.overrideActive !== "true" && rawValue === "") {
+      continue;
+    }
     switch (key) {
       case "api_key":
       case "base_url":
       case "api_provider":
       case "api_format":
+      case "workflow_mode":
+      case "region_processing_mode":
       case "agent_model":
       case "subagent_model":
       case "agent_name":
+      case "recognition_bbox_refine_mode":
+      case "sam_provider_mode":
+      case "sam_remote_url":
         if (rawValue) {
           payload[key] = rawValue;
         }
         break;
       case "max_retries":
+      case "region_concurrency":
       case "max_retry":
-      case "max_budget": {
+      case "max_budget":
+      case "bbox_issue_concurrency":
+      case "bbox_issue_stagnation_rounds":
+      case "bbox_global_stagnation_rounds": {
         if (!rawValue) {
           break;
         }
@@ -466,6 +605,8 @@ export function buildRuntimeOverridesPayload() {
       case "supervisor_memory_enabled":
       case "supervisor_memory_persist_enabled":
       case "strategy_enabled":
+      case "sam_enabled":
+      case "sam_fallback_to_llm":
         if (rawValue === "true") {
           payload[key] = true;
         } else if (rawValue === "false") {

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-BBOX_ISSUES_SOFT_LIMIT = 8
+BBOX_ISSUES_SOFT_LIMIT = 3
 
 
 def truncate_text(text: str, *, max_words: int, max_chars: int) -> str:
@@ -70,7 +70,11 @@ def sanitize_bbox_issues(
         )
         if not cleaned.criterion or not cleaned.reason:
             continue
-        key = (cleaned.target_id, cleaned.criterion, cleaned.reason)
+        key = (
+            cleaned.target_id,
+            getattr(cleaned, "issue_code", "") or cleaned.criterion,
+            getattr(cleaned, "canonical_issue_id", "") or cleaned.reason,
+        )
         if key in seen_issue_keys:
             continue
         seen_issue_keys.add(key)

@@ -146,6 +146,16 @@ def _generation_focus_from_object(obj: ObjectCandidate) -> list[str]:
     return focus[:3]
 
 
+def _included_elements_from_object(obj: ObjectCandidate | dict) -> list[str]:
+    if isinstance(obj, dict):
+        items = obj.get("included_elements") or []
+    else:
+        items = obj.included_elements or []
+    if isinstance(items, str):
+        items = [items]
+    return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
 def build_recognition_generation_payload(recognition: RegionRecognitionResult) -> dict:
     return {
         "region_id": recognition.region_id,
@@ -169,6 +179,7 @@ def build_recognition_generation_payload(recognition: RegionRecognitionResult) -
                     scope="object",
                     target_id=obj.object_id,
                 ),
+                "included_elements": _included_elements_from_object(obj),
                 "generation_focus": _generation_focus_from_object(obj),
                 "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
             }
@@ -202,6 +213,7 @@ def build_object_index_payload(recognition: RegionRecognitionResult) -> dict:
                     scope="object",
                     target_id=obj.object_id,
                 ),
+                "included_elements": _included_elements_from_object(obj),
             }
             for obj in recognition.recognized_objects
         ]
@@ -222,6 +234,7 @@ def build_region_review_object_summary(recognition: RegionRecognitionResult) -> 
                 scope="object",
                 target_id=obj.object_id,
             ),
+            "included_elements": _included_elements_from_object(obj),
         }
         for obj in recognition.recognized_objects
     ]
@@ -239,6 +252,7 @@ def build_object_generation_payload(obj: ObjectCandidate) -> dict:
             scope="object",
             target_id=obj.object_id,
         ),
+        "included_elements": _included_elements_from_object(obj),
         "generation_focus": _generation_focus_from_object(obj),
         "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
     }
@@ -259,6 +273,7 @@ def build_object_policy_payload(obj: ObjectCandidate | dict) -> dict:
                 scope="object",
                 target_id=str(obj.get("object_id", "")),
             ),
+            "included_elements": _included_elements_from_object(obj),
         }
     return {
         "object_id": obj.object_id,
@@ -272,6 +287,7 @@ def build_object_policy_payload(obj: ObjectCandidate | dict) -> dict:
             scope="object",
             target_id=obj.object_id,
         ),
+        "included_elements": _included_elements_from_object(obj),
     }
 
 

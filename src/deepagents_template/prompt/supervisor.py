@@ -22,7 +22,15 @@ STRATEGY_CONFIDENCE_RULE = (
 
 PASSED_ITEMS_FORMAT_RULE = (
     "review.passed_items must be a JSON array of plain strings, each a brief note about what already looks acceptable. "
-    "Never put {criterion, reason} objects in passed_items; that object shape is only for global_repairs and object_issues."
+    "Never put {criterion, reason, severity} objects in passed_items; that object shape is only for global_repairs and object_issues."
+)
+
+ISSUE_SEVERITY_RULES = (
+    'Every review issue must include severity exactly as "low", "medium", or "high". '
+    "Judge severity by visual/material impact, not by wording style. "
+    "Use low only for cosmetic differences that preserve identity, structure, readability, containment, and editability. "
+    "Use medium for visible fidelity mismatches that preserve identity and core structure. "
+    "Use high for missing/wrong/generic objects, broken structure, unreadable text, clipping/out-of-bounds content, wrong identity, or layout hierarchy failure."
 )
 
 REPLACEMENT_ISSUE_REFS_FORMAT_RULE = (
@@ -182,8 +190,11 @@ def build_region_combined_policy_prompts(
         - passed_items should stay brief and selective rather than exhaustive.
         - In global_repairs and object_issues only, criterion should be a reusable acceptance rule, preferably framed in generic object-type or layout terms rather than image-specific subject names.
         - Put image-specific identity such as left/right role, depicted subject, or local context in reason or object_id, not in criterion.
+        - {ISSUE_SEVERITY_RULES}
         - For icons and symbolic objects, prioritize semantic recognizability, silhouette agreement, and appropriate structural simplification over small whitespace or micro-spacing preferences.
         - When an icon looks unlike the raster reference, report that fidelity gap explicitly instead of reframing it only as scale or placement drift.
+        - Do not accept an icon only because it is semantically recognizable; check silhouette, distinctive parts, and internal strokes.
+        - If any icon has a localized fidelity gap, include it in review.object_issues and prefer object_repair when no global repairs remain.
         - Keep spatial relation issues separate from fidelity issues: shared spacing, balance, and relative placement belong to region_repair; internal likeness or shape mismatch belongs to object_issues.
         - Use spacing/scale/placement issues when there is clear visual evidence of crowding, broken hierarchy, border pressure, overlap risk, or noticeably uneven balance, not merely a mild preference for more open whitespace.
         - Avoid escalating small spacing differences into repeated shrink-and-lift adjustments when the current relative layout already appears broadly consistent with the raster.
@@ -206,6 +217,8 @@ def build_region_combined_policy_prompts(
                 "termination.acceptance_tendency": ("accept", "reject"),
                 "termination.stop_tendency": ("continue", "stop"),
                 "repair_plan.strategy_confidence": ("low", "medium", "high"),
+                "review.global_repairs[].severity": ("low", "medium", "high"),
+                "review.object_issues[].severity": ("low", "medium", "high"),
                 "prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain"),
             },
         )}
@@ -247,8 +260,8 @@ def build_region_combined_policy_prompts(
                       "Rounded card border reads clearly.",
                       "Title and description hierarchy preserved."
                     ],
-                    "global_repairs": [{{"criterion": "brief criterion", "reason": "brief reason"}}],
-                    "object_issues": [{{"object_id": "obj1", "criterion": "brief criterion", "reason": "brief reason"}}]
+                    "global_repairs": [{{"criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}],
+                    "object_issues": [{{"object_id": "obj1", "criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}]
                   }},
                   "repair_plan": {{
                     "route": "region_repair",
@@ -300,6 +313,7 @@ def build_object_combined_policy_prompts(
         - acceptance_tendency must be accept or reject.
         - stop_tendency must be continue or stop.
         - failed item reasons and all rationales must stay under 24 words.
+        - {ISSUE_SEVERITY_RULES}
         - Use a compact review style: keep only the most decision-relevant unresolved object issues.
         - Ignore minor polish unless it affects semantics, identity, or readability.
         - Input roles: image 1 is the ground-truth object crop; image 2 is the rendered preview of the current SVG.
@@ -314,6 +328,7 @@ def build_object_combined_policy_prompts(
                 "termination.acceptance_tendency": ("accept", "reject"),
                 "termination.stop_tendency": ("continue", "stop"),
                 "repair_plan.strategy_confidence": ("low", "medium", "high"),
+                "review.failed_items[].severity": ("low", "medium", "high"),
                 "prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain"),
             },
         )}
@@ -348,7 +363,7 @@ def build_object_combined_policy_prompts(
                   {history_shape}
                   "review": {{
                     "object_id": "{obj.get("object_id", "")}",
-                    "failed_items": [{{"criterion": "brief criterion", "reason": "brief reason"}}]
+                    "failed_items": [{{"criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}]
                   }},
                   "repair_plan": {{
                     "route": "object_repair",

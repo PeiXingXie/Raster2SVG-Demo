@@ -1,547 +1,250 @@
-# Raster-to-SVG Agent Demo
+# Raster to SVG
 
-这是一个将位图图片转换为可编辑 SVG 的实验项目。项目会读取一张本地 raster 图片，调用多模态模型完成版面拆分、分区生成、检查与修复，并把输入、过程文件和最终结果全部保存到一次 run 的产物目录中。
+Raster to SVG 是一个把普通位图图片转换为可编辑 SVG 的桌面/网页应用原型。本 README 是项目主入口：先用几分钟了解项目，再按你的角色跳到对应文档。
 
-如果你是第一次接手这个项目，建议先看下面的“5 分钟跑通一次 SVG 转换”。
+当前项目已经具备 Windows 安装器闭环：产品用户可以通过安装包安装应用，新版安装器可以覆盖旧版安装，并默认保留用户数据。
 
-## 5 分钟跑通一次 SVG 转换
+## 快速跳转
 
-### 1. 准备环境
+| 你的角色 | 应该阅读 | 你会做什么 |
+| --- | --- | --- |
+| 产品用户 | 本文的“产品用户如何使用” | 安装应用、填写 API 配置、上传图片、更新或卸载 |
+| 开发者 | [README.developer.md](./README.developer.md) 和 [docs.development.md](./docs.development.md) | 从源码启动 Web/桌面开发版，调试后端和前端 |
+| 发布维护者 | [packaging/README.packaging.md](./packaging/README.packaging.md) 和 [docs.installer.md](./docs.installer.md) | 构建版本化安装器，发布新版覆盖旧版 |
+| 桌面壳调试 | [desktop/README.desktop.md](./desktop/README.desktop.md) | 调试 Electron 启动、URL 解析和桌面端问题 |
+| 迁移部署 | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | 打包源码、迁移到另一台机器、启动服务 |
 
-推荐使用 Conda：
+## 项目简介
 
-```powershell
-conda env create -f environment.yml
-conda activate agent-demo
-```
+这个项目的目标是把 raster 图片转换为更容易编辑、复用和检查的 SVG 结构。
 
-项目依赖安装：
-
-```powershell
-python -m pip install -e .
-```
-
-如果你还需要运行测试或 lint，再安装开发依赖：
-
-```powershell
-python -m pip install -e ".[dev]"
-```
-
-### 2. 复制并填写 `.env`
-
-先复制模板：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-至少需要确认这 4 个参数：
-
-```env
-API_KEY=your-real-api-key
-BASE_URL=https://api.poe.com/v1
-API_PROVIDER=openai_compatible
-API_FORMAT=openai_responses
-```
-
-对新手来说，最常见的起步配置就是上面这组。  
-如果你的模型服务兼容 OpenAI 风格接口，通常只需要把 `API_KEY` 和 `BASE_URL` 改成你自己的值。
-
-### 3. 准备输入图片
-
-假设要转换的图片是：
+典型流程是：
 
 ```text
-test\CNNhard.png
+上传 raster 图片
+-> 模型识别图像中的对象、区域和几何关系
+-> 后端生成结构化转换结果
+-> 前端展示预览、过程信息和 SVG 产物
+-> 用户导出或继续编辑 SVG
 ```
 
-也可以换成你自己的绝对路径，例如：
+当前应用形态包括：
+
+- FastAPI 后端
+- Web 前端
+- Electron 桌面壳
+- Windows NSIS 安装器
+
+## 产品用户如何使用
+
+产品用户不需要安装 Python、Node.js 或开发环境。
+
+### 第一次安装
+
+拿到安装器后，双击运行：
 
 ```text
-D:\path\to\your\image.png
+Raster to SVG Setup 0.1.0.exe
 ```
 
-### 4. 执行转换
+安装时可以选择安装目录，也可以直接使用默认目录。
 
-直接运行：
-
-```powershell
-python -m deepagents_template.main "请将这张图片转换为可编辑 SVG，尽量保留原始布局、文字和连线语义。" --image-path "test\CNNhard.png"
-```
-
-运行时终端会持续输出阶段进度，例如：
-
-- 当前处理到哪个阶段
-- 当前是串行还是并行处理 region
-- 使用了哪个模型和 API 格式
-- 本次产物写到了哪个目录
-
-### 5. 去哪里看结果
-
-每次运行都会在 `artifacts/runs/` 下创建一个新目录，命名形式大致是：
+安装完成后，从开始菜单或桌面快捷方式打开：
 
 ```text
-artifacts/runs/20260612-123456-CNNhard/
+Raster to SVG
 ```
 
-最重要的结果文件通常在这里：
+### 基本使用流程
 
-- `output/final.svg`
-  最终 SVG
-- `output/final_review.json`
-  最终全局检查结果
-- `output/report.md`
-  本次转换的 Markdown 报告
-- `output/report.json`
-  同一份报告的结构化 JSON
-- `input/request.json`
-  本次运行真正使用的请求参数
-- `input/input_metadata.json`
-  输入图片的尺寸等元数据
-- `intermediate/layout_detection.json`
-  版面拆分结果
-- `intermediate/regions.json`
-  归一化后的 region 列表
-- `intermediate/region_results.json`
-  各 region 的汇总结果
-- `run_state.json`
-  用于恢复运行状态的快照
+1. 打开 Raster to SVG。
+2. 在应用界面里填写 API Key / Base URL。
+3. 上传需要转换的图片。
+4. 启动转换。
+5. 查看生成结果、运行日志和 SVG 产物。
 
-如果你想快速判断“这次是否成功”，优先看：
+安装版会自动启动内置后端，用户不需要打开 terminal，也不需要手动运行服务。
 
-1. `output/final.svg`
-2. `output/final_review.json`
-3. `output/report.md`
+### 更新到新版
 
-## 新手最需要知道的参数怎么选
+如果已经安装过旧版，收到新版安装器后：
 
-这个项目的参数分两类：
-
-- `.env` 里的参数：给整个项目设置默认值
-- 命令行或 HTTP 请求里的参数：只影响本次运行
-
-原则很简单：
-
-1. 经常不变的，写进 `.env`
-2. 这次任务临时想改的，放到命令行或请求体里
-
-### 一组推荐的入门默认值
-
-```env
-API_KEY=your-real-api-key
-BASE_URL=https://api.poe.com/v1
-API_PROVIDER=openai_compatible
-API_FORMAT=openai_responses
-MAX_RETRIES=2
-
-AGENT_MODEL=gpt-5.4-medium
-SUBAGENT_MODEL=gpt-5.4-medium
-
-RUN_ARTIFACTS_DIR=artifacts/runs
-MAX_RETRY=5
-MAX_BUDGET=80
-REGION_PROCESSING_MODE=parallel
-REGION_CONCURRENCY=8
-WORKFLOW_MODE=region_object
-SUPERVISOR_MEMORY_ENABLED=false
-SUPERVISOR_MEMORY_PERSIST_ENABLED=true
-STRATEGY_ENABLED=true
-```
-
-### 常用参数怎么理解
-
-| 参数 | 你什么时候需要关心它 | 推荐起步值 | 说明 |
-|---|---|---|---|
-| `API_KEY` | 任何时候都必须配置 | 你的真实 key | 模型服务鉴权 |
-| `BASE_URL` | 任何时候都必须确认 | 你的服务地址 | OpenAI-compatible 服务入口 |
-| `API_PROVIDER` | 基本不用改 | `openai_compatible` | 当前实现只支持这一种 provider |
-| `API_FORMAT` | 服务兼容性不确定时要关心 | `openai_responses` | 不兼容时再切到 `openai_chat_completions` |
-| `MAX_RETRIES` | API 偶发失败较多时 | `2` | 单次底层 API 调用失败后的重试次数 |
-| `MAX_RETRY` | 图片很复杂、修复轮数不够时 | `5` | 单个 region/object 的修复轮数上限 |
-| `MAX_BUDGET` | 想控制总成本时 | `80` | 整次 pipeline 允许的模型调用预算 |
-| `REGION_PROCESSING_MODE` | 机器性能一般或调试时 | `parallel` | `serial` 更稳，`parallel` 更快 |
-| `REGION_CONCURRENCY` | `parallel` 模式下 | `8` | 并发 worker 上限，范围 1 到 16 |
-| `WORKFLOW_MODE` | 想控制流程深度时 | `region_object` | 完整流程；其余模式见下文 |
-| `SUPERVISOR_MEMORY_ENABLED` | 调试高级行为时 | `false` | 一般保持默认即可 |
-| `STRATEGY_ENABLED` | 调试 policy 输出时 | `true` | 一般保持默认即可 |
-
-### 命令行里最常用的可调参数
-
-实际 CLI 支持这些主要参数：
+1. 关闭正在运行的 Raster to SVG。
+2. 双击新版安装器，例如：
 
 ```text
---image-path
---api-provider
---api-format
---region-processing-mode
---region-concurrency
---workflow-mode
---supervisor-memory-enabled
---strategy-enabled
+Raster to SVG Setup 0.1.1.exe
 ```
 
-对应源码入口见 [main.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/main.py:1)。
+3. 按安装向导完成安装。
+4. 重新打开应用。
 
-### 三种最常见的参数组合
+新版安装器会覆盖旧程序文件。用户配置、API 设置、生成结果和日志默认保留。
 
-#### 1. 先求稳定跑通
+### 卸载
 
-适合第一次使用，或者图片较复杂、你先不追求速度：
+可以从 Windows 设置或开始菜单卸载：
+
+```text
+Windows 设置 -> 应用 -> 已安装的应用 -> Raster to SVG
+```
+
+交互式卸载时，卸载器会询问是否同时清理用户数据。选择保留时，只删除程序文件；选择清理时，会删除保存设置、生成结果和日志。
+
+### 用户数据位置
+
+Windows 上用户数据通常位于：
+
+```text
+C:\Users\<用户名>\AppData\Roaming\Raster to SVG\
+```
+
+常见内容包括：
+
+```text
+.frontend_runtime_overrides.json
+artifacts/runs/
+logs/backend.log
+```
+
+如果应用打不开，可以优先查看：
+
+```text
+C:\Users\<用户名>\AppData\Roaming\Raster to SVG\logs\backend.log
+```
+
+## 开发者如何使用
+
+开发者可以从源码启动 Web 版或桌面开发版。详细说明见：
+
+- [README.developer.md](./README.developer.md)
+- [docs.development.md](./docs.development.md)
+
+快速启动 Web 开发版：
+
+Windows:
 
 ```powershell
-python -m deepagents_template.main "请将这张图片转换为可编辑 SVG，保留布局与文本。" `
-  --image-path "test\CNNhard.png" `
-  --region-processing-mode serial `
-  --workflow-mode region_object
+powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
 ```
 
-特点：
+macOS/Linux:
 
-- 速度慢一些
-- 更容易观察每个 region 的问题
-- 适合排查失败原因
-
-#### 2. 默认推荐方案
-
-适合大多数日常转换：
-
-```powershell
-python -m deepagents_template.main "请将这张图片转换为可编辑 SVG，保留布局、文字和关系。" `
-  --image-path "test\CNNhard.png" `
-  --region-processing-mode parallel `
-  --region-concurrency 8 `
-  --workflow-mode region_object
+```bash
+chmod +x start-dev.sh
+./start-dev.sh
 ```
 
-特点：
-
-- 速度和质量比较均衡
-- 对大多数图都适合作为默认方案
-
-#### 3. 先快速出一个初稿
-
-适合你只想先拿到一个可看的初版：
-
-```powershell
-python -m deepagents_template.main "请先快速生成一个可编辑 SVG 初稿。" `
-  --image-path "test\CNNhard.png" `
-  --workflow-mode initial_only
-```
-
-特点：
-
-- 最快
-- 只做到初始合并 SVG
-- 适合先看整体结构，不适合直接当最终稿
-
-## `WORKFLOW_MODE` 应该怎么选
-
-`WORKFLOW_MODE` 有 3 个值：
-
-- `initial_only`
-  只生成初始合并 SVG，然后停止
-- `region`
-  做到 region 级修复，不继续深入 object 级修复
-- `region_object`
-  完整流程，包含更细粒度的 object 级修复
-
-建议：
-
-- 只想看看能不能跑通：`initial_only`
-- 想平衡速度和质量：`region`
-- 想尽量拿到最完整结果：`region_object`
-
-当前默认值是 `region_object`，来源见 [config.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/config.py:1)。
-
-## `REGION_PROCESSING_MODE` 和 `REGION_CONCURRENCY` 应该怎么选
-
-### `REGION_PROCESSING_MODE`
-
-- `serial`
-  逐个 region 处理，最容易调试
-- `parallel`
-  多个 region 并发处理，通常更快
-
-### `REGION_CONCURRENCY`
-
-只有 `parallel` 模式下才有意义。  
-代码会把它限制在 `1` 到 `16` 之间。
-
-经验建议：
-
-- 小图、简单图：`4`
-- 常规使用：`8`
-- 机器和服务都比较充足：`12` 到 `16`
-- 遇到不稳定、超时、资源竞争：降低到 `2` 或 `4`
-
-对应解析逻辑见 [config.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/config.py:1)。
-
-## 命令行使用说明
-
-### 最基础命令
-
-```powershell
-python -m deepagents_template.main "<你的转换要求>" --image-path "<图片路径>"
-```
-
-示例：
-
-```powershell
-python -m deepagents_template.main "请将这张流程图转换为可编辑 SVG，保留中文文本和箭头连接关系。" --image-path "test\Flow.png"
-```
-
-### 如果不传某些参数，会发生什么
-
-- 不传 `message`
-  使用 `.env` 中的 `DEFAULT_USER_INPUT`
-- 不传 `--api-provider`
-  使用 `.env` 中的 `API_PROVIDER`
-- 不传 `--api-format`
-  使用 `.env` 中的 `API_FORMAT`
-- 不传 `--region-processing-mode`
-  使用 `.env` 中的 `REGION_PROCESSING_MODE`
-- 不传 `--region-concurrency`
-  使用 `.env` 中的 `REGION_CONCURRENCY`
-- 不传 `--workflow-mode`
-  使用 `.env` 中的 `WORKFLOW_MODE`
-
-这套优先级由 [config.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/config.py:1) 统一解析。
-
-## API 服务与前端
-
-这个项目也提供 FastAPI 服务和内置前端页面。
-
-### 启动服务
-
-方式一，直接用 uvicorn：
-
-```powershell
-python -m uvicorn deepagents_template.api:app --reload
-```
-
-方式二，使用项目脚本：
-
-```powershell
-.\start-service.ps1
-```
-
-或：
-
-```powershell
-.\start-service.bat
-```
-
-`start-service.ps1` 会读取 `.env` 中的 `APP_HOST` 和 `APP_PORT`，必要时先执行 `pip install -e .`。
-
-### 打开页面
-
-默认地址：
+启动后通常访问：
 
 ```text
 http://127.0.0.1:8120/
 ```
 
-### 常用接口
+快速启动桌面开发版：
 
-- `GET /health`
-  健康检查
-- `GET /config/defaults`
-  查看前端默认配置
-- `POST /uploads`
-  上传图片
-- `POST /invoke`
-  发起一次转换
-- `GET /threads/{thread_id}/artifacts`
-  查看某次线程对应的产物
-- `POST /runs/resume`
-  从已有产物目录恢复运行
+Windows:
 
-接口实现见 [api.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/api.py:1)。
-
-### `POST /invoke` 请求示例
-
-```json
-{
-  "thread_id": "optional-thread-id",
-  "message": "请将这张 dashboard 截图转换为可编辑 SVG，并尽量保留图表语义。",
-  "image_path": "D:\\path\\to\\input.png",
-  "api_provider": "openai_compatible",
-  "api_format": "openai_responses",
-  "region_processing_mode": "parallel",
-  "region_concurrency": 8,
-  "workflow_mode": "region_object"
-}
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -Desktop
 ```
 
-## 转换流程到底做了什么
+macOS/Linux:
 
-当前 CLI 与 API 都要求传入 `image_path`，实际执行的是 [conversion.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/conversion.py:1) 中的 `RasterToSvgPipeline`。主流程如下：
-
-1. 创建本次 run 的产物目录
-2. 复制输入图片到 `input/`
-3. 提取输入图片元数据
-4. 生成 requirement summary 和 acceptance checklist
-5. 调用模型做 layout detection
-6. 归一化和修正 bbox
-7. 按 region 裁图
-8. 为每个 region 生成 SVG
-9. 对 region 结果执行 review 与 repair
-10. 合并所有 region，得到 `output/final.svg`
-11. 对最终 SVG 做 final review
-12. 写出报告、日志和可恢复状态
-
-## 重要产物目录说明
-
-一次典型运行下，目录大致如下：
-
-```text
-artifacts/runs/<timestamp>-<project-name>/
-├─ input/
-│  ├─ request.json
-│  ├─ input_metadata.json
-│  └─ <copied-image>
-├─ intermediate/
-│  ├─ layout_detection.json
-│  ├─ regions.json
-│  ├─ template.svg
-│  ├─ region_results.json
-│  └─ regions/
-├─ output/
-│  ├─ final.svg
-│  ├─ final_review.json
-│  ├─ report.md
-│  └─ report.json
-├─ logs/
-│  ├─ overview.json
-│  ├─ timeline.json
-│  └─ files.json
-├─ metadata.json
-└─ run_state.json
+```bash
+./start-dev.sh --desktop
 ```
 
-其中：
+开发环境的 API 配置位于项目根目录 `.env`。如果 `.env` 不存在，启动脚本会基于 `.env.example` 创建。
 
-- `input/`
-  保存输入图片和本次请求参数
-- `intermediate/`
-  保存 layout、region 拆分和中间 SVG 片段
-- `output/`
-  保存最终 SVG 和最终报告
-- `logs/`
-  保存过程日志和产物写入记录
-- `run_state.json`
-  保存恢复执行所需的状态
-
-## 配置参数总表
-
-这些参数来自 `.env`，用于设置默认行为：
-
-| 参数名 | 默认值 | 说明 |
-|---|---|---|
-| `API_KEY` | 空字符串 | 模型服务密钥，兼容旧别名 `OPENAI_API_KEY` / `POE_API_KEY` |
-| `BASE_URL` | `None` | 模型服务地址，兼容旧别名 `OPENAI_BASE_URL` |
-| `API_PROVIDER` | `openai_compatible` | 当前唯一支持的 provider |
-| `API_FORMAT` | `openai_responses` | 底层协议，可切换到 `openai_chat_completions` |
-| `MAX_RETRIES` | `2` | 底层 API 请求失败时的重试次数 |
-| `LANGSMITH_API_KEY` | 空 | 可选 tracing 配置 |
-| `LANGSMITH_TRACING` | `false` | 是否启用 LangSmith tracing |
-| `LANGSMITH_PROJECT` | `raster-to-svg-agent-demo` | LangSmith 项目名 |
-| `AGENT_MODEL` | `gpt-5.4-medium` | coordinator / final review 模型 |
-| `SUBAGENT_MODEL` | `gpt-5.4-medium` | region worker 模型 |
-| `AGENT_NAME` | `raster-svg-coordinator` | agent 名称 |
-| `USE_PREVIOUS_RESPONSE_ID` | `false` | 是否复用 Responses API 的状态 |
-| `APP_HOST` | `127.0.0.1` | FastAPI 监听地址 |
-| `APP_PORT` | `8120` | FastAPI 监听端口 |
-| `REQUIRE_APPROVAL_FOR_TASK_CREATION` | `false` | 预留审批开关 |
-| `RUN_ARTIFACTS_DIR` | `artifacts/runs` | 产物根目录 |
-| `DEFAULT_USER_INPUT` | `Convert this image into SVG format` | CLI 未传 message 时使用 |
-| `MAX_RETRY` | `5` | 单个修复任务的最大重试轮数 |
-| `MAX_BUDGET` | `80` | 整次 run 的模型调用预算 |
-| `REGION_PROCESSING_MODE` | `parallel` | 默认 region 处理模式 |
-| `REGION_CONCURRENCY` | `8` | 默认并发数 |
-| `WORKFLOW_MODE` | `region_object` | 默认工作流深度 |
-| `SUPERVISOR_MEMORY_ENABLED` | `false` | 是否启用 supervisor memory |
-| `SUPERVISOR_MEMORY_PERSIST_ENABLED` | `true` | 是否持久化 supervisor memory |
-| `STRATEGY_ENABLED` | `true` | 是否启用策略提示输出 |
-
-## 请求参数总表
-
-这些参数来自 CLI 或 HTTP 请求体，代表“本次运行”的设置：
-
-| 参数名 | 是否常用 | 说明 |
-|---|---|---|
-| `message` | 必填 | 本次转换要求 |
-| `image_path` | 必填 | 输入图片本地路径 |
-| `api_provider` | 偶尔 | 覆盖 `.env` 中的 provider |
-| `api_key` | 偶尔 | 覆盖 `.env` 中的 key |
-| `base_url` | 偶尔 | 覆盖 `.env` 中的 base URL |
-| `api_format` | 常用 | 本次运行改用 `responses` 或 `chat.completions` |
-| `max_retries` | 偶尔 | 覆盖底层 API 重试次数 |
-| `region_processing_mode` | 常用 | 本次运行用 `serial` 或 `parallel` |
-| `region_concurrency` | 常用 | 本次运行的并发数 |
-| `workflow_mode` | 常用 | 本次运行的流程深度 |
-| `project_name` | 偶尔 | 自定义产物目录名 |
-| `agent_model` | 偶尔 | 覆盖 coordinator 模型 |
-| `subagent_model` | 偶尔 | 覆盖 worker 模型 |
-| `agent_name` | 很少 | 覆盖 agent 名称 |
-| `use_previous_response_id` | 很少 | 覆盖 Responses API 状态复用策略 |
-| `max_retry` | 偶尔 | 覆盖修复轮数 |
-| `max_budget` | 常用 | 覆盖总预算 |
-| `supervisor_memory_enabled` | 很少 | 覆盖 supervisor memory 开关 |
-| `supervisor_memory_persist_enabled` | 很少 | 覆盖 memory 持久化开关 |
-| `strategy_enabled` | 很少 | 覆盖策略提示开关 |
-
-定义见 [schemas.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/schemas.py:1017)。
-
-## 快速排错
-
-### 1. 命令能启动，但模型调用失败
-
-优先检查：
-
-- `API_KEY` 是否真实有效
-- `BASE_URL` 是否正确
-- `API_FORMAT` 是否和你的服务兼容
-- 网络是否能访问模型服务
-
-如果你不确定服务是否支持 `responses`，先尝试改成：
+至少需要检查：
 
 ```env
+API_KEY=your-real-api-key
+BASE_URL=https://your-real-api-base-url/v1
+API_PROVIDER=openai_compatible
 API_FORMAT=openai_chat_completions
 ```
 
-### 2. 运行很慢或经常超时
+没有真实 API 配置时，前端页面仍可打开，但实际模型转换会失败。
 
-可以先这样降复杂度：
+## 构建安装包
 
-- 把 `REGION_PROCESSING_MODE` 改成 `serial`
-- 把 `REGION_CONCURRENCY` 降到 `2` 或 `4`
-- 把 `WORKFLOW_MODE` 改成 `region` 或 `initial_only`
+Windows 安装包由 `packaging/` 目录下的脚本生成。详细说明见：
 
-### 3. 跑到中途停住，怀疑预算不够
+- [packaging/README.packaging.md](./packaging/README.packaging.md)
+- [docs.installer.md](./docs.installer.md)
 
-检查：
+构建当前版本安装器：
 
-- `.env` 里的 `MAX_BUDGET`
-- 产物目录里的 `run_state.json`
-
-如果 run 因预算暂停，可以通过 API 的 `POST /runs/resume` 恢复。
-
-### 4. 不知道这次到底用了哪些参数
-
-直接查看：
-
-```text
-artifacts/runs/<run>/input/request.json
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-这份文件最适合用来复盘“本次实际跑的是什么配置”。
+构建可发布的新版本安装器，例如发布 `0.1.1`：
 
-## 相关代码入口
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+```
 
-- CLI 入口：[main.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/main.py:1)
-- 配置解析：[config.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/config.py:1)
-- 转换主流程：[conversion.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/conversion.py:1)
-- API 服务：[api.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/api.py:1)
-- 产物管理：[artifacts.py](/D:/Daily/Schedule/LH/EditableTransf/Demo/src/deepagents_template/artifacts.py:1)
-- 部署脚本说明：[quick-start/README.md](/D:/Daily/Schedule/LH/EditableTransf/Demo/quick-start/README.md:1)
+如果 Python 后端依赖发生变化：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+```
+
+输出位置：
+
+```text
+dist/installers/Raster to SVG Setup <version>.exe
+```
+
+## 当前平台状态
+
+Windows：
+
+- 已完成安装器最小闭环
+- 支持自定义安装目录
+- 支持卸载
+- 卸载时可选择是否清理用户数据
+- 支持新版安装器覆盖旧版安装
+
+macOS/Linux：
+
+- 开发启动脚本已提供
+- Electron 配置里已有 `dmg`、`AppImage`、`deb` 目标
+- 正式安装包仍需要在对应系统上构建、签名、测试和发布
+
+## 文档入口
+
+除主 README 外，项目自有 README 都带有语义后缀：
+
+- [README.developer.md](./README.developer.md)：开发者入口文档
+- [packaging/README.packaging.md](./packaging/README.packaging.md)：打包、版本发布、覆盖安装、依赖体积说明
+- [desktop/README.desktop.md](./desktop/README.desktop.md)：Electron 桌面壳说明
+- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)：迁移、部署和目标机器 bootstrap
+
+其他详细文档：
+
+- [docs.development.md](./docs.development.md)：详细开发环境、启动方式和故障排查
+- [docs.installer.md](./docs.installer.md)：安装器实现和已安装模式说明
+
+## 推荐阅读路径
+
+产品用户：
+
+1. 阅读本 README 的“产品用户如何使用”。
+2. 安装 `Raster to SVG Setup <version>.exe`。
+3. 打开应用并填写 API 配置。
+
+开发者：
+
+1. 阅读 [README.developer.md](./README.developer.md)。
+2. 再阅读 [docs.development.md](./docs.development.md)。
+3. 用 `start-dev` 脚本启动开发环境。
+
+发布维护者：
+
+1. 阅读 [packaging/README.packaging.md](./packaging/README.packaging.md)。
+2. 使用 `build-release-windows.ps1` 构建版本化安装器。
+3. 发布新版安装器给用户覆盖安装。

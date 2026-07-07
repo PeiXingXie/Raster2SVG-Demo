@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from deepagents_template.prompt import (
@@ -16,6 +17,20 @@ from .rules import (
     build_bbox_memory_summary,
 )
 from .tracing import build_policy_trace
+
+
+def compact_bbox_iteration_label(iteration: str) -> str:
+    """Return a filesystem-safe short label for bbox policy trace filenames."""
+
+    text = str(iteration).strip()
+    if not text:
+        return "0"
+    normalized = text.replace(":", "_").replace("/", "_").replace("\\", "_").replace(" ", "_")
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    if len(normalized) <= 24:
+        return normalized
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    return f"{normalized[:15]}_{digest}"
 
 
 class BboxPolicyEngine:
@@ -56,7 +71,6 @@ class BboxPolicyEngine:
         validation_feedback: list[dict] | None = None,
         candidate_changed: bool = False,
         region_dir: Path | None = None,
-        retry_state: dict | None = None,
     ) -> BboxPolicyDecision:
         pipeline_use_memory = getattr(self.pipeline, "use_supervisor_memory", None)
         use_memory = bool(pipeline_use_memory()) if callable(pipeline_use_memory) else bool(
@@ -67,13 +81,13 @@ class BboxPolicyEngine:
         request_context = {
             "scope": scope,
             "proposal": proposal.model_dump(mode="json"),
-            "execution_constraints": retry_state or {},
             "candidate_changed": candidate_changed,
         }
         if memory_summary is not None:
             request_context["memory_delta"] = memory_summary
         policy_name = f"bbox-{scope}-combined-policy"
-        trace_path = self._policy_dir(scope=scope, region_dir=region_dir) / f"bbox_combined_policy_decision_{iteration}.json"
+        trace_label = compact_bbox_iteration_label(iteration)
+        trace_path = self._policy_dir(scope=scope, region_dir=region_dir) / f"bbox_policy_{trace_label}.json"
         raw_response: str | None = None
         if scope == "layout":
             assert copied_input_path is not None
@@ -85,7 +99,6 @@ class BboxPolicyEngine:
                 candidate_regions=candidate_regions or [],
                 proposal_result=proposal.model_dump(mode="json"),
                 memory_summary=memory_summary,
-                retry_state=retry_state or {},
                 candidate_changed=candidate_changed,
             )
             llm_request = {"system_prompt": system_prompt, "user_prompt": user_prompt}
@@ -100,7 +113,6 @@ class BboxPolicyEngine:
                     candidate_regions=candidate_regions or [],
                     proposal_result=proposal.model_dump(mode="json"),
                     memory_summary=memory_summary,
-                    retry_state=retry_state or {},
                     candidate_changed=candidate_changed,
                 )
             except Exception as exc:
@@ -123,9 +135,8 @@ class BboxPolicyEngine:
                 current_objects=current_objects or [],
                 candidate_objects=candidate_objects or [],
                 proposal_result=proposal.model_dump(mode="json"),
-                validation_feedback=validation_feedback or [],
+                validation_feedback=[],
                 memory_summary=memory_summary,
-                retry_state=retry_state or {},
                 candidate_changed=candidate_changed,
             )
             llm_request = {"system_prompt": system_prompt, "user_prompt": user_prompt}
@@ -138,9 +149,8 @@ class BboxPolicyEngine:
                     current_objects=current_objects or [],
                     candidate_objects=candidate_objects or [],
                     proposal_result=proposal.model_dump(mode="json"),
-                    validation_feedback=validation_feedback or [],
+                    validation_feedback=[],
                     memory_summary=memory_summary,
-                    retry_state=retry_state or {},
                     candidate_changed=candidate_changed,
                 )
             except Exception as exc:

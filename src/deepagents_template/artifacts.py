@@ -28,11 +28,14 @@ ARTIFACT_KIND_BY_SUFFIX = {
 }
 
 PREVIEWABLE_KINDS = {"svg", "png", "jpg", "jpeg", "webp", "gif", "bmp"}
+RUN_DIR_SLUG_MAX_LENGTH = 24
 
 
-def slugify_project_name(name: str) -> str:
+def slugify_project_name(name: str, *, max_length: int | None = None) -> str:
     normalized = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "-", name.strip())
     normalized = normalized.strip("-")
+    if max_length is not None and max_length > 0:
+        normalized = normalized[:max_length].strip("-")
     return normalized or "run"
 
 
@@ -62,7 +65,7 @@ class ArtifactStore:
 
     def create_run_dir(self, project_name: str) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        slug = slugify_project_name(project_name)
+        slug = slugify_project_name(project_name, max_length=RUN_DIR_SLUG_MAX_LENGTH)
         run_dir = self.root / f"{timestamp}-{slug}"
         suffix = 1
         candidate = run_dir
@@ -567,6 +570,10 @@ class ArtifactStore:
             base_frame = frames_by_id.get(str(base_frame_id)) if base_frame_id else None
             base_snapshot_path = adjustment_dir / "base_before_adjustment.svg"
             stat = manual_svg_path.stat()
+            workflow_trace, adjustment_error = self.build_manual_workflow_trace(
+                artifact_dir,
+                adjustment_id=adjustment_dir.name,
+            )
             versions.append(
                 {
                     "adjustment_id": adjustment_dir.name,
@@ -580,13 +587,19 @@ class ArtifactStore:
                         if base_snapshot_path.is_file()
                         else base_frame.get("relative_path") if base_frame else None
                     ),
+                    "workflow_trace": workflow_trace,
+                    "adjustment_error": adjustment_error,
                 }
             )
 
         versions.sort(key=lambda item: (item["modified_at"], item["adjustment_id"]))
         return versions
 
-    def build_manual_workflow_trace(self, artifact_dir: str | None) -> tuple[dict, dict | None]:
+    def build_manual_workflow_trace(
+        self,
+        artifact_dir: str | None,
+        adjustment_id: str | None = None,
+    ) -> tuple[dict, dict | None]:
         run_dir = self.resolve_run_dir(artifact_dir)
         empty_trace = {
             "summary": {
@@ -613,7 +626,9 @@ class ArtifactStore:
         )
         if not adjustment_dirs:
             return empty_trace, None
-        latest_dir = adjustment_dirs[-1]
+        latest_dir = next((item for item in adjustment_dirs if item.name == adjustment_id), None) if adjustment_id else None
+        if latest_dir is None:
+            latest_dir = adjustment_dirs[-1]
         session_state = self._load_json_file(latest_dir / "session_state.json") or {}
         request_payload = self._load_json_file(latest_dir / "request.json") or {}
         error_payload = self._load_json_file(latest_dir / "error.json")

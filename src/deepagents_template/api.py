@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import hashlib
 import logging
 import mimetypes
+import os
+import secrets
+import signal
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -52,6 +58,7 @@ from deepagents_template.schemas import (
     DebugReviewRequest,
     DebugReviewResponse,
     FrontendDefaultsResponse,
+    FrontendHostInfoResponse,
     ManualAdjustmentRequest,
     ManualAdjustmentResponse,
     RuntimeOverridesPayload,
@@ -63,6 +70,7 @@ from deepagents_template.schemas import (
     ThreadState,
     UploadImageRequest,
     UploadImageResponse,
+    ExecutionRun,
 )
 from deepagents_template.workflow_trace import build_workflow_trace
 
@@ -70,9 +78,25 @@ from deepagents_template.workflow_trace import build_workflow_trace
 logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="deepagents-template")
 artifact_store = ArtifactStore()
-app = FastAPI(title="Raster-to-SVG Agent Demo", version="0.1.0")
+DEV_SHUTDOWN_TOKEN = os.getenv("RASTER_SVG_DEV_SHUTDOWN_TOKEN", "").strip()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        yield
+    finally:
+        executor.shutdown(wait=True)
+
+
+app = FastAPI(title="Raster-to-SVG Agent Demo", version="0.1.0", lifespan=lifespan)
 static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+async def _request_process_shutdown() -> None:
+    await asyncio.sleep(0.1)
+    signal.raise_signal(signal.SIGINT)
 
 
 def build_frontend_defaults_response() -> FrontendDefaultsResponse:
@@ -96,11 +120,82 @@ def build_frontend_defaults_response() -> FrontendDefaultsResponse:
         supervisor_memory_enabled=settings.resolved_supervisor_memory_enabled(),
         supervisor_memory_persist_enabled=settings.resolved_supervisor_memory_persist_enabled(),
         strategy_enabled=settings.resolved_strategy_enabled(),
+        recognition_bbox_refine_mode=settings.resolved_recognition_bbox_refine_mode(),
+        sam_provider_mode=settings.resolved_sam_provider_mode(),
+        sam_remote_url=settings.resolved_sam_remote_url(),
+        sam_enabled=settings.resolved_sam_enabled(),
+        sam_fallback_to_llm=settings.resolved_sam_fallback_to_llm(),
+        bbox_issue_concurrency=settings.resolved_bbox_issue_concurrency(),
+        bbox_issue_stagnation_rounds=settings.resolved_bbox_issue_stagnation_rounds(),
+        bbox_global_stagnation_rounds=settings.resolved_bbox_global_stagnation_rounds(),
     )
 
 
+def _artifact_revision_for_run(run: ExecutionRun | None) -> str | None:
+    if run is None or not run.artifact_dir:
+        return None
+    run_dir = artifact_store.resolve_run_dir(run.artifact_dir)
+    if run_dir is None:
+        return None
+    metadata_path = run_dir / "metadata.json"
+    output_path = run_dir / "output.json"
+    latest_ts = 0.0
+    for candidate in (metadata_path, output_path):
+        if candidate.is_file():
+            latest_ts = max(latest_ts, candidate.stat().st_mtime)
+    if latest_ts <= 0:
+        return None
+    revision_source = {
+        "run_id": run.run_id,
+        "status": run.status,
+        "current_stage": run.current_stage,
+        "updated_at": run.updated_at.isoformat() if getattr(run, "updated_at", None) else None,
+        "latest_ts": latest_ts,
+        "events_count": len(run.events or []),
+    }
+    return hashlib.sha1(str(revision_source).encode("utf-8")).hexdigest()[:16]
+
+
 def build_runtime_overrides_response() -> RuntimeOverridesPayload:
-    return RuntimeOverridesPayload.model_validate(load_runtime_overrides())
+    overrides = load_runtime_overrides()
+    response_payload = {key: value for key, value in overrides.items() if key != "api_key"}
+    response_payload["api_key_configured"] = bool(str(overrides.get("api_key") or "").strip())
+    return RuntimeOverridesPayload.model_validate(response_payload)
+
+
+def build_frontend_host_info_response() -> FrontendHostInfoResponse:
+    settings = get_settings()
+    return FrontendHostInfoResponse(
+        host_mode="web",
+        desktop_shell_supported=True,
+        desktop_client_hint="Electron desktop client can load this same frontend through the FastAPI service.",
+        web_monitor_hint="The web frontend remains available for development, debugging, and remote monitoring.",
+        frontend_url=f"http://{settings.app_host}:{settings.app_port}/",
+        platform=None,
+        can_open_local_file_picker=False,
+    )
+
+
+def _validate_dev_shutdown_token(request_token: str | None) -> None:
+    if not DEV_SHUTDOWN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Development shutdown endpoint is disabled.",
+        )
+    if not request_token or not secrets.compare_digest(request_token.strip(), DEV_SHUTDOWN_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid development shutdown token.",
+        )
+
+
+def _validate_local_shutdown_request(request: Request) -> None:
+    client_host = getattr(request.client, "host", None)
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Development shutdown endpoint only accepts local requests.",
+        )
 
 
 def build_agent_response(thread: ThreadState) -> AgentResponse:
@@ -121,8 +216,14 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
     for run in artifact_store.list_recent_runs():
         if run.run_id in seen_run_ids:
             continue
+        run.artifact_revision = _artifact_revision_for_run(run)
         recent_runs.append(run)
         seen_run_ids.add(run.run_id)
+
+    current_run = thread.current_run
+    if current_run is not None:
+        current_run = current_run.model_copy(deep=True)
+        current_run.artifact_revision = _artifact_revision_for_run(current_run)
 
     return AgentResponse(
         thread_id=thread.thread_id,
@@ -130,9 +231,21 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
         content=latest_assistant,
         approval_request=thread.pending_approval,
         messages=thread.messages,
-        current_run=thread.current_run,
+        current_run=current_run,
         recent_runs=recent_runs,
     )
+
+
+@app.post("/dev/shutdown", status_code=status.HTTP_202_ACCEPTED)
+async def dev_shutdown(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_dev_shutdown_token: str | None = Header(default=None),
+):
+    _validate_local_shutdown_request(request)
+    _validate_dev_shutdown_token(x_dev_shutdown_token)
+    background_tasks.add_task(_request_process_shutdown)
+    return {"status": "shutting_down"}
 
 
 def _find_run_for_thread(thread: ThreadState, run_id: str | None = None):
@@ -173,6 +286,15 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
     run_dir = artifact_store.resolve_run_dir(run.artifact_dir)
     failure_diagnostic = load_failure_diagnostic_from_run_dir(run_dir, run) if run_dir is not None else None
     failure_diagnostic = merge_failure_diagnostics(failure_diagnostic, run.failure_diagnostic)
+    trace_run = run
+    if failure_diagnostic is not None:
+        trace_run = run.model_copy(
+            deep=True,
+            update={
+                "failure_diagnostic": failure_diagnostic,
+                "failure_stage": failure_diagnostic.failure_stage or run.failure_stage,
+            },
+        )
     if run_dir is None:
         return ArtifactSnapshot(
             available=False,
@@ -180,9 +302,9 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
             project_name=run.project_name,
             status=run.status,
             current_stage=run.current_stage,
-            failure_stage=run.failure_stage,
+            failure_stage=trace_run.failure_stage,
             artifact_dir=run.artifact_dir,
-            failure_diagnostic=run.failure_diagnostic,
+            failure_diagnostic=failure_diagnostic or run.failure_diagnostic,
             resume=ArtifactResumeInfo(),
         )
 
@@ -193,7 +315,11 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
     output_frames_payload = artifact_store.build_output_frames(run.artifact_dir)
     manual_adjustments_payload = artifact_store.build_manual_adjustments(run.artifact_dir, output_frames_payload)
     region_results_payload = artifact_store.load_payload(run.artifact_dir, "intermediate/region_results.json") or []
-    manual_workflow_trace, manual_adjustment_error = artifact_store.build_manual_workflow_trace(run.artifact_dir)
+    selected_adjustment_id = manual_adjustments_payload[-1]["adjustment_id"] if manual_adjustments_payload else None
+    manual_workflow_trace, manual_adjustment_error = artifact_store.build_manual_workflow_trace(
+        run.artifact_dir,
+        adjustment_id=selected_adjustment_id,
+    )
 
     files: list[ArtifactFileEntry] = []
     for item in artifact_store.list_files(run.artifact_dir):
@@ -260,6 +386,8 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
                 base_title=item.get("base_title"),
                 base_preview_url=base_preview_url,
                 base_download_url=f"{base_preview_url}&download=true" if base_preview_url else None,
+                workflow_trace=item.get("workflow_trace") or {},
+                adjustment_error=item.get("adjustment_error"),
             )
         )
 
@@ -267,6 +395,34 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
     final_output_ready = bool(
         preview_targets.get("output_svg")
         or preview_targets.get("output_png")
+    )
+    artifact_revision_source = {
+        "run_id": run.run_id,
+        "status": run.status,
+        "current_stage": run.current_stage,
+        "updated_at": run.updated_at.isoformat() if getattr(run, "updated_at", None) else None,
+        "events_count": len(run.events or []),
+        "files_count": len(files),
+        "output_frames_count": len(output_frames),
+        "manual_adjustments_count": len(manual_adjustments),
+        "workflow_trace_status": (build_workflow_trace(
+            trace_run,
+            regions=regions,
+            region_results=region_results_payload if isinstance(region_results_payload, list) else [],
+        ).summary.status),
+        "workflow_trace_active_node_id": (build_workflow_trace(
+            trace_run,
+            regions=regions,
+            region_results=region_results_payload if isinstance(region_results_payload, list) else [],
+        ).summary.active_node_id),
+        "manual_trace_status": manual_workflow_trace.get("summary", {}).get("status") if isinstance(manual_workflow_trace, dict) else None,
+        "manual_trace_active_node_id": manual_workflow_trace.get("summary", {}).get("active_node_id") if isinstance(manual_workflow_trace, dict) else None,
+    }
+    artifact_revision = hashlib.sha1(str(artifact_revision_source).encode("utf-8")).hexdigest()[:16]
+    workflow_trace = build_workflow_trace(
+        trace_run,
+        regions=regions,
+        region_results=region_results_payload if isinstance(region_results_payload, list) else [],
     )
 
     return ArtifactSnapshot(
@@ -276,20 +432,18 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
         project_name=run.project_name,
         status=run.status,
         current_stage=run.current_stage,
-        failure_stage=run.failure_stage,
+        failure_stage=trace_run.failure_stage,
         artifact_dir=str(run_dir),
+        artifact_revision=artifact_revision,
         request=ArtifactRequestSummary.model_validate(request_payload),
+        messages=thread.messages,
         overview=overview,
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         regions=[ArtifactRegionOverlay.model_validate(region) for region in regions],
         output_frames=output_frames,
         manual_adjustments=manual_adjustments,
-        workflow_trace=build_workflow_trace(
-            run,
-            regions=regions,
-            region_results=region_results_payload if isinstance(region_results_payload, list) else [],
-        ),
+        workflow_trace=workflow_trace,
         manual_workflow_trace=manual_workflow_trace,
         manual_adjustment_error=manual_adjustment_error,
         failure_diagnostic=failure_diagnostic,
@@ -606,6 +760,11 @@ def get_frontend_defaults() -> FrontendDefaultsResponse:
     return build_frontend_defaults_response()
 
 
+@app.get("/frontend/host-info", response_model=FrontendHostInfoResponse)
+def get_frontend_host_info() -> FrontendHostInfoResponse:
+    return build_frontend_host_info_response()
+
+
 @app.get("/config/runtime-overrides", response_model=RuntimeOverridesPayload)
 def get_runtime_overrides() -> RuntimeOverridesPayload:
     return build_runtime_overrides_response()
@@ -613,14 +772,23 @@ def get_runtime_overrides() -> RuntimeOverridesPayload:
 
 @app.post("/config/runtime-overrides", response_model=RuntimeOverridesPayload)
 def update_runtime_overrides(payload: RuntimeOverridesPayload) -> RuntimeOverridesPayload:
-    normalized: dict = {}
-    for key, value in payload.model_dump().items():
+    existing = load_runtime_overrides()
+    normalized: dict = dict(existing)
+    submitted_values = payload.model_dump(
+        exclude={"api_key_configured"},
+        exclude_unset=True,
+    )
+    for key, value in submitted_values.items():
         if isinstance(value, str):
             value = value.strip() or None
-        if value is not None:
+        if value is None:
+            normalized.pop(key, None)
+        else:
             normalized[key] = value
     stored = save_runtime_overrides(normalized)
-    return RuntimeOverridesPayload.model_validate(stored)
+    response_payload = {key: value for key, value in stored.items() if key != "api_key"}
+    response_payload["api_key_configured"] = bool(str(stored.get("api_key") or "").strip())
+    return RuntimeOverridesPayload.model_validate(response_payload)
 
 
 @app.post("/uploads", response_model=UploadImageResponse)

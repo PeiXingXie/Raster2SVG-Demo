@@ -397,6 +397,13 @@ def _text_issue_severity(*parts: str | None) -> str:
     high_tokens = (
         "missing",
         "absent",
+        "silhouette",
+        "likeness",
+        "generic",
+        "over-simplified",
+        "oversimplified",
+        "emblem",
+        "distinctive",
         "wrong text",
         "incorrect text",
         "unreadable",
@@ -436,26 +443,60 @@ def _severity_score(level: str) -> int:
     return {"low": 1, "medium": 3, "high": 6}.get(level, 3)
 
 
+def _explicit_issue_severity(value: str | None) -> str:
+    return value if value in {"low", "medium", "high"} else "medium"
+
+
 def _is_minor_residuals(severities: list[str]) -> bool:
     return bool(severities) and len(severities) <= 2 and all(level == "low" for level in severities)
+
+
+def _can_accept_progressive_target_improvement(
+    *,
+    targeted_issues: list[dict[str, Any]],
+    targeted_severities: list[str],
+    review_needs_adjustment: bool,
+    accept_tendency: str,
+    stop_tendency: str,
+) -> bool:
+    if not targeted_issues or not review_needs_adjustment:
+        return False
+    if accept_tendency != "reject" or stop_tendency != "continue":
+        return False
+    if any(level == "high" for level in targeted_severities):
+        if len(targeted_issues) > 2:
+            return False
+        return True
+    return bool(targeted_severities) and all(level == "medium" for level in targeted_severities)
 
 
 def _bbox_issue_entries(review: dict[str, Any]) -> list[dict[str, str]]:
     issues = review.get("issues") or []
     return [
         {
-            "issue_id": f"{item.get('target_id', '')}:{item.get('criterion', '')}",
+            "issue_id": str(item.get("canonical_issue_id") or f"{item.get('target_id', '')}:{item.get('issue_code') or item.get('criterion', '')}"),
             "severity": _bbox_issue_severity(item),
+            "issue_code": str(item.get("issue_code") or ""),
         }
         for item in issues
-        if item.get("target_id") and item.get("criterion")
+        if item.get("target_id") and (item.get("issue_code") or item.get("criterion"))
     ]
 
 
 def _bbox_issue_severity(item: dict[str, Any]) -> str:
     explicit = str(item.get("severity", "medium"))
+    issue_code = str(item.get("issue_code") or "")
+    if issue_code in {"target_not_contained", "target_clipped", "invalid_bbox"}:
+        return "high" if explicit == "low" else explicit
     inferred = _text_issue_severity(str(item.get("criterion", "")), str(item.get("reason", "")))
     return inferred if _severity_score(inferred) > _severity_score(explicit) else explicit
+
+
+def _has_hard_bbox_residual(review: dict[str, Any]) -> bool:
+    return any(
+        str(item.get("issue_code") or "") in {"target_not_contained", "target_clipped", "invalid_bbox"}
+        for item in review.get("issues") or []
+    )
 
 
 def _bbox_target_split(
@@ -494,14 +535,23 @@ def apply_bbox_combined_policy_rules(
 
     accept_current = combined.termination.acceptance_tendency == "accept"
     continue_refinement = combined.termination.stop_tendency == "continue"
-    severities = [entry["severity"] for entry in _bbox_issue_entries(review.model_dump(mode="json"))]
+    review_payload = review.model_dump(mode="json")
+    severities = [entry["severity"] for entry in _bbox_issue_entries(review_payload)]
     only_minor = _is_minor_residuals(severities)
     target_ids = {item for item in proposal.target_ids if item}
-    targeted_issues, remaining_issues = _bbox_target_split(review.model_dump(mode="json"), target_ids=target_ids)
+    targeted_issues, remaining_issues = _bbox_target_split(review_payload, target_ids=target_ids)
     targeted_severities = [_bbox_issue_severity(item) for item in targeted_issues]
     remaining_severities = [_bbox_issue_severity(item) for item in remaining_issues]
     targeted_stable = bool(target_ids) and (not targeted_issues or all(level == "low" for level in targeted_severities))
+    targeted_progressive = bool(target_ids) and _can_accept_progressive_target_improvement(
+        targeted_issues=targeted_issues,
+        targeted_severities=targeted_severities,
+        review_needs_adjustment=review.needs_adjustment,
+        accept_tendency=combined.termination.acceptance_tendency,
+        stop_tendency=combined.termination.stop_tendency,
+    )
     remaining_major_elsewhere = any(level != "low" for level in remaining_severities)
+    hard_bbox_residual = _has_hard_bbox_residual(review_payload)
     final_reason = ""
     if proposal.scope == "layout":
         current_region_count = len(getattr(memory, "region_ids", []) or [])
@@ -538,7 +588,7 @@ def apply_bbox_combined_policy_rules(
         accept_current = True
         continue_refinement = False
         rules.append(_rule("bbox-combined.clean-review-terminal", changed=True, reason="Accept when candidate review has no meaningful remaining bbox issues."))
-    elif only_minor:
+    elif only_minor and not hard_bbox_residual:
         accept_current = True
         continue_refinement = False
         rules.append(_rule("bbox-combined.accept-minor-residuals", changed=True, reason="Allow minor low-severity bbox residuals to pass."))
@@ -557,6 +607,19 @@ def apply_bbox_combined_policy_rules(
                 "bbox-combined.accept-stable-targeted-improvements",
                 changed=True,
                 reason="Persist improved target boxes even when other objects still need bbox refinement.",
+                before={"accept_current_result": False, "continue_refinement": False},
+                after={"accept_current_result": True, "continue_refinement": True},
+            )
+        )
+    elif targeted_progressive and not retry_exhausted:
+        accept_current = True
+        continue_refinement = True
+        final_reason = "Accepted the improved target bbox for progressive refinement; continue later cleanup from the better state."
+        rules.append(
+            _rule(
+                "bbox-combined.accept-progressive-targeted-improvement",
+                changed=True,
+                reason="Persist materially improved target boxes even when the same target still has light-to-moderate residual cleanup left.",
                 before={"accept_current_result": False, "continue_refinement": False},
                 after={"accept_current_result": True, "continue_refinement": True},
             )
@@ -591,14 +654,14 @@ def _region_issue_entries(review: RegionReviewResult) -> list[dict[str, str]]:
         entries.append(
             {
                 "issue_id": f"region:{review.region_id}:{issue.criterion}",
-                "severity": _text_issue_severity(issue.criterion, issue.reason),
+                "severity": _explicit_issue_severity(getattr(issue, "severity", None)),
             }
         )
     for issue in review.object_issues:
         entries.append(
             {
                 "issue_id": f"object:{review.region_id}:{issue.object_id}:{issue.criterion}",
-                "severity": _text_issue_severity(issue.criterion, issue.reason),
+                "severity": _explicit_issue_severity(getattr(issue, "severity", None)),
             }
         )
     return entries
@@ -608,7 +671,7 @@ def _object_issue_entries(review: ObjectReviewResult) -> list[dict[str, str]]:
     return [
         {
             "issue_id": f"object:{review.object_id}:{item.criterion}",
-            "severity": _text_issue_severity(item.criterion, item.reason),
+            "severity": _explicit_issue_severity(getattr(item, "severity", None)),
         }
         for item in review.failed_items
     ]
