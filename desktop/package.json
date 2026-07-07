@@ -1,6 +1,6 @@
 {
   "name": "raster-svg-desktop-client",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "private": true,
   "author": "Raster to SVG Contributors",
   "description": "Electron desktop shell for the shared Raster-to-SVG frontend.",
