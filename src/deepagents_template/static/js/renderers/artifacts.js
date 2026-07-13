@@ -1,5 +1,5 @@
 import { elements } from "../dom.js";
-import { DEFAULT_MESSAGE, renderState, appState } from "../state.js";
+import { DEFAULT_MESSAGE, renderState, appState } from "../state.js?v=run-start-state-boundary-1";
 import { createLoadingState } from "../components/loading-state.js";
 import {
   captureDetailsState,
@@ -858,13 +858,13 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
     return clampFrameIndex(Math.round(ratio * denominator));
   };
-  const selectFrameIndex = (index) => {
+  const selectFrameIndex = (index, { force = false } = {}) => {
     const nextIndex = clampFrameIndex(index);
-    if (nextIndex === lastDragFrameIndex) {
+    if (!force && nextIndex === lastDragFrameIndex) {
       return;
     }
     lastDragFrameIndex = nextIndex;
-    onFrameChange(nextIndex);
+    onFrameChange(nextIndex, { source: "user" });
   };
   sliderShell.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
@@ -873,7 +873,7 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
     event.preventDefault();
     sliderShell.classList.add("is-dragging");
     const dragRect = sliderShell.getBoundingClientRect();
-    selectFrameIndex(frameIndexFromClientX(event.clientX, dragRect));
+    selectFrameIndex(frameIndexFromClientX(event.clientX, dragRect), { force: true });
 
     const handlePointerMove = (moveEvent) => {
       moveEvent.preventDefault();
@@ -897,7 +897,7 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
   range.value = String(selectedOutputFrameIndex);
   range.step = "1";
   range.addEventListener("input", (event) => {
-    onFrameChange(Number.parseInt(event.target.value, 10) || 0);
+    onFrameChange(Number.parseInt(event.target.value, 10) || 0, { source: "user" });
   });
   sliderShell.appendChild(range);
 
@@ -911,7 +911,7 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
     marker.title = `${index + 1}. ${frameItem.title}`;
     marker.setAttribute("aria-label", `View output version ${index + 1}: ${frameItem.title}`);
     marker.addEventListener("click", () => {
-      onFrameChange(index);
+      onFrameChange(index, { source: "user" });
     });
     markerRow.appendChild(marker);
   }
@@ -1478,12 +1478,13 @@ function scrollTraceViewportToElement(viewport, target) {
   const state = traceViewportState.get(viewport);
   const scale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, state?.zoomMultiplier || 1));
   const targetLeft = Math.max(0, target.offsetLeft * scale - (viewport.clientWidth - target.offsetWidth * scale) / 2);
-  const targetTop = Math.max(0, target.offsetTop * scale - Math.max(20, viewport.clientHeight * 0.24));
   viewport.scrollLeft = targetLeft;
   const panel = viewport.closest(".workspace-sidebar-panel");
   if (panel instanceof HTMLElement) {
-    panel.scrollTop = Math.max(0, viewport.offsetTop + targetTop - Math.max(20, panel.clientHeight * 0.24));
+    const desiredPanelTop = Math.max(96, panel.clientHeight * 0.28);
+    panel.scrollTop = Math.max(0, viewport.offsetTop + target.offsetTop * scale - desiredPanelTop);
   } else {
+    const targetTop = Math.max(0, target.offsetTop * scale - Math.max(20, viewport.clientHeight * 0.24));
     viewport.scrollTop = targetTop;
   }
 }

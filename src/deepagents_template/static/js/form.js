@@ -1,5 +1,5 @@
 import { elements } from "./dom.js";
-import { appState, renderState, DEFAULT_MESSAGE } from "./state.js";
+import { appState, renderState, DEFAULT_MESSAGE } from "./state.js?v=run-start-state-boundary-1";
 import {
   arrayBufferToBase64,
   normalizeDisplayValue,

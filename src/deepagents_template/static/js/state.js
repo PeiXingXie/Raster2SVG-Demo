@@ -51,11 +51,16 @@ export const appState = {
   pendingApproval: null,
   selectedEventIndex: null,
   selectedManualAdjustmentId: null,
+  outputFrameFollowMode: "auto",
+  outputFrameAutoFollow: true,
+  selectedOutputFrameId: null,
   selectedOutputFrameIndex: 0,
   selectedOverlay: { type: "region", regionId: null, objectId: null },
   selectedRunId: null,
   snapshot: null,
+  snapshotRequestGeneration: 0,
   snapshotRequestInFlight: false,
+  artifactRequestGeneration: 0,
   snapshotTimer: null,
   artifactTimer: null,
   threadId: null,
@@ -74,6 +79,9 @@ export function resetUiSelections() {
   appState.linkedMessageIndex = null;
   appState.selectedOverlay = { type: "region", regionId: null, objectId: null };
   appState.selectedManualAdjustmentId = null;
+  appState.outputFrameFollowMode = "auto";
+  appState.outputFrameAutoFollow = true;
+  appState.selectedOutputFrameId = null;
   appState.selectedOutputFrameIndex = 0;
   appState.manualSelectionBox = null;
   appState.manualSelectionShape = null;

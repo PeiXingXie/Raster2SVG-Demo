@@ -93,8 +93,9 @@ def build_object_svg_generation_prompts(
           - Treat strategy_hint as expected outcome guidance only, not step-by-step edit instructions.
           - Use compact, high-signal SVG. Prefer editable primitives over opaque paths when practical, but fidelity is more important than over-abstracting.
           - If Object.fidelity_hints.verify_required is true, use Object.fidelity_hints.fidelity_goals as concrete visual obligations.
-          - Do not substitute a cleaner generic same-category icon, symbol, badge, code window, node-link diagram, emblem, or mark when fidelity goals describe specific visible structure.
+          - Do not substitute a cleaner generic same-category icon, symbol, badge, code window, network diagram, emblem, or mark when fidelity goals describe specific visible structure.
           - If a fidelity goal describes an owned detail inside a non-icon object, preserve that detail inside the owning object.
+          - If failed_items mention an owned icon, symbol, badge, or local detail inside a container, repair only that owned detail when possible; do not redraw correct card, text, or neighboring details.
           - Small simplification is acceptable only when it preserves the goal's silhouette, internal structure, relative layout, z-order, and visual weight.
 
         By object_type (follow the matching line):
@@ -110,7 +111,7 @@ def build_object_svg_generation_prompts(
           - If this object is a grouped set, keep it same-class and logically cohesive rather than mixing unrelated classes.
           - For icon repairs, do not replace the source with a generic category symbol when the raster has distinctive lobes, windows, nodes, terminals, or emblem strokes.
           - For icon repairs, avoid arbitrary, structurally broken, unintentionally jagged, visually nonsensical, damaged, or distorted-trace contours.
-          - For icon repairs, fix the main fidelity dimension named by failed_items or strategy_hint: silhouette, distinctive parts, internal strokes, visual weight, z-order, internal layout, malformed contour, or relative proportions.
+          - For icon repairs, fix the main fidelity dimension named by failed_items or strategy_hint: silhouette/contour, distinctive parts, internal strokes/marks, topology, part proportions/overlap, z-order, internal layout, local pictogram style, malformed contour, or relative proportions.
           - For icon repairs, fix identity-level defects before small spacing, smoothing, or decorative polish.
           - The fig color-block replacement rule applies only to object_type="fig"; never apply it to icon objects.
           - generation_notes should stay short and only mention meaningful edits or generated structure.

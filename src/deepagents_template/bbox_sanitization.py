@@ -65,7 +65,7 @@ def sanitize_bbox_issues(
         cleaned = issue.model_copy(
             update={
                 "criterion": truncate_text(issue.criterion, max_words=12, max_chars=72),
-                "reason": truncate_text(issue.reason, max_words=20, max_chars=120),
+                "reason": truncate_text(issue.reason, max_words=24, max_chars=140),
             }
         )
         if not cleaned.criterion or not cleaned.reason:

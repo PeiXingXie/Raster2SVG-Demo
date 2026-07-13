@@ -135,7 +135,7 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                     issue.model_copy(
                         update={
                             "criterion": self._truncate_text(issue.criterion, max_words=12, max_chars=72),
-                            "reason": self._truncate_text(issue.reason, max_words=20, max_chars=120),
+                            "reason": self._truncate_text(issue.reason, max_words=24, max_chars=140),
                         }
                     )
                     for issue in result.issues
@@ -167,7 +167,7 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
         deduped_changes: list[str] = []
         seen_changes: set[str] = set()
         for item in changes[:6]:
-            cleaned = self._truncate_text(item, max_words=16, max_chars=96)
+            cleaned = self._truncate_text(item, max_words=20, max_chars=120)
             if not cleaned or cleaned in seen_changes:
                 continue
             seen_changes.add(cleaned)
@@ -1191,7 +1191,13 @@ class ObjectRepairSupervisorAgent(BaseWorkflowAgent):
                 history.append({"object_id": issue.object_id, "retry_task": retry_task, "skipped": True, "retry": self.pipeline._retry_state(retry_task), "final_svg_elements": current_object_svg})
                 continue
 
-            failed_items = [{"criterion": issue.criterion, "reason": issue.reason}]
+            failed_items = [
+                {
+                    "issue_family": getattr(issue, "issue_family", None),
+                    "criterion": issue.criterion,
+                    "reason": issue.reason,
+                }
+            ]
             object_task = create_object_task(
                 object_id=obj.object_id,
                 object_type=obj.object_type,
@@ -1813,6 +1819,7 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 can_object_repair=can_object,
                 region_retry_exhausted=self.pipeline._retry_exhausted(region_retry_task),
                 iteration=str(policy_iteration),
+                region_retry_task=region_retry_task,
                 rendered_svg_path=rendered_region_svg_path,
                 svg_file_path=region_policy_dir / region_svg_file_name,
             )

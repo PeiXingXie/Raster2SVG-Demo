@@ -14,10 +14,10 @@ import {
   updateEffectiveValues,
   updateMessagePresetSelection,
   uploadLocalFile,
-} from "./form.js?v=desktop-history-jump-1";
-import { appState, resetRenderState, resetUiSelections } from "./state.js";
+} from "./form.js?v=run-start-state-boundary-1";
+import { appState, resetRenderState, resetUiSelections } from "./state.js?v=run-start-state-boundary-1";
 import { applySettingsLabelMappings } from "./settings-labels.js?v=desktop-history-jump-1";
-import { renderApproval } from "./renderers/conversation.js";
+import { renderApproval } from "./renderers/conversation.js?v=run-start-state-boundary-1";
 import {
   clearArtifactPanel,
   createOverlayPreview,
@@ -28,8 +28,8 @@ import {
   renderArtifactSummary,
   renderWorkspaceArtifactLoadingState,
   updateWorkflowTraceTimers,
-} from "./renderers/artifacts.js?v=trace-deck-collapse-1";
-import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=history-card-layout-2";
+} from "./renderers/artifacts.js?v=run-start-state-boundary-1";
+import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=run-start-state-boundary-1";
 import { arrayBufferToBase64, formatElapsedDuration, scrollIntoContainerView, stableStringify } from "./utils.js";
 
 const UI_MODE_STORAGE_KEY = "raster-svg-demo-ui-mode";
@@ -2409,6 +2409,9 @@ function setSelectedRun(runId = null) {
     appState.selectedEventIndex = null;
     appState.linkedMessageIndex = null;
     appState.selectedOverlay = { type: "region", regionId: null, objectId: null };
+    appState.outputFrameFollowMode = "auto";
+    appState.outputFrameAutoFollow = true;
+    appState.selectedOutputFrameId = null;
     appState.selectedOutputFrameIndex = 0;
     appState.selectedManualAdjustmentId = null;
     appState.latestArtifactSnapshot = null;
@@ -2500,6 +2503,13 @@ function stopArtifactPolling() {
     window.clearTimeout(appState.artifactTimer);
     appState.artifactTimer = null;
   }
+}
+
+function invalidateLiveRequests() {
+  appState.snapshotRequestGeneration += 1;
+  appState.artifactRequestGeneration += 1;
+  appState.snapshotRequestInFlight = false;
+  appState.artifactRequestInFlight = false;
 }
 
 function scheduleSnapshotPolling() {
@@ -2606,7 +2616,7 @@ async function resetRuntimeOverrides() {
 }
 
 async function refreshArtifactsForSelection({ silent = false, force = false, showLoading = false } = {}) {
-  if (!appState.threadId || appState.artifactRequestInFlight) {
+  if (!appState.threadId || (appState.artifactRequestInFlight && !force)) {
     return;
   }
   const selectedRun = getSelectedRun();
@@ -2637,6 +2647,9 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
     return;
   }
 
+  const requestGeneration = appState.artifactRequestGeneration;
+  const requestThreadId = appState.threadId;
+  const requestRunId = selectedRun.run_id || null;
   appState.artifactRequestInFlight = true;
   const currentArtifactMatchesSelection = Boolean(
     appState.latestArtifactSnapshot
@@ -2655,7 +2668,14 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
   }
   try {
     const runQuery = selectedRun.run_id ? `?run_id=${encodeURIComponent(selectedRun.run_id)}` : "";
-    const data = await fetchJson(`/threads/${appState.threadId}/artifacts${runQuery}`);
+    const data = await fetchJson(`/threads/${requestThreadId}/artifacts${runQuery}`);
+    if (
+      requestGeneration !== appState.artifactRequestGeneration
+      || requestThreadId !== appState.threadId
+      || requestRunId !== (getSelectedRun()?.run_id || null)
+    ) {
+      return;
+    }
     appState.artifactCache.set(cacheKey, { signature: cacheSignature, snapshot: data });
     appState.latestArtifactSnapshot = data;
     renderArtifactViews(data);
@@ -2663,20 +2683,98 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
       setStatus("Artifacts refreshed");
     }
   } finally {
-    appState.artifactRequestInFlight = false;
-    scheduleArtifactPolling();
+    if (requestGeneration === appState.artifactRequestGeneration) {
+      appState.artifactRequestInFlight = false;
+      scheduleArtifactPolling();
+    }
   }
 }
 
+function getOutputFrames(snapshot) {
+  return Array.isArray(snapshot?.output_frames) ? snapshot.output_frames : [];
+}
+
+function isWorkspaceOutputFrameVisible(frame) {
+  return frame?.scope !== "region-final";
+}
+
+function getDisplayArtifactSnapshot(snapshot) {
+  const frames = getOutputFrames(snapshot);
+  if (!frames.length) {
+    return snapshot;
+  }
+  const visibleFrames = frames.filter(isWorkspaceOutputFrameVisible);
+  if (visibleFrames.length === frames.length || !visibleFrames.length) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    output_frames: visibleFrames,
+    output_frames_total: frames.length,
+  };
+}
+
+function getOutputFrameKey(frame, index) {
+  return frame?.frame_id ? String(frame.frame_id) : `index:${index}`;
+}
+
+function clampOutputFrameIndex(frames, index) {
+  if (!frames.length) {
+    return 0;
+  }
+  const numericIndex = Number.isFinite(index) ? index : 0;
+  return Math.max(0, Math.min(frames.length - 1, numericIndex));
+}
+
+function syncOutputFrameSelection(snapshot) {
+  const frames = getOutputFrames(snapshot);
+  if (!frames.length) {
+    appState.selectedOutputFrameIndex = 0;
+    appState.selectedOutputFrameId = null;
+    return;
+  }
+
+  const followMode = appState.outputFrameFollowMode === "manual" ? "manual" : "auto";
+  appState.outputFrameFollowMode = followMode;
+  appState.outputFrameAutoFollow = followMode === "auto";
+
+  if (followMode === "auto") {
+    const latestIndex = frames.length - 1;
+    appState.selectedOutputFrameIndex = latestIndex;
+    appState.selectedOutputFrameId = getOutputFrameKey(frames[latestIndex], latestIndex);
+    return;
+  }
+
+  const selectedId = appState.selectedOutputFrameId ? String(appState.selectedOutputFrameId) : null;
+  const idIndex = selectedId
+    ? frames.findIndex((frame, index) => getOutputFrameKey(frame, index) === selectedId)
+    : -1;
+  const selectedIndex = idIndex >= 0
+    ? idIndex
+    : clampOutputFrameIndex(frames, appState.selectedOutputFrameIndex);
+  appState.selectedOutputFrameIndex = selectedIndex;
+  appState.selectedOutputFrameId = getOutputFrameKey(frames[selectedIndex], selectedIndex);
+}
+
+function setSelectedOutputFrame(snapshot, index, options = {}) {
+  const frames = getOutputFrames(snapshot);
+  const selectedIndex = clampOutputFrameIndex(frames, index);
+  if (options.source === "user") {
+    appState.outputFrameFollowMode = "manual";
+    appState.outputFrameAutoFollow = false;
+  }
+  appState.selectedOutputFrameIndex = selectedIndex;
+  appState.selectedOutputFrameId = frames.length ? getOutputFrameKey(frames[selectedIndex], selectedIndex) : null;
+}
+
 function renderArtifactViews(snapshot) {
+  const displaySnapshot = getDisplayArtifactSnapshot(snapshot);
   const overlaySelectionAllowed =
     appState.manualSelectionMode === "select" && appState.manualReferenceSelectionMode === "select";
   if (!overlaySelectionAllowed && appState.selectedOverlay.objectId) {
     appState.selectedOverlay = { type: "region", regionId: appState.selectedOverlay.regionId, objectId: null };
   }
-  if (appState.selectedOutputFrameIndex >= (snapshot?.output_frames?.length || 1)) {
-    appState.selectedOutputFrameIndex = Math.max((snapshot?.output_frames?.length || 1) - 1, 0);
-  }
+  syncOutputFrameSelection(displaySnapshot);
   if (
     appState.selectedManualAdjustmentId &&
     !(snapshot?.manual_adjustments || []).some((item) => item.adjustment_id === appState.selectedManualAdjustmentId)
@@ -2699,15 +2797,15 @@ function renderArtifactViews(snapshot) {
       ? appState.manualSelectionShape
       : confirmedTargetSelection;
   renderArtifactSummary(
-    snapshot,
+    displaySnapshot,
     appState.selectedOverlay,
     appState.selectedOutputFrameIndex,
     (overlay) => {
       appState.selectedOverlay = overlay;
       renderArtifactViews(snapshot);
     },
-    (index) => {
-      appState.selectedOutputFrameIndex = index;
+    (index, options = {}) => {
+      setSelectedOutputFrame(displaySnapshot, index, options);
       appState.selectedManualAdjustmentId = null;
       renderArtifactViews(snapshot);
     },
@@ -2750,28 +2848,54 @@ function renderArtifactViews(snapshot) {
   updateGuideContent();
 }
 
-async function refreshSnapshot({ silent = false } = {}) {
-  if (!appState.threadId || appState.snapshotRequestInFlight) {
+async function refreshSnapshot({ silent = false, force = false } = {}) {
+  if (!appState.threadId || (appState.snapshotRequestInFlight && !force)) {
     return;
   }
+  const requestGeneration = appState.snapshotRequestGeneration;
+  const requestThreadId = appState.threadId;
   appState.snapshotRequestInFlight = true;
   if (!appState.snapshot) {
     renderViews();
   }
   try {
-    const data = await fetchJson(`/threads/${appState.threadId}/snapshot`);
+    const data = await fetchJson(`/threads/${requestThreadId}/snapshot`);
+    if (requestGeneration !== appState.snapshotRequestGeneration || requestThreadId !== appState.threadId) {
+      return;
+    }
     applySnapshot(data);
     await refreshArtifactsForSelection({ silent: true, force: true });
     if (!silent) {
       setStatus("Monitor refreshed");
     }
   } finally {
-    appState.snapshotRequestInFlight = false;
-    if (!appState.snapshot) {
-      renderViews();
+    if (requestGeneration === appState.snapshotRequestGeneration) {
+      appState.snapshotRequestInFlight = false;
+      if (!appState.snapshot) {
+        renderViews();
+      }
+      scheduleSnapshotPolling();
     }
-    scheduleSnapshotPolling();
   }
+}
+
+function applyRunStartSnapshot(data) {
+  if (!data?.thread_id || !data?.run) {
+    return;
+  }
+  const optimisticSnapshot = {
+    thread_id: data.thread_id,
+    status: data.run.status || "queued",
+    content: null,
+    approval_request: null,
+    messages: data.messages || appState.snapshot?.messages || [],
+    current_run: data.run,
+    recent_runs: [
+      data.run,
+      ...(appState.snapshot?.recent_runs || []).filter((run) => run?.run_id !== data.run.run_id),
+    ],
+  };
+  applySnapshot(optimisticSnapshot);
 }
 
 async function createThread() {
@@ -2810,14 +2934,26 @@ async function sendMessage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildInvokePayload(appState.threadId)),
     });
+    stopSnapshotPolling();
+    stopArtifactPolling();
+    invalidateLiveRequests();
     appState.threadId = data.thread_id;
     elements.threadId.textContent = appState.threadId;
+    appState.latestArtifactSnapshot = null;
+    appState.artifactCache.clear();
     resetUiSelections();
+    resetRenderState();
+    clearArtifactPanel();
+    renderManualAdjustmentPanel(null);
+    updateWorkflowTraceSummary(null);
+    renderWorkspaceArtifactLoadingState(data.run);
+    updateWorkspaceActionAvailability({ status: data.run?.status || "queued", available: false });
+    applyRunStartSnapshot(data);
     if (document.body.classList.contains("desktop-body")) {
       window.dispatchEvent(new CustomEvent("desktop-open-workspace-trace"));
     }
     setStatus("Running");
-    await refreshSnapshot({ silent: true });
+    await refreshSnapshot({ silent: true, force: true });
   } catch (error) {
     setStatus(error.message || "Send failed");
   } finally {

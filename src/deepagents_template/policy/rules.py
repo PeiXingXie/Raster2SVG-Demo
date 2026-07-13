@@ -119,8 +119,10 @@ def _truncate_words(text: str | None, *, max_words: int = 24, max_chars: int = 1
 
 REGION_REVIEW_PASSED_ITEMS_SOFT_LIMIT = 8
 REGION_REVIEW_ISSUES_SOFT_LIMIT = 8
+REGION_REVIEW_FIDELITY_VERIFICATIONS_SOFT_LIMIT = 8
 REGION_REVIEW_CRITERION_WORD_LIMIT = 12
 REGION_REVIEW_REASON_WORD_LIMIT = 24
+REGION_REVIEW_FIDELITY_RESULT_WORD_LIMIT = 23
 REGION_REVIEW_PASSED_ITEM_WORD_LIMIT = 8
 FINAL_REVIEW_ISSUES_SOFT_LIMIT = 8
 FINAL_REVIEW_DESCRIPTION_WORD_LIMIT = 24
@@ -143,6 +145,14 @@ def _clean_region_review(review: RegionReviewResult) -> RegionReviewResult:
         max_items=REGION_REVIEW_ISSUES_SOFT_LIMIT,
         builder="clean_region_review",
         field="global_repairs",
+        scope="region",
+        target_id=review.region_id,
+    )
+    check_item_budget(
+        review.fidelity_verifications,
+        max_items=REGION_REVIEW_FIDELITY_VERIFICATIONS_SOFT_LIMIT,
+        builder="clean_region_review",
+        field="fidelity_verifications",
         scope="region",
         target_id=review.region_id,
     )
@@ -199,6 +209,16 @@ def _clean_region_review(review: RegionReviewResult) -> RegionReviewResult:
             max_chars=160,
             builder="clean_region_review",
             field=f"object_issues[{index}].reason",
+            scope="region",
+            target_id=review.region_id,
+        )
+    for index, item in enumerate(review.fidelity_verifications):
+        check_word_budget(
+            item.result,
+            max_words=REGION_REVIEW_FIDELITY_RESULT_WORD_LIMIT,
+            max_chars=140,
+            builder="clean_region_review",
+            field=f"fidelity_verifications[{index}].result",
             scope="region",
             target_id=review.region_id,
         )
@@ -292,7 +312,7 @@ def default_region_combined_result(region_id: str, *, strategy_enabled: bool) ->
     return RegionCombinedPolicyModelResult.model_validate(
         {
             "prior_issue_assessment": [],
-            "review": {"region_id": region_id, "passed_items": [], "global_repairs": [], "object_issues": []},
+            "review": {"region_id": region_id, "passed_items": [], "fidelity_verifications": [], "global_repairs": [], "object_issues": []},
             "repair_plan": {
                 "route": "region_repair",
                 "route_rationale": "Fallback route from current region review context.",
@@ -525,7 +545,7 @@ def apply_bbox_combined_policy_rules(
                 issue.model_copy(
                     update={
                         "criterion": _truncate_words(issue.criterion, max_words=12, max_chars=96),
-                        "reason": _truncate_words(issue.reason, max_words=20, max_chars=140),
+                        "reason": _truncate_words(issue.reason, max_words=24, max_chars=160),
                     }
                 )
                 for issue in combined.candidate_review.issues[:8]

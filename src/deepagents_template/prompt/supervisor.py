@@ -40,6 +40,26 @@ ISSUE_SEVERITY_RULES = (
     "Use high for missing/wrong/generic objects, broken structure, unreadable text, clipping/out-of-bounds content, wrong identity, or layout hierarchy failure."
 )
 
+SYMBOLIC_FIDELITY_TERMS = (
+    "icon",
+    "badge",
+    "emblem",
+    "mark",
+    "logo",
+)
+
+GENERIC_ICON_FIDELITY_GOALS = (
+    "Preserve visible symbolic form beyond recognizability.",
+    "Preserve contours, internal marks, and part relationships.",
+    "Avoid generic same-category replacement.",
+)
+
+GENERIC_OWNED_SYMBOL_FIDELITY_GOALS = (
+    "Preserve owned symbolic details inside the object.",
+    "Preserve symbol contours, internal marks, and local style.",
+    "Avoid generic replacement of owned symbols or badges.",
+)
+
 REPLACEMENT_ISSUE_REFS_FORMAT_RULE = (
     "prior_issue_assessment[].replacement_issue_refs must be a JSON array of objects with issue_id and label fields. "
     "Never return plain strings, criterion names, or JSON paths in replacement_issue_refs. "
@@ -234,6 +254,90 @@ def history_example_block(enabled: bool, variant: str) -> str:
     }[variant]
 
 
+def history_array_fields(enabled: bool, *fields: str) -> tuple[str, ...]:
+    if not enabled:
+        return tuple(fields)
+    return ("prior_issue_assessment", *fields)
+
+
+def history_closed_value_fields(enabled: bool) -> dict[str, tuple[str, ...]]:
+    if not enabled:
+        return {}
+    return {"prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain")}
+
+
+def history_section_block(enabled: bool, variant: str) -> str:
+    if not enabled:
+        return ""
+    return textwrap.dedent(
+        f"""
+        History rules:
+        - Only include prior_issue_assessment when previous_decision_delta or supervisor memory delta is provided.
+        - Historical issues are hints to verify, not issues to copy forward.
+        - Current visual evidence is authoritative.
+        {history_rules_block(enabled, variant)}
+        """
+    ).strip()
+
+
+def object_has_symbolic_fidelity_content(obj: dict) -> bool:
+    if str(obj.get("object_type") or "").strip().lower() == "icon":
+        return True
+    text_parts: list[str] = []
+    for key in ("object_id", "description"):
+        value = obj.get(key)
+        if value is not None:
+            text_parts.append(str(value))
+    for key in ("included_elements", "generation_focus"):
+        values = obj.get(key) or []
+        if isinstance(values, list):
+            text_parts.extend(str(item) for item in values)
+    hints = obj.get("fidelity_hints") or {}
+    if isinstance(hints, dict):
+        goals = hints.get("fidelity_goals") or []
+        if isinstance(goals, list):
+            text_parts.extend(str(item) for item in goals)
+    text = " ".join(text_parts).lower()
+    return any(term in text for term in SYMBOLIC_FIDELITY_TERMS)
+
+
+def build_required_fidelity_checks(object_index: dict) -> list[dict]:
+    required_fidelity_checks = []
+    for obj in object_index.get("objects") or []:
+        if not isinstance(obj, dict):
+            continue
+        object_id = obj.get("object_id")
+        if not object_id:
+            continue
+        object_type = str(obj.get("object_type") or "").strip().lower()
+        hints = obj.get("fidelity_hints") or {}
+        goals: list[str] = []
+        verify_required = False
+        if isinstance(hints, dict):
+            verify_required = bool(hints.get("verify_required"))
+            goals = [
+                str(goal).strip()
+                for goal in (hints.get("fidelity_goals") or [])
+                if str(goal).strip()
+            ][:5]
+        if not (verify_required or object_has_symbolic_fidelity_content(obj)):
+            continue
+        fallback_goals = list(GENERIC_ICON_FIDELITY_GOALS if object_type == "icon" else GENERIC_OWNED_SYMBOL_FIDELITY_GOALS)
+        for fallback_goal in fallback_goals:
+            if len(goals) >= 5:
+                break
+            if fallback_goal not in goals:
+                goals.append(fallback_goal)
+        required_fidelity_checks.append(
+            {
+                "object_id": object_id,
+                "object_type": obj.get("object_type"),
+                "fidelity_goals": goals[:5],
+            }
+        )
+    return required_fidelity_checks
+
+
 def build_region_combined_policy_prompts(
     *,
     region: dict,
@@ -247,28 +351,13 @@ def build_region_combined_policy_prompts(
     has_history = memory_summary is not None or review_context.get("previous_decision_delta") is not None
     history_shape = history_example_block(has_history, "region")(region.get("region_id", ""))
     object_index = review_context.get("object_index") or {}
-    required_fidelity_checks = []
+    required_fidelity_checks = build_required_fidelity_checks(object_index)
     compact_object_index = {"objects": []}
     for obj in object_index.get("objects") or []:
         if not isinstance(obj, dict):
             continue
         compact_obj = {key: value for key, value in obj.items() if key != "fidelity_hints"}
         compact_object_index["objects"].append(compact_obj)
-        hints = obj.get("fidelity_hints") or {}
-        if not isinstance(hints, dict) or not hints.get("verify_required"):
-            continue
-        goals = [
-            str(goal).strip()
-            for goal in (hints.get("fidelity_goals") or [])
-            if str(goal).strip()
-        ][:5]
-        required_fidelity_checks.append(
-            {
-                "object_id": obj.get("object_id"),
-                "object_type": obj.get("object_type"),
-                "fidelity_goals": goals,
-            }
-        )
     strategy_clause = (
         f"""
         - If a useful repair strategy exists, provide repair_plan.strategy_label, repair_plan.strategy_rationale, and repair_plan.strategy_confidence.
@@ -310,7 +399,7 @@ def build_region_combined_policy_prompts(
         - Ignore low-impact polish unless it affects identity, readability, containment, editability, or mergeability.
         - In global_repairs and object_issues only, criterion should be a reusable acceptance rule, preferably framed in generic object-type or layout terms rather than image-specific subject names.
         - Put image-specific identity such as left/right role, depicted subject, or local context in reason or object_id, not in criterion.
-        - review/global/object issue reasons and every rationale must stay under 24 words.
+        - review/global/object issue reasons must stay under 24 words; every rationale should stay under 20 words.
 
         Routing rules:
         - repair_plan.route is the primary repair route; it is not permission to omit other material issues.
@@ -327,18 +416,36 @@ def build_region_combined_policy_prompts(
 
         Special visual rules:
         - Required object fidelity checks are listed separately in the user prompt.
-        - For every object in required_fidelity_checks, evaluate its fidelity_goals before deciding acceptance.
+        - Before writing passed_items, inspect required_fidelity_checks and look for object-local visual-form mismatches.
+        - For every object in required_fidelity_checks, silently compare the rendered visual appearance against its fidelity_goals before deciding acceptance.
+        - For every object in required_fidelity_checks, output exactly one review.fidelity_verifications item with object_id and result.
+        - Each fidelity_verifications result must be one concrete visual judgment against the raster, focused on contour, structure, internal marks, part relationships, local style, or visual weight.
+        - Each fidelity_verifications result must stay under 18 words.
+        - Do not write generic verification results such as "looks correct", "recognizable", "same category", "semantically faithful", "ok", or "pass".
+        - Do not output a separate per-goal checklist; fidelity_verifications is one line per checked object, and object_issues contains material failures.
         - A generic pass such as "recognizable", "semantically faithful", "same category", or "looks correct" is insufficient for verify_required objects.
-        - If a required fidelity object passes, passed_items must mention concrete satisfied fidelity goals or distinctive preserved structures.
+        - Do not use passed_items to merely restate fidelity_goals. If uncertain, prefer one concise object_issue over a generic pass.
+        - If a required fidelity object passes, passed_items must mention concrete visible agreement in the rendered preview, not just the requested goal text.
         - If any fidelity goal materially fails, report it in review.object_issues on the owning object_id.
+        - If a fidelity_verifications result describes a mismatch, missing detail, wrong form, generic replacement, or uncertainty, also add a matching review.object_issues item for the same object_id.
+        - For required fidelity objects, report medium object_issues for visible visual-form mismatch even when semantic identity is preserved.
+        - Do not require wrong identity before reporting shape_fidelity, internal_structure, or style_appearance on verify_required objects.
         - For every recognized object with object_type="icon", explicitly verify icon fidelity before deciding acceptance.
-        - For icon or symbolic objects, prioritize semantic recognizability, silhouette agreement, distinctive parts, coherent internal structure, internal strokes, visual weight, z-order, and internal element layout.
-        - Do not require pixel-perfect tracing: accept simplified icons when they preserve semantics, recognizable silhouette, key distinctive parts, coherent internal structure, and visual weight.
+        - For icon or symbolic objects, prioritize semantic recognizability, silhouette/contour agreement, distinctive parts, coherent internal structure/topology, internal strokes/marks, part proportions/overlap, z-order, and local pictogram style.
+        - Treat outline weight as secondary unless it changes the object identity, local style, or visual weight.
+        - Do not require pixel-perfect tracing: accept simplified icons when they preserve semantics, recognizable silhouette/contour, key distinctive parts, coherent internal structure, part relationships, and local pictogram style.
         - When an icon materially fails fidelity, report it in review.object_issues with issue_family="content_accuracy" for wrong/generic semantics or missing identity, "shape_fidelity" for wrong silhouette/contour/proportion, or "internal_structure" for missing distinctive parts/internal strokes/z-order/internal layout.
         - When an icon looks unlike the raster reference, report that fidelity gap explicitly instead of reframing it only as scale or placement drift.
-        - Do not accept an icon only because it is semantically recognizable; check silhouette, distinctive parts, internal structure, and internal strokes.
+        - Do not accept an icon only because it is semantically recognizable; check silhouette/contour, distinctive parts, internal structure, internal strokes/marks, and part relationships.
         - For verify_required objects, use content_accuracy for missing/wrong required visible detail, shape_fidelity for failed silhouette/contour goals, internal_structure for failed internal marks/strokes/topology/z-order/relative layout goals, and style_appearance for failed color/stroke/visual-weight goals.
         - For verify_required objects, medium severity means the object has the same broad semantics but a visible fidelity goal fails; high severity means generic substitution, missing key goal, wrong identity, or broken internal structure.
+        - Layout/style tolerance does not suppress required symbol/icon fidelity checks.
+        - For verify_required icons, visible contour, internal-structure, or local-style mismatch is not minor polish when it changes the symbol's visual identity.
+        - Example fidelity verification: {{"object_id": "cloud_code_icon", "result": "Cloud contour, badge placement, and bracket marks match the raster icon."}}
+        - Example fidelity verification: {{"object_id": "brain_network_icon", "result": "Brain folds and network node pattern differ from the raster symbol."}}
+        - Example object issue: {{"object_id": "icon_1", "issue_family": "internal_structure", "criterion": "Preserve symbol internal structure.", "reason": "Internal marks or topology differ from the raster symbol.", "severity": "medium"}}
+        - Example object issue: {{"object_id": "icon_2", "issue_family": "shape_fidelity", "criterion": "Preserve symbol visible form.", "reason": "Outer contour or part proportions differ from the raster symbol.", "severity": "medium"}}
+        - Example object issue: {{"object_id": "icon_3", "issue_family": "style_appearance", "criterion": "Preserve symbol local style.", "reason": "Local pictogram style looks like a different symbol system.", "severity": "medium"}}
         - Use spacing/scale/placement issues when there is clear visual evidence of crowding, broken hierarchy, border pressure, overlap risk, or noticeably uneven balance, not merely a mild preference for more open whitespace.
         - Avoid escalating small spacing differences into repeated shrink-and-lift adjustments when the current relative layout already appears broadly consistent with the raster.
         - If bbox_constraint_feedback reports that a rendered object no longer fits its recognized bbox, treat that as real acceptance evidence and route it to repair rather than ignoring it.
@@ -348,20 +455,17 @@ def build_region_combined_policy_prompts(
         - stop_tendency is continue when another focused repair is likely to improve a medium or high issue.
         - stop_tendency is stop when retry constraints are exhausted or remaining issues are unlikely to improve.
 
-        History rules:
-        - Only include prior_issue_assessment when previous_decision_delta or supervisor memory delta is provided.
-        - Historical issues are hints to verify, not issues to copy forward.
-        - Current visual evidence is authoritative.
-        {history_rules_block(has_history, "region")}
+        {history_section_block(has_history, "region")}
 
         Strategy rules:
         {strategy_clause}
 
         {json_output_contract(
             required_fields=("review", "repair_plan", "termination"),
-            array_fields=(
-                "prior_issue_assessment",
+            array_fields=history_array_fields(
+                has_history,
                 "review.passed_items",
+                "review.fidelity_verifications",
                 "review.global_repairs",
                 "review.object_issues",
                 "repair_plan.target_objects",
@@ -387,7 +491,7 @@ def build_region_combined_policy_prompts(
                     "style_appearance",
                     "containment_boundary",
                 ),
-                "prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain"),
+                **history_closed_value_fields(has_history),
             },
         )}
         """
@@ -398,6 +502,7 @@ def build_region_combined_policy_prompts(
             "object_index": compact_object_index,
             "required_fidelity_checks": required_fidelity_checks,
             "bbox_constraint_feedback": review_context.get("bbox_constraint_feedback"),
+            "fidelity_verification_retry": review_context.get("fidelity_verification_retry"),
             "previous_decision_delta": review_context.get("previous_decision_delta"),
         }
     )
@@ -429,6 +534,7 @@ def build_region_combined_policy_prompts(
                       "Rounded card border reads clearly.",
                       "Title and description hierarchy preserved."
                     ],
+                    "fidelity_verifications": [{{"object_id": "cloud_code_icon", "result": "Cloud contour and code badge match the raster icon."}}],
                     "global_repairs": [{{"issue_family": "layout_relation", "criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}],
                     "object_issues": [{{"object_id": "obj1", "issue_family": "shape_fidelity", "criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}]
                   }},
@@ -466,6 +572,11 @@ def build_object_combined_policy_prompts(
 ) -> tuple[str, str]:
     has_history = memory_summary is not None or review_context.get("previous_decision_delta") is not None
     history_shape = history_example_block(has_history, "object")(obj.get("object_id", ""))
+    object_history_rule = (
+        "- Treat failed_items, previous_decision_delta, and memory as hypotheses to verify against the current images, not facts to copy forward."
+        if has_history
+        else "- Treat failed_items as hypotheses to verify against the current images, not facts to copy forward."
+    )
     strategy_clause = (
         f"Include strategy fields with concise label, rationale, and confidence. {STRATEGY_CONFIDENCE_RULE}"
         if strategy_enabled
@@ -481,10 +592,10 @@ def build_object_combined_policy_prompts(
         {OBJECT_SCOPE_REVIEW_RULES}
         - acceptance_tendency must be accept or reject.
         - stop_tendency must be continue or stop.
-        - failed item reasons and all rationales must stay under 24 words.
+        - failed item reasons must stay under 24 words; all rationales should stay under 20 words.
         {OBJECT_ISSUE_TAXONOMY_RULES}
         - {ISSUE_SEVERITY_RULES}
-        - Treat failed_items, previous_decision_delta, and memory as hypotheses to verify against the current images, not facts to copy forward.
+        {object_history_rule}
         - Use a compact review style: keep only the most decision-relevant unresolved object issues.
         - Ignore minor polish unless it affects semantics, identity, or readability.
         - If Object.fidelity_hints.verify_required is true, evaluate Object.fidelity_hints.fidelity_goals before accepting.
@@ -519,11 +630,11 @@ def build_object_combined_policy_prompts(
         - If the remaining issue cannot be fixed by editing this object alone, use reject + stop and explain briefly.
         - For icon object_repair, strategy_label should name the main object-local repair dimension when possible: restore_silhouette, add_distinctive_parts, repair_internal_strokes, fix_visual_weight, fix_z_order, fix_internal_layout, fix_relative_proportions, repair_malformed_contour, or remove_generic_substitution.
         - strategy_rationale should state the concrete visual target to repair, not a generic "improve fidelity".
-        {history_rules_block(has_history, "object")}
+        {history_section_block(has_history, "object")}
         {strategy_clause}
         {json_output_contract(
             required_fields=("review", "repair_plan", "termination"),
-            array_fields=("prior_issue_assessment", "review.failed_items"),
+            array_fields=history_array_fields(has_history, "review.failed_items"),
             closed_value_fields={
                 "repair_plan.route": ("object_repair",),
                 "termination.acceptance_tendency": ("accept", "reject"),
@@ -537,7 +648,7 @@ def build_object_combined_policy_prompts(
                     "style_appearance",
                     "containment_boundary",
                 ),
-                "prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain"),
+                **history_closed_value_fields(has_history),
             },
         )}
         """
@@ -636,7 +747,7 @@ def build_fusion_combined_policy_prompts(
         - route is always fusion_repair.
         - acceptance_tendency must be accept or reject.
         - stop_tendency must be continue or stop.
-        - review issue descriptions and all rationales must stay under 24 words.
+        - review issue descriptions must stay under 24 words; all rationales should stay under 20 words.
         {FINAL_REVIEW_ISSUE_RULES}
         - Use a compact review style: capture the main cross-region and merge-relevant problems, not every small stylistic variance.
         - Prefer fewer, higher-signal issues over exhaustive lists.
@@ -652,17 +763,17 @@ def build_fusion_combined_policy_prompts(
         - Set stop_tendency to stop when issues are absent, only low-severity, purely local, purely cosmetic, ambiguous, or unlikely to improve through merge-time repair.
         - Input roles: image 1 is the ground-truth source image; image 2 is the rendered preview of the final SVG.
         - Inline SVG source text is structural evidence for localization. Use the rendered preview as the primary visual comparison target.
-        {history_rules_block(has_history, "fusion")}
+        {history_section_block(has_history, "fusion")}
         {strategy_clause}
         {json_output_contract(
             required_fields=("review", "repair_plan", "termination"),
-            array_fields=("prior_issue_assessment", "review.known_limitations"),
+            array_fields=history_array_fields(has_history, "review.known_limitations"),
             closed_value_fields={
                 "repair_plan.route": ("fusion_repair",),
                 "termination.acceptance_tendency": ("accept", "reject"),
                 "termination.stop_tendency": ("continue", "stop"),
                 "repair_plan.strategy_confidence": ("low", "medium", "high"),
-                "prior_issue_assessment[].status": ("resolved", "persists", "transformed", "uncertain"),
+                **history_closed_value_fields(has_history),
             },
         )}
         """

@@ -36,7 +36,7 @@ def build_checklist_plan_prompts(
         Stage 2: checklist planning
         - Produce three checklist sections:
           recognition, generation_refine, fusion.
-        - recognition covers visible element-type coverage, semantic grouping, and major structural roles.
+        - recognition covers visible element-type coverage, semantic grouping, major structural roles, and visual-form fidelity hints for symbols/icons.
         - generation_refine covers region reconstruction acceptance after generation and refinement.
         - fusion covers merged-result consistency, continuity, and seam-free composition.
 
@@ -49,10 +49,12 @@ def build_checklist_plan_prompts(
         Region-scope rules:
         - region items may express object-type constraints.
         - region items must not express object-instance constraints.
-        - Allowed: icon recognizability, text-role preservation, container framing, connector directionality.
+        - Allowed: icon recognizability, symbol/icon visual-form fidelity, text-role preservation, container framing, connector directionality.
         - Not allowed: left icon vs right icon, exact icon pairs, exact object combinations, exact text strings.
         - Region criteria should remain reusable across similar regions; name the object type or semantic role, not a specific depicted subject.
         - Prefer generic criteria such as "Keep icons recognizable and semantically faithful." over subject-specific forms such as "Keep AI icons recognizable."
+        - For regions containing symbols/icons, include recognition and generation_refine coverage for visible-form fidelity, not only semantic category.
+        - Visual-form fidelity criteria should stay generic and high-level, such as preserving symbols' visible form, distinctive structure, and visual style.
 
         Coverage rules:
         - If an element type is marked Y in a region, the relevant stage checklist must include
@@ -65,6 +67,7 @@ def build_checklist_plan_prompts(
         - Keep item_id values stable and sequential, such as C1, C2, C3.
         - Criterion must be imperative, clear, non-overlapping, and under 15 words.
         - Do not write object-instance checks, exact text snippets, bbox values, or tiny visual details.
+        - For symbols/icons, visible-form fidelity is a recognition and generation acceptance concern.
         - Criterion should describe the acceptance rule itself, not a concrete object in this one image.
         - Prefer one main idea per criterion.
         - Use a minimalist checklist style: cover major semantics and structure, and ignore low-value detail.
@@ -121,12 +124,17 @@ def build_checklist_plan_prompts(
                   "item_id": "C1",
                   "scope": "common",
                   "criterion": "Cover all visible major element types."
+                }},
+                {{
+                  "item_id": "C2",
+                  "scope": "common",
+                  "criterion": "Record visual-form fidelity for symbols."
                 }}
               ],
               "regions": {{
                 "r1_header": [
                   {{
-                    "item_id": "C2",
+                    "item_id": "C3",
                     "scope": "region",
                     "criterion": "Preserve text as a distinct information element."
                   }}
@@ -136,7 +144,7 @@ def build_checklist_plan_prompts(
             "generation_refine": {{
               "common": [
                 {{
-                  "item_id": "C3",
+                  "item_id": "C4",
                   "scope": "common",
                   "criterion": "Preserve major semantic grouping and layout hierarchy."
                 }}
@@ -144,9 +152,14 @@ def build_checklist_plan_prompts(
               "regions": {{
                 "r1_header": [
                   {{
-                    "item_id": "C4",
+                    "item_id": "C5",
                     "scope": "region",
                     "criterion": "Keep icons recognizable and semantically faithful."
+                  }},
+                  {{
+                    "item_id": "C6",
+                    "scope": "region",
+                    "criterion": "Preserve symbols' visible form, structure, and style."
                   }}
                 ]
               }}
@@ -154,7 +167,7 @@ def build_checklist_plan_prompts(
             "fusion": {{
               "common": [
                 {{
-                  "item_id": "C5",
+                  "item_id": "C7",
                   "scope": "common",
                   "criterion": "Keep merged region boundaries continuous and artifact-free."
                 }}

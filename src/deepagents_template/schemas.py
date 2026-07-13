@@ -1047,11 +1047,29 @@ class RegionObjectIssue(BaseModel):
         return data
 
 
+class RegionFidelityVerification(BaseModel):
+    """One-line fidelity judgment for an object that must be checked."""
+
+    object_id: str
+    result: str
+
+    @field_validator("object_id", "result", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+
 class RegionReviewResult(BaseModel):
     """Structured region review output from the multimodal model."""
 
     region_id: str
     passed_items: list[str] = Field(default_factory=list)
+    fidelity_verifications: list[RegionFidelityVerification] = Field(
+        default_factory=list,
+        description="One concrete visual judgment per required fidelity object.",
+    )
     global_repairs: list[RegionReviewIssue] = Field(
         default_factory=list,
         description="Problem-only whole-region issues that require the region SVG generation branch.",

@@ -3327,6 +3327,10 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
   min-width: 200px;
 }
 
+body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-body {
+  padding-bottom: 160px;
+}
+
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-deck-item + .workflow-trace-deck-item {
   margin-left: -8px;
 }
@@ -3366,8 +3370,9 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-event-list {
-  min-height: 48px;
-  max-height: 92px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-viewport,
@@ -3386,11 +3391,12 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
   grid-template-columns: 64px minmax(0, 1fr);
   align-items: stretch;
   column-gap: 10px;
-  min-height: 108px;
-  max-height: none;
+  height: clamp(108px, 15vh, 128px);
+  min-height: 0;
+  max-height: 128px;
   margin: 0;
   padding: 8px;
-  overflow: visible;
+  overflow: hidden;
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-event-feed-label {
@@ -3407,10 +3413,12 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-event-feed-body {
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-event-feed-head {
@@ -3437,7 +3445,15 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-stall-notice {
+  flex: 0 0 auto;
   padding: 7px 9px;
+}
+
+body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-stall-notice span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 body.desktop-body .trace-refine-guide {

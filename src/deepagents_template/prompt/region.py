@@ -48,14 +48,14 @@ def build_region_recognition_prompts(
         - description states what the object is and its visible role.
         - included_elements lists concrete visible parts semantically owned by the object.
         - generation_focus states what later SVG generation must preserve for that object.
-        - fidelity_hints is optional. Add it only when object_type is "icon", or when a non-icon object visibly owns icons, symbolic marks, or badges.
+        - fidelity_hints is optional for ordinary objects, but add it for any object that is, contains, or visually owns an icon, badge, emblem, logo, mark, or other symbolic visual detail.
         - Do not add fidelity_hints only for ordinary card borders, background fills, text grouping, spacing, centering, generic container shape, or non-symbolic layout details.
-        - fidelity_hints.verify_required should be true for those fidelity-sensitive objects.
+        - fidelity_hints.verify_required should be true for objects with symbolic details, even when the owning object is not object_type="icon".
         - fidelity_hints.fidelity_goals must contain at most 5 short visual preservation goals.
         - Prioritize the most identity-critical goals first, because downstream payloads keep at most 5 goals.
         - fidelity_hints.fidelity_goals should be goals, not just a part list.
         - Each fidelity goal should stay under 18 words and name a concrete visible feature plus the preservation intent.
-        - Each fidelity goal should state what visual identity aspect to preserve: silhouette/contour, internal marks/strokes, relative layout inside the owning object, z-order/layering, visual weight, or avoiding generic replacement.
+        - Each fidelity goal should state what visual form aspect to preserve: silhouette/contour, internal marks/strokes, relative layout inside the owning object, z-order/layering, visual weight, local style, or avoiding generic replacement.
         - For icon/symbolic-mark/badge details owned by a non-icon object, keep them in the owning object and describe their fidelity goals there. Do not invent part types.
         - recognized_objects must be a list of object records.
         - Use the applicable checklist criteria as high-level guidance only.
@@ -148,14 +148,14 @@ def build_region_recognition_prompts(
           "observation": "short observation",
           "recognized_objects": [
             {{
-              "object_id": "meaningful_object_name",
-              "object_type": "text",
-              "description": "readable text content and visual role, or visible object content and traits",
-              "included_elements": ["main visible part", "attached local label or marker"],
-              "generation_focus": ["preserve wording", "preserve bold emphasis"],
-              "fidelity_hints": {{"verify_required": false, "fidelity_goals": []}},
-              "relative_position": "centered below the icon row",
-              "extent_hint": "single-line heading only; do not include subtitle text"
+              "object_id": "meaningful_symbol_name",
+              "object_type": "icon",
+              "description": "visible icon or symbol content and traits",
+              "included_elements": ["outer symbol shape", "internal marks"],
+              "generation_focus": ["preserve symbolic form", "preserve internal marks"],
+              "fidelity_hints": {{"verify_required": true, "fidelity_goals": ["preserve symbol contour", "preserve internal marks"]}},
+              "relative_position": "centered above the text stack",
+              "extent_hint": "include full symbol outline and internal strokes"
             }}
           ]
         }}
@@ -188,7 +188,7 @@ def build_region_svg_generation_prompts(
         - The recognition result is an object index and preservation brief, not a fresh instruction to re-plan the region.
         - Each recognized object's included_elements are owned by that object and should render inside that object's group.
         - For objects with fidelity_hints.verify_required=true, use fidelity_hints.fidelity_goals as concrete visual obligations.
-        - Do not substitute a cleaner generic same-category icon, symbol, badge, code window, node-link diagram, emblem, or mark when fidelity goals describe specific visible structure.
+        - Do not substitute a cleaner generic same-category icon, symbol, badge, code window, network diagram, emblem, or mark when fidelity goals describe specific visible structure.
         - If a fidelity goal describes an owned detail inside a non-icon object, render that detail inside the owning object rather than dropping or simplifying it.
         - Small simplification is acceptable only when it preserves the goal's silhouette, internal structure, relative layout, z-order, and visual weight.
         - If current SVG source text is provided inline, treat it as the editable base to update rather than something to re-describe.

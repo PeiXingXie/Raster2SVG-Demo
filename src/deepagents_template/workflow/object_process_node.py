@@ -234,7 +234,13 @@ class ObjectProcessNodeMixin:
             region=region,
             bbox_space="global",
         )
-        failed_items = [{"criterion": issue.criterion, "reason": issue.reason}]
+        failed_items = [
+            {
+                "issue_family": getattr(issue, "issue_family", None),
+                "criterion": issue.criterion,
+                "reason": issue.reason,
+            }
+        ]
 
         current_object_svg = item["current_object_svg"]
         object_task = create_object_task(

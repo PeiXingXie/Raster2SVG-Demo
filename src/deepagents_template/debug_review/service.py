@@ -192,7 +192,13 @@ class DebugReviewService:
             object_history = self._load_json(object_history_path)
             issue = object_history.get("issue")
             if issue:
-                failed_items = [{"criterion": issue.get("criterion", ""), "reason": issue.get("reason", "")}]
+                failed_items = [
+                    {
+                        "issue_family": issue.get("issue_family"),
+                        "criterion": issue.get("criterion", ""),
+                        "reason": issue.get("reason", ""),
+                    }
+                ]
         review, raw_text = DebugObjectReviewWorkerAgent(pipeline).run(
             object_crop_path=crop_path,
             obj=obj,

@@ -1,6 +1,6 @@
 import { fetchJson } from "./js/api-client.js";
-import { appState } from "./js/state.js";
-import { renderState } from "./js/state.js";
+import { appState } from "./js/state.js?v=run-start-state-boundary-1";
+import { renderState } from "./js/state.js?v=run-start-state-boundary-1";
 import { createLoadingState, renderLoadingState } from "./js/components/loading-state.js";
 
 const casePreviewCache = new Map();
@@ -849,7 +849,7 @@ setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=trace-deck-collapse-1");
+    const { initApp } = await import("./js/main.js?v=run-start-state-boundary-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);
