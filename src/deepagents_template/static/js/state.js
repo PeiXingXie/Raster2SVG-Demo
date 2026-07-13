@@ -31,6 +31,8 @@ export const appState = {
   desktopHistoryPageSize: 6,
   desktopHistorySearch: "",
   desktopHistorySort: "updated_desc",
+  deletedRunArtifactDirs: new Set(),
+  deletedRunIds: new Set(),
   desktopProcessGuideStep: null,
   runtimeOverrides: null,
   manualAdjustmentBaseRunId: null,

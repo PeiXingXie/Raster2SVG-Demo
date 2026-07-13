@@ -562,7 +562,7 @@ class ManualAdjustmentService:
                     if payload.target_region_id and region.region_id != payload.target_region_id:
                         continue
                     obj_bbox = obj.model_dump(mode="json").get("bbox")
-                    bbox_space = obj.model_dump(mode="json").get("bbox_space") or "region_local"
+                    bbox_space = obj.model_dump(mode="json").get("bbox_space") or "global"
                     if selection_bbox and obj_bbox:
                         global_box = self._object_global_bbox(region_meta[region.region_id]["bbox"], obj_bbox, bbox_space)
                         if not self._boxes_overlap(selection_bbox, global_box):
@@ -593,7 +593,7 @@ class ManualAdjustmentService:
                     self._object_global_bbox(
                         region_meta[region_id]["bbox"],
                         entry_lookup[(region_id, object_id)]["bbox"],
-                        entry_lookup[(region_id, object_id)].get("bbox_space") or "region_local",
+                        entry_lookup[(region_id, object_id)].get("bbox_space") or "global",
                     )
                     for region_id, object_id in target_object_keys
                     if entry_lookup[(region_id, object_id)].get("bbox")
@@ -667,7 +667,7 @@ class ManualAdjustmentService:
                     global_box = self._object_global_bbox(
                         region.bbox.model_dump(mode="json"),
                         obj.bbox.model_dump(mode="json"),
-                        obj.model_dump(mode="json").get("bbox_space") or "region_local",
+                        obj.model_dump(mode="json").get("bbox_space") or "global",
                     )
                     if self._boxes_overlap(bbox, global_box):
                         overlapping_objects.append(obj.object_id)

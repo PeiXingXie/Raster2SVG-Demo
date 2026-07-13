@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import current_thread
 
 from deepagents_template.debug_review import DebugRegionReviewWorkerAgent
-from deepagents_template.geometry import build_region_context
+from deepagents_template.geometry import build_region_context, recognition_bboxes_to_global_if_local
 from deepagents_template.schemas import RegionRecognitionResult, RegionRepairResult, RegionReviewResult, RegionSvgGenerationResult
 from deepagents_template.svg_utils import extract_group_template
 from deepagents_template.utils.svg_rendering import wrap_svg_fragment, write_svg_review_artifacts
@@ -68,7 +68,10 @@ class RegionProcessNodeMixin:
         payload = self._load_json_payload(path)
         payload["crop_path"] = region_dir / "crop.png"
         payload["region_dir"] = region_dir
-        payload["recognition_model"] = RegionRecognitionResult.model_validate(payload["recognition"])
+        recognition_model = RegionRecognitionResult.model_validate(payload["recognition"])
+        recognition_model = recognition_bboxes_to_global_if_local(recognition_model, region=payload["region"])
+        payload["recognition_model"] = recognition_model
+        payload["recognition"] = recognition_model.model_dump(mode="json")
         payload["region_svg_generation_model"] = RegionSvgGenerationResult.model_validate(
             payload["region_svg_generation"]
         )
@@ -242,6 +245,7 @@ class RegionProcessNodeMixin:
             worker_statuses=worker_statuses,
             status="running",
         )
+        previous_trace_stage = self._set_current_trace_stage("initial-generate")
         try:
             return self._process_region_initial(
                 crop_path=item["crop_path"],
@@ -250,6 +254,7 @@ class RegionProcessNodeMixin:
                 region_dir=item["region_dir"],
             )
         finally:
+            self._set_current_trace_stage(previous_trace_stage)
             self._mark_region_worker_finished()
             worker_statuses = self._set_worker_status(
                 worker_id=worker_id,
@@ -292,9 +297,11 @@ class RegionProcessNodeMixin:
             worker_statuses=worker_statuses,
             status="running",
         )
+        previous_trace_stage = self._set_current_trace_stage("refine")
         try:
             return self._refine_region(initial_result=initial_result, checklist=checklist)
         finally:
+            self._set_current_trace_stage(previous_trace_stage)
             self._mark_region_worker_finished()
             worker_statuses = self._set_worker_status(
                 worker_id=worker_id,

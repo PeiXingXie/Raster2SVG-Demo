@@ -35,6 +35,36 @@ function Copy-OptionalPath {
     Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Recurse -Force
 }
 
+function Copy-DesktopSource {
+    param(
+        [string]$ProjectRoot,
+        [string]$StageDir
+    )
+
+    $DesktopSource = Join-Path $ProjectRoot "desktop"
+    $DesktopStage = Join-Path $StageDir "desktop"
+
+    $DesktopItems = @(
+        "assets",
+        "build",
+        "bootstrap.bat",
+        "bootstrap.ps1",
+        "bootstrap.sh",
+        "main.js",
+        "package-lock.json",
+        "package.json",
+        "preload.js",
+        "README.desktop.md",
+        "start-desktop.bat",
+        "start-desktop.ps1",
+        "start-desktop.sh"
+    )
+
+    foreach ($Item in $DesktopItems) {
+        Copy-OptionalPath (Join-Path $DesktopSource $Item) (Join-Path $DesktopStage $Item)
+    }
+}
+
 $ProjectRoot = Get-ProjectRoot
 $ProjectName = Split-Path -Leaf $ProjectRoot
 
@@ -63,7 +93,7 @@ Write-Host "Output root:  $OutputRoot"
 Write-Host "Package name: $PackageName"
 
 Copy-OptionalPath (Join-Path $ProjectRoot "src") (Join-Path $StageDir "src")
-Copy-OptionalPath (Join-Path $ProjectRoot "desktop") (Join-Path $StageDir "desktop")
+Copy-DesktopSource -ProjectRoot $ProjectRoot -StageDir $StageDir
 Copy-OptionalPath (Join-Path $ProjectRoot "quick-start") (Join-Path $StageDir "quick-start")
 Copy-OptionalPath (Join-Path $ProjectRoot "pyproject.toml") (Join-Path $StageDir "pyproject.toml")
 Copy-OptionalPath (Join-Path $ProjectRoot "README.md") (Join-Path $StageDir "README.md")

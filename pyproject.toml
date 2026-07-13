@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepagents-template"
-version = "0.1.5"
+version = "0.2.0"
 description = "A Raster-to-SVG Planner + ReAct demo built on Deep Agents."
 readme = "README.md"
 requires-python = ">=3.11"

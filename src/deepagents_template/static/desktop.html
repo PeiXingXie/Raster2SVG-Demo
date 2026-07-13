@@ -3,17 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Editable Graphics Workspace</title>
+    <title>Shape Studio</title>
     <link rel="stylesheet" href="/static/styles.css" />
-    <link rel="stylesheet" href="/static/desktop.css?v=desktop-history-layout-fit-1" />
+    <link rel="stylesheet" href="/static/desktop.css?v=trace-status-colors-1" />
   </head>
   <body class="desktop-body" data-desktop-page="start" data-ui-mode="simple">
     <main id="app-shell" class="desktop-shell" data-ui-mode="simple">
       <header class="desktop-titlebar">
         <div class="desktop-brand">
-          <span class="desktop-brand-mark">E</span>
+          <img class="desktop-brand-mark" src="/static/assets/icon/icon-transparent.png" alt="" aria-hidden="true" />
           <div>
-            <h1>Editable Graphics Workspace</h1>
+            <h1>Shape Studio</h1>
             <p class="desktop-kicker">Turn static images into structured, editable SVG assets.</p>
           </div>
         </div>
@@ -51,14 +51,6 @@
                 <span>Search</span>
                 <input id="desktop-history-search" type="search" placeholder="Search projects" />
               </label>
-              <label class="desktop-history-sort">
-                <span>Sort</span>
-                <select id="desktop-history-sort">
-                  <option value="updated_desc">Recent</option>
-                  <option value="name_asc">Name</option>
-                  <option value="status_asc">Status</option>
-                </select>
-              </label>
             </div>
           </div>
           <div class="card-header-row desktop-library-filters">
@@ -74,6 +66,12 @@
           <div id="desktop-history-pagination" class="desktop-history-pagination" aria-label="History pagination">
             <button id="desktop-history-prev" class="ghost-btn compact-btn" type="button">Previous</button>
             <span id="desktop-history-page-status" class="desktop-history-page-status">Page 1 / 1</span>
+            <label class="desktop-history-page-jump">
+              <span>Page</span>
+              <input id="desktop-history-page-input" type="number" min="1" value="1" inputmode="numeric" aria-label="Go to history page" />
+              <span id="desktop-history-page-total">/ 1</span>
+            </label>
+            <button id="desktop-history-page-go" class="ghost-btn compact-btn" type="button">Go</button>
             <button id="desktop-history-next" class="ghost-btn compact-btn" type="button">Next</button>
           </div>
         </section>
@@ -117,10 +115,10 @@
               <div class="desktop-process-copy">
                 <p id="desktop-process-eyebrow" class="desktop-process-eyebrow">Step 1</p>
                 <h3 id="desktop-process-title">Upload</h3>
-                <p id="guide-body" class="guide-body">Add a source image and describe the target.</p>
+                <p id="guide-body" class="guide-body">Add a source image, complete the needed configuration, and describe the target.</p>
                 <ul id="desktop-process-notes" class="desktop-process-notes">
                   <li>Paste or choose an image.</li>
-                  <li>Pick a task preset.</li>
+                  <li>Review or complete Settings if needed.</li>
                   <li>Start the conversion.</li>
                 </ul>
               </div>
@@ -140,7 +138,7 @@
             <form id="composer" class="composer form-stack">
               <div class="simple-mode-intro">
                 <div class="simple-mode-intro-title">New SVG Conversion</div>
-                <p>Upload or paste an image, choose a task preset, then start the conversion.</p>
+                <p>Upload or paste an image, complete any needed settings, choose a task preset, then start the conversion.</p>
               </div>
 
               <div class="invocation-primary-grid">
@@ -224,25 +222,25 @@
                     <div class="field-grid invocation-workflow-grid">
                       <label class="field" data-field-id="workflow-mode">
                         <span class="field-heading">
-                          <span class="field-label">Workflow Mode</span>
+                          <span class="field-label">Refinement Depth</span>
                           <span id="effective-workflow-mode" class="field-effective"></span>
                         </span>
                         <select id="workflow-mode">
                           <option value="">Use default</option>
-                          <option value="initial_only">initial_only</option>
-                          <option value="region">region</option>
-                          <option value="region_object">region_object</option>
+                          <option value="initial_only">Quick Draft - basic conversion only</option>
+                          <option value="region">Region Refinement - improve each detected area</option>
+                          <option value="region_object">Full Detail - refine regions and individual objects</option>
                         </select>
                       </label>
                       <label class="field" data-field-id="region-processing-mode">
                         <span class="field-heading">
-                          <span class="field-label">Region Mode</span>
+                          <span class="field-label">Processing Schedule</span>
                           <span id="effective-region-processing-mode" class="field-effective"></span>
                         </span>
                         <select id="region-processing-mode">
                           <option value="">Use default</option>
-                          <option value="serial">serial</option>
-                          <option value="parallel">parallel</option>
+                          <option value="serial">One at a time - slower, steadier</option>
+                          <option value="parallel">Faster parallel processing</option>
                         </select>
                       </label>
                       <label class="field" data-field-id="region-concurrency">
@@ -294,52 +292,20 @@
                 </div>
               </label>
               <button id="resume-run" class="secondary-btn" type="button">Resume</button>
-              <button id="refresh-artifacts" class="ghost-btn" type="button">Refresh</button>
-              <button id="export-svg-button" class="primary-btn" type="button" disabled>Export SVG</button>
-              <span id="export-status" class="desktop-action-hint">Final SVG pending</span>
-              <button id="desktop-refine-toggle" class="primary-btn" type="button" aria-expanded="false">Refine</button>
-              <span id="refine-status" class="desktop-action-hint">Available after first preview</span>
+              <button id="desktop-refine-toggle" class="primary-btn" type="button" aria-expanded="false" aria-controls="workspace-sidebar">Refine</button>
+              <span id="refine-status" class="desktop-action-hint">Locked</span>
             </div>
           </div>
-
-          <section class="workflow-trace-panel simple-trace-panel desktop-trace-card">
-            <div class="trace-panel-header">
-              <div class="compare-title">Process Trace</div>
-              <span id="status-text" class="status-text">Ready</span>
-            </div>
-            <div id="pipeline-status-bar" class="pipeline-status-bar" aria-live="polite">
-              <div class="pipeline-status-item pipeline-current-step">
-                <span class="pipeline-status-label">Current Step</span>
-                <strong id="pipeline-current-step">Waiting to start</strong>
-              </div>
-              <div class="pipeline-status-item">
-                <span class="pipeline-status-label">Progress</span>
-                <strong id="pipeline-progress">0 / 0</strong>
-              </div>
-              <div class="pipeline-status-item pipeline-latest-update">
-                <span class="pipeline-status-label">Latest Update</span>
-                <strong id="pipeline-latest-update">No activity yet</strong>
-              </div>
-              <div class="pipeline-status-item pipeline-next-step">
-                <span class="pipeline-status-label">Next Step</span>
-                <strong id="pipeline-next-step">Start a conversion</strong>
-              </div>
-              <div class="pipeline-status-item pipeline-elapsed">
-                <span class="pipeline-status-label">Elapsed</span>
-                <strong id="pipeline-elapsed">0s</strong>
-              </div>
-            </div>
-            <div id="workflow-trace" class="workflow-trace empty-state">
-              Process trace appears here when the conversion starts.
-            </div>
-          </section>
 
           <div class="compare-grid compare-grid-below desktop-compare-grid">
             <section class="compare-card">
               <div class="compare-card-head">
                 <div class="compare-title">Input</div>
               </div>
-              <div id="compare-input-message" class="workspace-context-card empty-state">No instruction yet.</div>
+              <div class="workspace-context-row">
+                <div id="compare-input-message" class="workspace-context-card empty-state">No instruction yet.</div>
+                <a id="compare-input-download" class="compare-download-button workspace-download-button is-disabled" href="#" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">Download</a>
+              </div>
               <div id="compare-input" class="compare-body empty-state">No input preview yet.</div>
               <details id="artifact-structure-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="artifact-structure-panel" open>
                 <summary class="compare-subtitle">Regions And Objects</summary>
@@ -351,18 +317,21 @@
               <div class="compare-card-head">
                 <div class="compare-title">Output</div>
               </div>
-              <div class="output-preview-toolbar desktop-output-strip workspace-context-card">
-                <div class="output-progress-control">
-                  <div class="output-control-label">Output Timeline</div>
-                  <div id="output-progress-slider" class="output-progress output-progress-inline empty-state">No output frames yet.</div>
+              <div class="workspace-context-row">
+                <div class="output-preview-toolbar desktop-output-strip workspace-context-card">
+                  <div class="output-progress-control">
+                    <div class="output-control-label">Output Timeline</div>
+                    <div id="output-progress-slider" class="output-progress output-progress-inline empty-state">No output frames yet.</div>
+                  </div>
+                  <div class="output-version-picker">
+                    <div class="output-control-label">Manual Versions</div>
+                    <div id="output-version-select" class="output-version-buttons"></div>
+                  </div>
                 </div>
-                <div class="output-version-picker">
-                  <div class="output-control-label">Manual Versions</div>
-                  <div id="output-version-select" class="output-version-buttons"></div>
-                </div>
+                <a id="compare-output-download" class="compare-download-button workspace-download-button is-disabled" href="#" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">Download</a>
               </div>
               <div id="compare-output" class="compare-body empty-state">No output preview yet.</div>
-              <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel">
+              <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel" open>
                 <summary class="compare-subtitle">Output Progress</summary>
                 <div id="output-progress" class="output-progress empty-state">No progressive output frames yet.</div>
                 <div id="output-progress-details" class="output-progress-details empty-state">
@@ -384,13 +353,21 @@
             </div>
             <div class="header-actions">
               <span id="runtime-config-status" class="status-text">Not saved yet</span>
+              <button id="runtime-config-reset" class="ghost-btn compact-btn" type="button">Reset to Defaults</button>
               <button id="runtime-config-save" class="primary-btn" type="button">Update</button>
             </div>
           </div>
-          <details id="runtime-config-panel" class="runtime-config-panel" data-persist-key="runtime-config-panel" open>
-            <summary>Default Processing Settings</summary>
-            <div class="runtime-config-body">
-              <div id="runtime-config-summary" class="effective-summary"></div>
+          <p class="runtime-config-primer">
+            Before converting, check API Key, Base URL, Request Format, Coordinator Model, and Worker Model.
+          </p>
+          <div id="runtime-config-summary" class="effective-summary"></div>
+          <div id="runtime-config-panel" class="runtime-config-panel runtime-config-panel-stack" data-persist-key="runtime-config-panel">
+            <details class="runtime-config-category" data-persist-key="settings-connection-models" open>
+              <summary>
+                <span>Connection And Models</span>
+                <span class="settings-summary-note">API credentials, endpoints, and model routing</span>
+              </summary>
+              <div class="runtime-config-body">
               <section class="settings-group settings-group-primary">
                 <div class="settings-group-header">
                   <div>
@@ -415,20 +392,19 @@
                   </label>
                   <label class="field" data-field-id="api-provider">
                     <span class="field-heading">
-                      <span class="field-label">API Provider</span>
+                      <span class="field-label">API Protocol</span>
                       <span id="effective-api-provider" class="field-effective"></span>
                     </span>
                     <input id="api-provider" type="text" placeholder="For example: openai_compatible" />
                   </label>
                   <label class="field" data-field-id="api-format">
                     <span class="field-heading">
-                      <span class="field-label">API Format</span>
+                      <span class="field-label">Request Format</span>
                       <span id="effective-api-format" class="field-effective"></span>
                     </span>
                     <select id="api-format">
-                      <option value="">Use default</option>
-                      <option value="openai_chat_completions">openai_chat_completions</option>
-                      <option value="openai_responses">openai_responses</option>
+                      <option value="openai_chat_completions">Chat Completions API</option>
+                      <option value="openai_responses">Responses API</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="agent-model">
@@ -447,7 +423,15 @@
                   </label>
                 </div>
               </section>
+              </div>
+            </details>
 
+            <details class="runtime-config-category" data-persist-key="settings-workflow-defaults">
+              <summary>
+                <span>Workflow Defaults</span>
+                <span class="settings-summary-note">Pipeline depth and region scheduling</span>
+              </summary>
+              <div class="runtime-config-body">
               <section class="settings-group">
                 <div class="settings-group-header">
                   <div>
@@ -458,25 +442,23 @@
                 <div class="settings-field-grid">
                   <label class="field" data-field-id="settings-workflow-mode">
                     <span class="field-heading">
-                      <span class="field-label">Workflow Mode</span>
+                      <span class="field-label">Refinement Depth</span>
                       <span id="effective-settings-workflow-mode" class="field-effective"></span>
                     </span>
                     <select id="settings-workflow-mode">
-                      <option value="">Use default</option>
-                      <option value="initial_only">initial_only</option>
-                      <option value="region">region</option>
-                      <option value="region_object">region_object</option>
+                      <option value="initial_only">Quick Draft - basic conversion only</option>
+                      <option value="region">Region Refinement - improve each detected area</option>
+                      <option value="region_object">Full Detail - refine regions and individual objects</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="settings-region-processing-mode">
                     <span class="field-heading">
-                      <span class="field-label">Region Mode</span>
+                      <span class="field-label">Processing Schedule</span>
                       <span id="effective-settings-region-processing-mode" class="field-effective"></span>
                     </span>
                     <select id="settings-region-processing-mode">
-                      <option value="">Use default</option>
-                      <option value="serial">serial</option>
-                      <option value="parallel">parallel</option>
+                      <option value="serial">One at a time - slower, steadier</option>
+                      <option value="parallel">Faster parallel processing</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="settings-region-concurrency">
@@ -488,7 +470,15 @@
                   </label>
                 </div>
               </section>
+              </div>
+            </details>
 
+            <details class="runtime-config-category" data-persist-key="settings-quality-budget">
+              <summary>
+                <span>Quality And Budget</span>
+                <span class="settings-summary-note">Retry behavior, model-call budget, and response state</span>
+              </summary>
+              <div class="runtime-config-body">
               <section class="settings-group">
                 <div class="settings-group-header">
                   <div>
@@ -524,15 +514,22 @@
                       <span id="effective-use-previous-response-id" class="field-effective"></span>
                     </span>
                     <select id="use-previous-response-id">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
                   </label>
                 </div>
               </section>
+              </div>
+            </details>
 
-              <details class="settings-group settings-collapsible-group">
+            <details class="runtime-config-category" data-persist-key="settings-recognition-experiments">
+              <summary>
+                <span>Recognition And Experiments</span>
+                <span class="settings-summary-note">BBox, SAM, memory, strategy, and agent internals</span>
+              </summary>
+              <div class="runtime-config-body">
+              <details class="settings-group settings-collapsible-group" open>
                 <summary>
                   <span>Advanced Recognition</span>
                   <span class="settings-summary-note">BBox and SAM refinement</span>
@@ -540,14 +537,13 @@
                 <div class="settings-field-grid">
                   <label class="field" data-field-id="recognition-bbox-refine-mode">
                     <span class="field-heading">
-                      <span class="field-label">BBox Refine Mode</span>
+                      <span class="field-label">Detection Box Refinement</span>
                       <span id="effective-recognition-bbox-refine-mode" class="field-effective"></span>
                     </span>
                     <select id="recognition-bbox-refine-mode">
-                      <option value="">Use default</option>
-                      <option value="llm">llm</option>
-                      <option value="sam">sam</option>
-                      <option value="hybrid">hybrid</option>
+                      <option value="llm">AI vision review</option>
+                      <option value="sam">Segmentation model</option>
+                      <option value="hybrid">Segmentation + AI review</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="sam-enabled">
@@ -556,20 +552,18 @@
                       <span id="effective-sam-enabled" class="field-effective"></span>
                     </span>
                     <select id="sam-enabled">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="sam-provider-mode">
                     <span class="field-heading">
-                      <span class="field-label">SAM Provider</span>
+                      <span class="field-label">Segmentation Service</span>
                       <span id="effective-sam-provider-mode" class="field-effective"></span>
                     </span>
                     <select id="sam-provider-mode">
-                      <option value="">Use default</option>
-                      <option value="local">local</option>
-                      <option value="remote">remote</option>
+                      <option value="local">Run on this computer</option>
+                      <option value="remote">Use remote service</option>
                     </select>
                   </label>
                   <label class="field" data-field-id="sam-remote-url">
@@ -585,7 +579,6 @@
                       <span id="effective-sam-fallback-to-llm" class="field-effective"></span>
                     </span>
                     <select id="sam-fallback-to-llm">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
@@ -614,7 +607,7 @@
                 </div>
               </details>
 
-              <details class="settings-group settings-collapsible-group">
+              <details class="settings-group settings-collapsible-group" open>
                 <summary>
                   <span>Diagnostics And Experiments</span>
                   <span class="settings-summary-note">Memory, strategy, and agent internals</span>
@@ -633,7 +626,6 @@
                       <span id="effective-supervisor-memory-enabled" class="field-effective"></span>
                     </span>
                     <select id="supervisor-memory-enabled">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
@@ -644,7 +636,6 @@
                       <span id="effective-supervisor-memory-persist-enabled" class="field-effective"></span>
                     </span>
                     <select id="supervisor-memory-persist-enabled">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
@@ -655,15 +646,15 @@
                       <span id="effective-strategy-enabled" class="field-effective"></span>
                     </span>
                     <select id="strategy-enabled">
-                      <option value="">Use default</option>
                       <option value="true">true</option>
                       <option value="false">false</option>
                     </select>
                   </label>
                 </div>
               </details>
+              </div>
+            </details>
             </div>
-          </details>
         </section>
 
         <section id="artifact-summary" class="artifact-summary desktop-inspector-card">
@@ -692,14 +683,102 @@
           </details>
         </section>
 
-        <section id="manual-adjustment-section" class="manual-adjust-card desktop-manual-card">
-          <div class="manual-adjust-header">
-            <div class="compare-title">Refine</div>
-            <button id="desktop-refine-close" class="ghost-btn compact-btn" type="button" aria-label="Close refine sidebar">Close</button>
+        <div id="workspace-sidebar" class="workspace-sidebar" aria-label="Workspace tools">
+          <nav class="workspace-sidebar-activity" aria-label="Workspace sidebar tools" role="tablist">
+            <button
+              id="workspace-sidebar-tab-trace"
+              class="workspace-sidebar-tab is-active"
+              type="button"
+              data-workspace-sidebar-tab="trace"
+              aria-controls="workspace-trace-panel"
+              aria-selected="true"
+              role="tab"
+              title="Trace"
+            >
+              <span class="workspace-sidebar-tab-icon" aria-hidden="true">T</span>
+              <span class="workspace-sidebar-tab-label">Trace</span>
+            </button>
+            <button
+              id="workspace-sidebar-tab-refine"
+              class="workspace-sidebar-tab"
+              type="button"
+              data-workspace-sidebar-tab="refine"
+              aria-controls="manual-adjustment-section"
+              aria-selected="false"
+              role="tab"
+              title="Refine"
+            >
+              <span class="workspace-sidebar-tab-icon" aria-hidden="true">R</span>
+              <span class="workspace-sidebar-tab-label">Refine</span>
+            </button>
+          </nav>
+          <div class="workspace-sidebar-panels">
+            <section
+              id="workspace-trace-panel"
+              class="workspace-sidebar-panel is-active"
+              data-workspace-sidebar-panel="trace"
+              role="tabpanel"
+              aria-labelledby="workspace-sidebar-tab-trace"
+            >
+              <div class="workspace-panel-header">
+                <div class="workspace-panel-title compare-title">Process Trace</div>
+                <div class="workspace-panel-actions">
+                  <span id="status-text" class="status-text">Ready</span>
+                  <button class="workspace-sidebar-close-btn" type="button" data-workspace-sidebar-close aria-label="Close trace sidebar">&times;</button>
+                </div>
+              </div>
+              <div class="workspace-panel-body">
+                <div id="pipeline-status-bar" class="workspace-panel-section pipeline-status-bar" aria-live="polite">
+                  <div class="pipeline-status-item pipeline-current-step">
+                    <span class="pipeline-status-label">Current Step</span>
+                    <strong id="pipeline-current-step">Waiting to start</strong>
+                  </div>
+                  <div class="pipeline-status-item">
+                    <span class="pipeline-status-label">Progress</span>
+                    <strong id="pipeline-progress">0 / 0</strong>
+                  </div>
+                  <div class="pipeline-status-item pipeline-latest-update">
+                    <span class="pipeline-status-label">Latest Update</span>
+                    <strong id="pipeline-latest-update">No activity yet</strong>
+                  </div>
+                  <div class="pipeline-status-item pipeline-next-step">
+                    <span class="pipeline-status-label">Next Step</span>
+                    <strong id="pipeline-next-step">Start a conversion</strong>
+                  </div>
+                  <div class="pipeline-status-item pipeline-elapsed">
+                    <span class="pipeline-status-label">Elapsed</span>
+                    <strong id="pipeline-elapsed">0s</strong>
+                  </div>
+                </div>
+                <div id="workflow-trace" class="workspace-panel-section workspace-panel-section--flush workflow-trace empty-state">
+                  Process trace appears here when the conversion starts.
+                </div>
+                <section class="trace-refine-guide" aria-label="Refine guidance">
+                  <div class="trace-refine-guide-copy">
+                    <strong>Need a finer adjustment?</strong>
+                    <span>If anything still needs local changes, continue with the Refine flow.</span>
+                  </div>
+                  <button class="trace-refine-guide-btn" type="button" data-workspace-sidebar-tab="refine">Open Refine</button>
+                </section>
+              </div>
+            </section>
+            <section
+              id="manual-adjustment-section"
+              class="workspace-sidebar-panel"
+              data-workspace-sidebar-panel="refine"
+              role="tabpanel"
+              aria-labelledby="workspace-sidebar-tab-refine"
+              hidden
+            >
+          <div class="workspace-panel-header">
+            <div class="workspace-panel-title compare-title">Refine</div>
+            <div class="workspace-panel-actions">
+              <button id="desktop-refine-close" class="workspace-sidebar-close-btn" type="button" aria-label="Close refine sidebar">&times;</button>
+            </div>
           </div>
 
-          <div class="manual-adjust-grid">
-            <section id="manual-entry-bar" class="manual-entry-bar">
+          <div class="workspace-panel-body manual-adjust-grid">
+            <section id="manual-entry-bar" class="workspace-panel-section manual-entry-bar">
               <div class="manual-entry-copy">
                 <div class="compare-title">Local Edit Entry</div>
                 <p id="manual-entry-text" class="section-note">Wait for the first usable output.</p>
@@ -712,7 +791,7 @@
               </div>
             </section>
 
-            <section id="manual-workflow-bar" class="manual-workflow-bar">
+            <section id="manual-workflow-bar" class="workspace-panel-section manual-workflow-bar">
               <div class="manual-workflow-bar-top">
                 <div class="manual-workflow-overview">
                   <div class="compare-title">Current Edit Status</div>
@@ -745,10 +824,19 @@
                   </p>
                 </div>
 
-                <div class="manual-adjust-copy manual-selection-summary-card">
+                <div class="workspace-panel-section manual-adjust-copy manual-selection-summary-card">
                   <div class="compare-title">Selection Status</div>
                   <div id="manual-target-summary" class="manual-target-summary">
                     Select a region or object, or draw a box on the output preview.
+                  </div>
+                </div>
+
+                <div class="workspace-panel-section manual-selection-preview manual-confirmed-target-card">
+                  <div class="manual-section-head">
+                    <div class="compare-title">Confirmed Target</div>
+                  </div>
+                  <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
+                    Set a target to pin the region, objects, bbox, and base output frame.
                   </div>
                 </div>
               </div>
@@ -756,7 +844,7 @@
 
             <div id="manual-edit-core" class="manual-main-grid">
               <section class="manual-column manual-editor-column">
-                <div class="manual-editor-card">
+                <div class="workspace-panel-section manual-editor-card">
                   <div class="manual-section-head">
                     <div class="compare-title">Edit Goal</div>
                     <p class="section-note">Describe exactly what should improve in the selected area.</p>
@@ -776,15 +864,6 @@
                       <span id="manual-submit-status" class="status-text">Refinement is ready when output is available.</span>
                     </div>
                     <button id="manual-apply-button" class="primary-btn" type="button">Apply Refinement</button>
-                  </div>
-                </div>
-
-                <div class="manual-selection-preview manual-confirmed-target-card">
-                  <div class="manual-section-head">
-                    <div class="compare-title">Confirmed Target</div>
-                  </div>
-                  <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
-                    Confirm a selection to pin the target region, objects, bbox, and base output frame.
                   </div>
                 </div>
 
@@ -848,7 +927,7 @@
               </section>
 
               <section class="manual-column manual-sidebar-column">
-                <details id="manual-reference-panel" class="manual-reference-panel" data-persist-key="manual-reference-panel">
+                <details id="manual-reference-panel" class="workspace-panel-section manual-reference-panel" data-persist-key="manual-reference-panel">
                   <summary>
                     <span class="manual-reference-summary-title">Reference Images</span>
                   </summary>
@@ -932,7 +1011,7 @@
               </section>
             </div>
 
-            <section class="manual-output-section">
+            <section class="workspace-panel-section manual-output-section">
               <div class="manual-section-head">
                 <div class="compare-title">Adjustment Result</div>
               </div>
@@ -953,7 +1032,20 @@
               </section>
             </details>
           </div>
-        </section>
+            </section>
+          </div>
+          <div
+            id="workspace-sidebar-resize-handle"
+            class="workspace-sidebar-resize-handle"
+            role="separator"
+            aria-label="Resize workspace sidebar"
+            aria-orientation="vertical"
+            aria-valuemin="340"
+            aria-valuemax="760"
+            aria-valuenow="460"
+            tabindex="0"
+          ></div>
+        </div>
 
         <details id="artifact-files-panel" class="artifact-files-panel mode-advanced-section" data-persist-key="artifact-files-panel">
           <summary class="artifact-files-summary">Export Files</summary>
@@ -977,6 +1069,28 @@
       </div>
     </div>
 
-    <script type="module" src="/static/desktop-app.js?v=desktop-history-layout-fit-1"></script>
+    <div id="desktop-confirm-modal" class="desktop-confirm-modal hidden" aria-hidden="true">
+      <div class="desktop-confirm-backdrop" data-confirm-action="cancel"></div>
+      <section class="desktop-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="desktop-confirm-title">
+        <div class="desktop-confirm-header">
+          <div>
+            <p class="card-label">Project Action</p>
+            <h2 id="desktop-confirm-title">Delete Project</h2>
+          </div>
+        </div>
+        <p id="desktop-confirm-message" class="desktop-confirm-message"></p>
+        <label id="desktop-confirm-input-wrap" class="desktop-confirm-input-wrap hidden">
+          <span id="desktop-confirm-input-label">Project name</span>
+          <input id="desktop-confirm-input" type="text" autocomplete="off" />
+        </label>
+        <div class="desktop-confirm-actions">
+          <button id="desktop-confirm-cancel" class="ghost-btn" type="button" data-confirm-action="cancel">Cancel</button>
+          <button id="desktop-confirm-ok" class="primary-btn danger-primary-btn" type="button" data-confirm-action="confirm">Delete</button>
+        </div>
+      </section>
+    </div>
+    <div id="desktop-toast" class="desktop-toast hidden" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/static/desktop-app.js?v=trace-deck-collapse-1"></script>
   </body>
 </html>

@@ -18,7 +18,13 @@ from deepagents_template.checklist import (
     select_checklist_for_region,
 )
 from deepagents_template.bbox_sanitization import sanitize_bbox_issues, truncate_text
-from deepagents_template.geometry import compact_regions_for_prompt, crop_object_image, normalize_recognition_bboxes, normalize_regions
+from deepagents_template.geometry import (
+    compact_regions_for_prompt,
+    crop_object_image,
+    normalize_recognition_bboxes,
+    normalize_regions,
+    recognition_bboxes_to_global,
+)
 from deepagents_template.policy import BboxPolicyEngine, FusionPolicyEngine, ObjectPolicyEngine, RegionPolicyEngine
 from deepagents_template.recognition_grouping import group_oversegmented_recognition
 from deepagents_template.schemas import (
@@ -80,6 +86,14 @@ _CANDIDATE_BBOX_COLORS = {
     "compact": "#e63946",
     "balanced": "#1d3557",
     "roomy": "#2a9d8f",
+}
+
+_REGION_REPAIR_ISSUE_LIMIT = 3
+_OBJECT_REPAIR_ISSUE_LIMIT = 3
+_OBJECT_FIDELITY_ISSUE_FAMILIES = {
+    "content_accuracy",
+    "shape_fidelity",
+    "internal_structure",
 }
 
 
@@ -193,28 +207,75 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
         """Render a readable coordinate grid while preserving original crop coordinates."""
 
         with Image.open(crop_path) as source:
-            image = source.convert("RGBA")
+            crop_image = source.convert("RGBA")
         scale = max(1, int(scale))
         if scale > 1:
-            image = image.resize((image.width * scale, image.height * scale))
+            crop_image = crop_image.resize((crop_image.width * scale, crop_image.height * scale))
+        crop_width, crop_height = crop_image.size
+        original_width = max(1, crop_width // scale)
+        original_height = max(1, crop_height // scale)
+
+        top_pad = 28
+        left_pad = 46
+        right_pad = 12
+        bottom_pad = 12
+        image = Image.new(
+            "RGBA",
+            (left_pad + crop_width + right_pad, top_pad + crop_height + bottom_pad),
+            (246, 247, 249, 255),
+        )
+        image.paste(crop_image, (left_pad, top_pad))
         draw = ImageDraw.Draw(image)
-        width, height = image.size
-        original_width = max(1, width // scale)
-        original_height = max(1, height // scale)
         minor = 10
         major = 20
-        for x in range(0, original_width + 1, minor):
-            sx = x * scale
-            color = (80, 80, 80, 90) if x % major == 0 else (120, 120, 120, 45)
-            draw.line((sx, 0, sx, height), fill=color, width=1)
-            if x % major == 0:
-                draw.text((sx + 2, 2), str(x), fill=(30, 30, 30, 220))
-        for y in range(0, original_height + 1, minor):
-            sy = y * scale
-            color = (80, 80, 80, 90) if y % major == 0 else (120, 120, 120, 45)
-            draw.line((0, sy, width, sy), fill=color, width=1)
-            if y % major == 0:
-                draw.text((2, sy + 2), str(y), fill=(30, 30, 30, 220))
+        emphasis = 100
+        crop_left = left_pad
+        crop_top = top_pad
+        crop_right = left_pad + crop_width
+        crop_bottom = top_pad + crop_height
+        draw.rectangle((0, 0, crop_right, top_pad - 1), fill=(246, 247, 249, 255))
+        draw.rectangle((0, 0, left_pad - 1, crop_bottom), fill=(246, 247, 249, 255))
+        draw.line((crop_left, 0, crop_left, crop_bottom), fill=(80, 80, 80, 180), width=1)
+        draw.line((0, crop_top, crop_right, crop_top), fill=(80, 80, 80, 180), width=1)
+        x_marks = list(range(0, original_width + 1, minor))
+        if x_marks[-1] != original_width:
+            x_marks.append(original_width)
+        for x in x_marks:
+            sx = crop_left + x * scale
+            is_boundary = x == 0 or x == original_width
+            is_emphasis = is_boundary or x % emphasis == 0
+            is_major = x % major == 0
+            color = (55, 55, 55, 130) if is_emphasis else (80, 80, 80, 90) if is_major else (120, 120, 120, 45)
+            line_width = 2 if is_emphasis else 1
+            draw.line((sx, crop_top, sx, crop_bottom), fill=color, width=line_width)
+            if x % major == 0 or x == original_width:
+                label_fill = (0, 0, 0, 255) if is_emphasis else (30, 30, 30, 230)
+                label = str(x)
+                label_width = draw.textlength(label)
+                label_x = min(max(sx + 2, crop_left + 2), crop_right - int(label_width) - 2)
+                draw.text((label_x, 6), label, fill=label_fill)
+        y_marks = list(range(0, original_height + 1, minor))
+        if y_marks[-1] != original_height:
+            y_marks.append(original_height)
+        for y in y_marks:
+            sy = crop_top + y * scale
+            is_boundary = y == 0 or y == original_height
+            is_emphasis = is_boundary or y % emphasis == 0
+            is_major = y % major == 0
+            color = (55, 55, 55, 130) if is_emphasis else (80, 80, 80, 90) if is_major else (120, 120, 120, 45)
+            line_width = 2 if is_emphasis else 1
+            draw.line((crop_left, sy, crop_right, sy), fill=color, width=line_width)
+            if y % major == 0 or y == original_height:
+                label_fill = (0, 0, 0, 255) if is_emphasis else (30, 30, 30, 230)
+                label = str(y)
+                label_height = draw.textbbox((0, 0), label)[3]
+                label_y = min(max(sy + 2, crop_top + 2), crop_bottom - label_height - 2)
+                draw.text((4, label_y), label, fill=label_fill)
+        boundary_color = (55, 55, 55, 150)
+        draw.line((crop_left, crop_top, crop_left, crop_bottom), fill=boundary_color, width=2)
+        draw.line((crop_right, crop_top, crop_right, crop_bottom), fill=boundary_color, width=2)
+        draw.line((crop_left, crop_top, crop_right, crop_top), fill=boundary_color, width=2)
+        draw.line((crop_left, crop_bottom, crop_right, crop_bottom), fill=boundary_color, width=2)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(output_path)
         return output_path
@@ -1116,7 +1177,13 @@ class ObjectRepairSupervisorAgent(BaseWorkflowAgent):
             current_object_svg = object_svg_index.get(obj.object_id, "")
             object_dir = objects_dir / obj.object_id
             object_dir.mkdir(parents=True, exist_ok=True)
-            object_crop_path = crop_object_image(region_crop_path=crop_path, obj=obj, object_dir=object_dir)
+            object_crop_path = crop_object_image(
+                region_crop_path=crop_path,
+                obj=obj,
+                object_dir=object_dir,
+                region=region,
+                bbox_space="global",
+            )
             if not self.pipeline._begin_retry(retry_task):
                 memory.object_attempts[obj.object_id] = memory.object_attempts.get(obj.object_id, 0)
                 memory.object_last_failure[obj.object_id] = "retry exhausted before new attempt"
@@ -1475,6 +1542,29 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
             )
         )
 
+    @staticmethod
+    def _select_object_issues_for_region_round(
+        object_issues: list,
+        *,
+        target_objects: list[str],
+        valid_object_ids: set[str],
+        limit: int = _OBJECT_REPAIR_ISSUE_LIMIT,
+    ) -> list:
+        candidates = [
+            issue
+            for issue in object_issues
+            if issue.object_id in valid_object_ids
+            and (not target_objects or issue.object_id in target_objects)
+        ]
+        fidelity_candidates = [
+            issue
+            for issue in candidates
+            if issue.severity in {"medium", "high"}
+            and getattr(issue, "issue_family", "") in _OBJECT_FIDELITY_ISSUE_FAMILIES
+        ]
+        selected = fidelity_candidates or candidates
+        return selected[:limit]
+
     def _region_bbox_feedback(
         self,
         *,
@@ -1570,8 +1660,10 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 recognition=recognition,
                 region_dir=region_dir,
             )
+            recognition = recognition_bboxes_to_global(recognition, region=region)
         else:
             bbox_result = BboxAdjustmentResult(scope="recognition", region_id=region_id, overview="", issues=[], needs_adjustment=False)
+            recognition = recognition_bboxes_to_global(recognition, region=region)
         self.pipeline._write_text(region_dir / "recognition_raw.txt", recognition_raw)
         self.pipeline._write_json(region_dir / "recognition.json", recognition.model_dump(mode="json"))
         if grouping_summary.merged_count:
@@ -1745,24 +1837,23 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                     final_svg_elements, object_svg_index = last_region_repair_snapshot
                 break
 
-            if decision.final_route == "object_repair":
-                self._emit_region_semantic_stage(region=region, semantic_stage="Object Repair", phase="refine")
-                selected_ids = decision.final_target_objects or [issue.object_id for issue in review.object_issues]
-                selected_issues = [issue for issue in review.object_issues if issue.object_id in selected_ids] or review.object_issues
-                self._record_object_strategy(memory=memory, iteration=f"object-{policy_iteration}", object_ids=[issue.object_id for issue in selected_issues])
-                object_svg_index, round_history = self.object_supervisor.repair(
-                    crop_path=crop_path,
-                    region=region,
-                    checklist=checklist,
-                    region_dir=region_dir,
-                    recognition=recognition,
-                    object_svg_index=object_svg_index,
-                    object_issues=selected_issues,
+            current_can_object = (
+                self.pipeline.workflow_mode == "region_object"
+                and self.pipeline._has_object_retry_capacity(region_id, recognition, review.object_issues)
+            )
+            selected_region_issues = list(review.global_repairs[:_REGION_REPAIR_ISSUE_LIMIT])
+            selected_object_issues = (
+                self._select_object_issues_for_region_round(
+                    review.object_issues,
+                    target_objects=decision.final_target_objects,
+                    valid_object_ids=valid_object_ids,
                 )
-                object_history.extend(round_history)
-                final_svg_elements = aggregate_region_object_svg(final_svg_elements, object_svg_index, region)
-                self.pipeline._write_text(region_dir / f"region_object_aggregate_{policy_iteration}.svgfrag", final_svg_elements)
-            else:
+                if current_can_object
+                else []
+            )
+            did_repair = False
+
+            if selected_region_issues:
                 if not self.pipeline._begin_retry(region_retry_task):
                     break
                 self._emit_region_semantic_stage(region=region, semantic_stage="Region Repair", phase="refine")
@@ -1777,7 +1868,7 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                         memory=memory,
                         iteration=str(policy_iteration),
                         description=f"{decision.final_strategy_label}: {decision.final_strategy_rationale or ''}",
-                        issue_ids=[f"region:{region_id}:{item.criterion}" for item in review.global_repairs],
+                        issue_ids=[f"region:{region_id}:{item.criterion}" for item in selected_region_issues],
                     )
                 region_svg_update, repair_raw = self.svg_worker.run(
                     crop_path=crop_path,
@@ -1790,7 +1881,7 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                         svg_text=final_svg_elements,
                         svg_path=region_dir / "inputs" / f"region-{region_id}-current.svg",
                     ),
-                    failed_items=[item.model_dump(mode="json") for item in review.global_repairs],
+                    failed_items=[item.model_dump(mode="json") for item in selected_region_issues],
                     strategy_hint=strategy_hint,
                 )
                 final_svg_elements, object_svg_index, unscoped_visuals = finalize_region_svg(region_svg_update.svg_elements, region)
@@ -1811,6 +1902,26 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 )
                 self.pipeline._write_json(region_dir / f"region_svg_update_iter_{policy_iteration}.json", region_svg_update.model_dump(mode="json"))
                 self.pipeline._write_text(region_dir / f"region_svg_update_iter_{policy_iteration}.svgfrag", final_svg_elements)
+                did_repair = True
+
+            if selected_object_issues:
+                self._emit_region_semantic_stage(region=region, semantic_stage="Object Repair", phase="refine")
+                self._record_object_strategy(memory=memory, iteration=f"object-{policy_iteration}", object_ids=[issue.object_id for issue in selected_object_issues])
+                object_svg_index, round_history = self.object_supervisor.repair(
+                    crop_path=crop_path,
+                    region=region,
+                    checklist=checklist,
+                    region_dir=region_dir,
+                    recognition=recognition,
+                    object_svg_index=object_svg_index,
+                    object_issues=selected_object_issues,
+                )
+                object_history.extend(round_history)
+                final_svg_elements = aggregate_region_object_svg(final_svg_elements, object_svg_index, region)
+                self.pipeline._write_text(region_dir / f"region_object_aggregate_{policy_iteration}.svgfrag", final_svg_elements)
+                did_repair = True
+            if not did_repair:
+                break
             self._emit_region_semantic_stage(region=region, semantic_stage="Next Review", phase="refine")
             policy_iteration += 1
 
@@ -1930,6 +2041,8 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
         final_review_raw = ""
         final_review = FinalReviewResult()
         iteration = 0
+        fusion_retry_limit = max(0, int(getattr(self.pipeline, "fusion_max_retry", 3)))
+        final_decision = None
         while True:
             fusion_policy_dir = self.pipeline.root_output_dir / "policy"
             merged_svg_file_name = f"merged-final-policy-{iteration}.svg"
@@ -1953,11 +2066,12 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
                     "svg_file_name": merged_svg_file_name,
                 },
                 memory=self.memory,
-                retry_exhausted=iteration > 0,
+                retry_exhausted=iteration >= fusion_retry_limit,
                 iteration=str(iteration),
                 rendered_svg_path=rendered_merged_svg_path,
                 svg_file_path=fusion_policy_dir / merged_svg_file_name,
             )
+            final_decision = decision
             final_review = decision.review
             final_review_raw = json.dumps(decision.model_dump(mode="json"), ensure_ascii=False, indent=2)
             self._update_fusion_memory_from_decision(
@@ -1982,7 +2096,7 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
             self.pipeline._write_text(output_path.with_name(f"{stem}_integrate_repair_raw.txt"), repair_raw)
             self.pipeline._write_json(output_path.with_name(f"{stem}_integrate_repair.json"), repair_result.model_dump(mode="json"))
             iteration += 1
-            if iteration > 1:
+            if iteration > fusion_retry_limit:
                 break
         self.pipeline._write_text(review_raw_path, final_review_raw)
         self.pipeline._write_json(review_json_path, final_review.model_dump(mode="json"))
@@ -1996,12 +2110,22 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
                     unstable_boundaries.append({"regions": parts, "issue_id": item.issue_id})
         self.memory.unstable_boundaries = unstable_boundaries
         self.memory.stable_regions = sorted(set(merged_regions) - remaining_regions)
-        self.memory.stop_reason = "fusion policy completed"
+        final_outcome = getattr(final_decision, "final_outcome", None) if final_decision is not None else None
+        final_reason = getattr(final_decision, "final_reason", None) if final_decision is not None else None
+        self.memory.stop_reason = (
+            f"{final_outcome}: {final_reason}"
+            if final_outcome and final_reason
+            else final_reason or "fusion policy completed"
+        )
         self._persist_fusion_memory()
         self.pipeline._set_overview(
             {
                 "fusion_agent_mode": "supervisor_worker",
                 "final_issue_count": len(final_review_spatial_logical_issues(final_review.model_dump(mode="json"))),
+                "fusion_stop_outcome": final_outcome,
+                "fusion_stop_reason": self.memory.stop_reason,
+                "fusion_repair_attempts_used": min(iteration, fusion_retry_limit),
+                "fusion_max_retry": fusion_retry_limit,
             }
         )
         return merged_svg, final_review, final_review_raw

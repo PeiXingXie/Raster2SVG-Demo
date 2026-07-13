@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +30,45 @@ ARTIFACT_KIND_BY_SUFFIX = {
 
 PREVIEWABLE_KINDS = {"svg", "png", "jpg", "jpeg", "webp", "gif", "bmp"}
 RUN_DIR_SLUG_MAX_LENGTH = 24
+
+
+def _infer_overlay_object_bbox_space(
+    region_bbox: dict,
+    object_bbox: dict,
+    explicit_space: str | None,
+) -> str:
+    if explicit_space in {"global", "region_local"}:
+        return explicit_space
+
+    try:
+        x = int(object_bbox.get("x", 0))
+        y = int(object_bbox.get("y", 0))
+        width = int(object_bbox.get("width", 0))
+        height = int(object_bbox.get("height", 0))
+        region_x = int(region_bbox.get("x", 0))
+        region_y = int(region_bbox.get("y", 0))
+        region_width = int(region_bbox.get("width", 0))
+        region_height = int(region_bbox.get("height", 0))
+    except (TypeError, ValueError):
+        return "global"
+
+    valid_extent = width > 0 and height > 0 and region_width > 0 and region_height > 0
+    if not valid_extent:
+        return "global"
+
+    fits_global_region = (
+        x >= region_x
+        and y >= region_y
+        and x + width <= region_x + region_width
+        and y + height <= region_y + region_height
+    )
+    if fits_global_region:
+        return "global"
+
+    fits_region_local = x >= 0 and y >= 0 and x + width <= region_width and y + height <= region_height
+    if fits_region_local:
+        return "region_local"
+    return "global"
 
 
 def slugify_project_name(name: str, *, max_length: int | None = None) -> str:
@@ -160,11 +200,63 @@ class ArtifactStore:
                 return run
         return None
 
+    def update_run_project_name(self, run: ExecutionRun, project_name: str) -> ExecutionRun:
+        run_dir = self.resolve_run_dir(run.artifact_dir)
+        if run_dir is None:
+            raise FileNotFoundError("Run artifact directory was not found.")
+        now = datetime.now(UTC)
+        updated_run = run.model_copy(update={"project_name": project_name, "updated_at": now})
+        metadata_path = run_dir / "metadata.json"
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+        else:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["current_run"] = updated_run.model_dump(mode="json")
+        recent_runs = []
+        for item in metadata.get("recent_runs") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("run_id") == updated_run.run_id:
+                item = dict(item)
+                item["project_name"] = project_name
+                item["updated_at"] = now.isoformat()
+            recent_runs.append(item)
+        metadata["recent_runs"] = recent_runs
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        output_path = run_dir / "output.json"
+        if output_path.exists():
+            try:
+                output_payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                output_payload = None
+            if isinstance(output_payload, dict):
+                output_payload["project_name"] = project_name
+                output_path.write_text(json.dumps(output_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return updated_run
+
+    def delete_run_dir(self, artifact_dir: str | None) -> Path:
+        run_dir = self.resolve_run_dir(artifact_dir)
+        if run_dir is None:
+            raise FileNotFoundError("Run artifact directory was not found.")
+        if run_dir == self.root.resolve():
+            raise FileNotFoundError("Run artifact directory was not found.")
+        shutil.rmtree(run_dir)
+        return run_dir
+
+    def delete_run(self, run: ExecutionRun) -> Path:
+        return self.delete_run_dir(run.artifact_dir)
+
     def load_execution_run(self, run_dir: Path) -> ExecutionRun | None:
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             try:
-                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                payload = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict) and isinstance(payload.get("current_run"), dict):
@@ -180,7 +272,7 @@ class ArtifactStore:
         output_path = run_dir / "output.json"
         if output_path.exists():
             try:
-                payload = json.loads(output_path.read_text(encoding="utf-8"))
+                payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
@@ -248,7 +340,7 @@ class ArtifactStore:
         log_file = run_dir / "logs" / "files.json"
         if log_file.exists():
             try:
-                records = json.loads(log_file.read_text(encoding="utf-8"))
+                records = json.loads(log_file.read_text(encoding="utf-8-sig"))
                 if isinstance(records, list):
                     return sorted(
                         [
@@ -283,7 +375,7 @@ class ArtifactStore:
         if file_path is None:
             return None
         try:
-            payload = json.loads(file_path.read_text(encoding="utf-8"))
+            payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
@@ -293,7 +385,7 @@ class ArtifactStore:
         if file_path is None:
             return None
         try:
-            return json.loads(file_path.read_text(encoding="utf-8"))
+            return json.loads(file_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -392,7 +484,11 @@ class ArtifactStore:
                             if object_bbox
                             else None
                         ),
-                        "bbox_space": "region_local",
+                        "bbox_space": _infer_overlay_object_bbox_space(
+                            bbox,
+                            object_bbox,
+                            obj.get("bbox_space"),
+                        ),
                         "retry_limit": object_retry.get("limit"),
                         "retry_used": object_retry.get("used"),
                         "retry_exhausted": object_retry.get("exhausted"),
@@ -875,7 +971,7 @@ class ArtifactStore:
         if not path.is_file():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
 

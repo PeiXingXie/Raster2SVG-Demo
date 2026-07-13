@@ -15,9 +15,9 @@ MAIN_STAGES: list[tuple[str, str]] = [
     ("prepare-input", "Prepare Input"),
     ("layout", "Layout Detect"),
     ("initial-generate", "Initial Generate"),
-    ("initial-integrate", "Integrate"),
+    ("initial-integrate", "Initial Integrate"),
     ("refine", "Refine"),
-    ("final-integrate", "Integrate"),
+    ("final-integrate", "Final Integrate"),
 ]
 
 STAGE_INDEX = {key: index for index, (key, _) in enumerate(MAIN_STAGES)}
@@ -60,6 +60,32 @@ def _event_time(event: dict | object) -> datetime | None:
 def _payload(event: dict | object) -> dict:
     payload = getattr(event, "payload", None)
     return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_trace_stage(value: object) -> str | None:
+    stage = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "loading-input": "prepare-input",
+        "input": "prepare-input",
+        "prepare": "prepare-input",
+        "layout-detection": "layout",
+        "layout detection": "layout",
+        "initial-generation": "initial-generate",
+        "initial": "initial-generate",
+        "initial-integration": "initial-integrate",
+        "final-integration": "final-integrate",
+        "final": "final-integrate",
+        "region-process-initial": "initial-generate",
+        "region-process-refine": "refine",
+    }
+    stage = aliases.get(stage, stage)
+    return stage if stage in STAGE_INDEX else None
+
+
+def _payload_trace_stage(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    return _normalize_trace_stage(payload.get("trace_stage"))
 
 
 def _duration_ms(started_at: datetime | None, ended_at: datetime | None) -> int | None:
@@ -126,7 +152,10 @@ def _object_region_index(run_dir: Path) -> dict[str, str]:
     return index
 
 
-def _model_call_stage(response_model: str | None, call_index: int | None) -> str | None:
+def _model_call_stage(response_model: str | None, call_index: int | None, explicit_stage: object = None) -> str | None:
+    explicit = _normalize_trace_stage(explicit_stage)
+    if explicit:
+        return explicit
     if response_model in {"BboxAdjustmentResult", "BboxCombinedPolicyModelResult"} and call_index is not None and call_index > 4:
         return "initial-generate"
     if response_model == "RegionSvgGenerationResult" and call_index is not None and call_index >= 40:
@@ -167,6 +196,7 @@ def _model_call_records(run: ExecutionRun | None) -> list[tuple[int, object, dic
         if object_id and not region_id:
             region_id = object_regions.get(str(object_id))
         api_budget = request_payload.get("api_budget") if isinstance(request_payload.get("api_budget"), dict) else {}
+        explicit_trace_stage = _payload_trace_stage(request_payload)
         payload = {
             "call_index": call_index,
             "response_model": response_model,
@@ -175,7 +205,7 @@ def _model_call_records(run: ExecutionRun | None) -> list[tuple[int, object, dic
             "target_id": str(object_id or region_id) if (object_id or region_id) else None,
             "target_type": "object" if object_id else ("region" if region_id else None),
             "api_budget": api_budget,
-            "trace_stage": _model_call_stage(response_model, call_index),
+            "trace_stage": explicit_trace_stage or _model_call_stage(response_model, call_index),
             "request_path": str(request_path.relative_to(Path(run.artifact_dir))).replace("/", "\\"),
         }
         if raw_path.is_file():
@@ -254,7 +284,11 @@ def _budget_exhausted_target(run: ExecutionRun | None) -> dict[str, str | None]:
         _payload(event)
         for event in (run.events if run is not None else [])
         if getattr(event, "stage", None) == "model-response"
-        and _model_call_stage(_payload(event).get("response_model"), _coerce_int(_payload(event).get("call_index"))) == "refine"
+        and _model_call_stage(
+            _payload(event).get("response_model"),
+            _coerce_int(_payload(event).get("call_index")),
+            _payload_trace_stage(_payload(event)),
+        ) == "refine"
     ]
     records = [
         item[2]
@@ -274,7 +308,10 @@ def _budget_exhausted_target(run: ExecutionRun | None) -> dict[str, str | None]:
     return {"region_id": None, "object_id": None}
 
 
-def _stage_key_for_direct_event(stage: str | None, *, integrate_count: int) -> str | None:
+def _stage_key_for_direct_event(stage: str | None, payload: dict | None = None, *, integrate_count: int) -> str | None:
+    explicit = _payload_trace_stage(payload)
+    if explicit:
+        return explicit
     value = (stage or "").strip().lower()
     if value in PREPARE_INPUT_STAGES:
         return "prepare-input"
@@ -303,7 +340,7 @@ def _build_stage_spans(run: ExecutionRun | None) -> tuple[dict[str, dict[str, An
         event_time = _event_time(event)
         if event_time is None:
             continue
-        direct_stage_key = _stage_key_for_direct_event(getattr(event, "stage", None), integrate_count=integrate_count)
+        direct_stage_key = _stage_key_for_direct_event(getattr(event, "stage", None), _payload(event), integrate_count=integrate_count)
         if direct_stage_key is not None:
             if current_stage_key and current_stage_key != direct_stage_key:
                 current_span = spans[current_stage_key]
@@ -346,6 +383,33 @@ def _find_target_event_index(run: ExecutionRun | None, *, region_id: str | None 
     matched = None
     for index, event in enumerate(run.events or []):
         payload = _payload(event)
+        if region_id and payload.get("region_id") != region_id:
+            continue
+        if object_id:
+            target_ids = payload.get("target_ids")
+            if payload.get("object_id") != object_id and payload.get("target_id") != object_id and (
+                not isinstance(target_ids, list) or object_id not in target_ids
+            ):
+                continue
+        matched = index
+    return matched
+
+
+def _find_target_event_index_for_stage(
+    run: ExecutionRun | None,
+    *,
+    stage_key: str | None = None,
+    region_id: str | None = None,
+    object_id: str | None = None,
+) -> int | None:
+    if run is None:
+        return None
+    matched = None
+    for index, event in enumerate(run.events or []):
+        payload = _payload(event)
+        explicit_stage = _payload_trace_stage(payload)
+        if stage_key and explicit_stage and explicit_stage != stage_key:
+            continue
         if region_id and payload.get("region_id") != region_id:
             continue
         if object_id:
@@ -437,6 +501,7 @@ def _target_event_span(
     *,
     region_id: str | None = None,
     object_id: str | None = None,
+    stage_key: str | None = None,
 ) -> dict[str, object]:
     if run is None:
         return {}
@@ -446,6 +511,9 @@ def _target_event_span(
     last_event_index = None
     for index, event in enumerate(run.events or []):
         payload = _payload(event)
+        explicit_stage = _payload_trace_stage(payload)
+        if stage_key and explicit_stage and explicit_stage != stage_key:
+            continue
         if not _target_matches(payload, region_id=region_id, object_id=object_id):
             continue
         event_time = _event_time(event)
@@ -653,7 +721,13 @@ def _region_reason(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _region_timing(run: ExecutionRun | None, region_id: str, worker_status: dict[str, Any] | None) -> dict[str, object]:
+def _region_timing(
+    run: ExecutionRun | None,
+    region_id: str,
+    worker_status: dict[str, Any] | None,
+    *,
+    stage_key: str | None = None,
+) -> dict[str, object]:
     if worker_status:
         started_at = worker_status.get("started_at")
         updated_at = worker_status.get("updated_at")
@@ -663,9 +737,11 @@ def _region_timing(run: ExecutionRun | None, region_id: str, worker_status: dict
             "started_at": started_at,
             "ended_at": ended_at,
             "duration_ms": duration_ms if isinstance(duration_ms, int) else _duration_ms(started_at, ended_at),
-            "event_index": _find_target_event_index(run, region_id=region_id),
+            "event_index": _find_target_event_index_for_stage(run, region_id=region_id, stage_key=stage_key)
+            if stage_key
+            else _find_target_event_index(run, region_id=region_id),
         }
-    return _target_event_span(run, region_id=region_id)
+    return _target_event_span(run, region_id=region_id, stage_key=stage_key)
 
 
 def _region_semantic_stage(
@@ -809,7 +885,7 @@ def _build_initial_generate_nodes(
     for region in regions:
         region_id = str(region.get("region_id") or "")
         worker_status = workers.get(region_id)
-        timing = _target_event_span(run, region_id=region_id)
+        timing = _target_event_span(run, region_id=region_id, stage_key="initial-generate")
         started_at = timing.get("started_at")
         ended_at = timing.get("ended_at")
         duration_ms = timing.get("duration_ms")
@@ -951,7 +1027,7 @@ def _build_refine_nodes(
             active_node_id = f"region:{region_id}"
         if status == "blocked" and budget_blocked_region_id == region_id:
             active_node_id = f"object:{region_id}:{budget_blocked_object_id}" if budget_blocked_object_id else f"region:{region_id}"
-        region_timing = _region_timing(run, region_id, worker_status)
+        region_timing = _region_timing(run, region_id, worker_status, stage_key="refine")
         region_started_at = region_timing.get("started_at")
         region_ended_at = region_timing.get("ended_at")
         region_duration_ms = region_timing.get("duration_ms")
@@ -1066,7 +1142,7 @@ def _build_refine_nodes(
                 object_summary = "Retry exhausted" if retry_exhausted else "Still unresolved after repair"
             elif retry_used > 0:
                 object_summary = f"Accepted after {retry_used} retr{'y' if retry_used == 1 else 'ies'}"
-            object_timing = _target_event_span(run, region_id=region_id, object_id=object_id)
+            object_timing = _target_event_span(run, region_id=region_id, object_id=object_id, stage_key="refine")
             if object_timing.get("started_at") is None:
                 object_timing = {
                     "started_at": region_started_at,
@@ -1097,7 +1173,7 @@ def _build_refine_nodes(
                 )
             )
         if budget_blocked_region_id == region_id and budget_blocked_object_id and not budget_object_node_added:
-            object_timing = _target_event_span(run, region_id=region_id, object_id=budget_blocked_object_id)
+            object_timing = _target_event_span(run, region_id=region_id, object_id=budget_blocked_object_id, stage_key="refine")
             if object_timing.get("started_at") is None:
                 object_timing = {
                     "started_at": region_started_at,

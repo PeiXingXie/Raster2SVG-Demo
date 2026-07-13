@@ -1,4 +1,4 @@
-"""Overview: CLI entrypoint for raster-to-SVG conversion runs."""
+"""Overview: CLI entrypoint for Shape Studio conversion runs."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class CliRunMonitor:
         subagent_model: str,
     ) -> None:
         settings = get_settings()
-        print("[run] Raster-to-SVG conversion")
+        print("[run] Shape Studio conversion")
         print(f"[run] image={request.image_path or 'none'}")
         region_mode = settings.resolved_region_processing_mode(request.region_processing_mode)
         region_concurrency = settings.resolved_region_concurrency(
@@ -117,12 +117,12 @@ class CliRunMonitor:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Raster-to-SVG agent demo from the command line.")
+    parser = argparse.ArgumentParser(description="Run a Shape Studio conversion from the command line.")
     parser.add_argument(
         "message",
         nargs="?",
         default=None,
-        help="The raster-to-SVG conversion request to send to the pipeline. When omitted, the .env default is used.",
+        help="The Shape Studio conversion request to send to the pipeline. When omitted, the .env default is used.",
     )
     parser.add_argument("--image-path", help="Required local raster image path for conversion.")
     parser.add_argument(

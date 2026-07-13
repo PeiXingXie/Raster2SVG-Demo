@@ -522,6 +522,7 @@ class FusionCombinedPolicyModelWorker(BaseWorkflowAgent):
     ) -> tuple[FusionCombinedPolicyModelResult, str]:
         svg_source_text = svg_file_path.read_text(encoding="utf-8") if svg_file_path is not None and svg_file_path.is_file() else None
         system_prompt, user_prompt = build_fusion_combined_policy_prompts(
+            user_request=self.pipeline.user_message,
             final_review_context=final_review_context,
             memory_summary=memory_summary,
             strategy_enabled=strategy_enabled,

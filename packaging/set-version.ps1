@@ -73,12 +73,12 @@ if (Test-Path -LiteralPath $DesktopLockPath) {
     $DesktopLockText = Get-Content -Raw -LiteralPath $DesktopLockPath
     $DesktopLockText = Replace-Once `
         -Text $DesktopLockText `
-        -Pattern '("name"\s*:\s*"raster-svg-desktop-client",\s*\r?\n\s*"version"\s*:\s*")[^"]+(")' `
+        -Pattern '("name"\s*:\s*"shape-studio-desktop-client",\s*\r?\n\s*"version"\s*:\s*")[^"]+(")' `
         -Replacement "`${1}$Version`${2}" `
         -Description "desktop/package-lock.json top-level version"
     $DesktopLockText = Replace-Once `
         -Text $DesktopLockText `
-        -Pattern '(""\s*:\s*\{\s*\r?\n\s*"name"\s*:\s*"raster-svg-desktop-client",\s*\r?\n\s*"version"\s*:\s*")[^"]+(")' `
+        -Pattern '(""\s*:\s*\{\s*\r?\n\s*"name"\s*:\s*"shape-studio-desktop-client",\s*\r?\n\s*"version"\s*:\s*")[^"]+(")' `
         -Replacement "`${1}$Version`${2}" `
         -Description "desktop/package-lock.json root package version"
     Write-Utf8NoBom -Path $DesktopLockPath -Text $DesktopLockText

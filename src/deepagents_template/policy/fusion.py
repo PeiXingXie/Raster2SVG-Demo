@@ -59,15 +59,20 @@ class FusionPolicyEngine:
             key: value for key, value in final_review_context.items() if key != "svg_file_name"
         }
         history_delta_used = bool(memory_summary is not None or prompt_review_context.get("previous_decision_delta") is not None)
+        svg_source_text = svg_file_path.read_text(encoding="utf-8") if svg_file_path is not None and svg_file_path.is_file() else None
         prompt_request = {
+            "user_request": getattr(self.pipeline, "user_message", None),
             "final_review_context": prompt_review_context,
             "memory_summary": memory_summary,
             "strategy_enabled": strategy_enabled,
+            "svg_source_text": svg_source_text,
             "svg_file_name": svg_file_name,
         }
         system_prompt, user_prompt = build_fusion_combined_policy_prompts(**prompt_request)
         request_context = {
+            "user_request": getattr(self.pipeline, "user_message", None),
             "final_review_context": prompt_review_context,
+            "retry_exhausted": retry_exhausted,
             "strategy_enabled": strategy_enabled,
         }
         if memory_summary is not None:

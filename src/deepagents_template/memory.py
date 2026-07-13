@@ -225,3 +225,25 @@ class ThreadStore:
                 state.recent_runs = ([run.model_copy(deep=True)] + state.recent_runs)[:8]
 
             return state.model_copy(deep=True)
+
+    def update_run_project_name(self, thread_id: str, run_id: str, project_name: str) -> ThreadState:
+        with self._lock:
+            state = self._threads.setdefault(thread_id, ThreadState(thread_id=thread_id))
+            now = utc_now()
+            if state.current_run is not None and state.current_run.run_id == run_id:
+                state.current_run.project_name = project_name
+                state.current_run.updated_at = now
+            for run in state.recent_runs:
+                if run.run_id == run_id:
+                    run.project_name = project_name
+                    run.updated_at = now
+            return state.model_copy(deep=True)
+
+    def remove_run(self, thread_id: str, run_id: str) -> ThreadState:
+        with self._lock:
+            state = self._threads.setdefault(thread_id, ThreadState(thread_id=thread_id))
+            if state.current_run is not None and state.current_run.run_id == run_id:
+                state.current_run = None
+                state.pending_approval = None
+            state.recent_runs = [run for run in state.recent_runs if run.run_id != run_id]
+            return state.model_copy(deep=True)

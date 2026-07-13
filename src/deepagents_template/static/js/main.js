@@ -1,5 +1,5 @@
 import { fetchJson } from "./api-client.js";
-import { elements } from "./dom.js?v=desktop-start-runtime-readiness-1";
+import { elements } from "./dom.js?v=desktop-history-jump-1";
 import {
   applyFrontendDefaults,
   applyRuntimeOverrides,
@@ -14,8 +14,9 @@ import {
   updateEffectiveValues,
   updateMessagePresetSelection,
   uploadLocalFile,
-} from "./form.js?v=desktop-start-runtime-readiness-1";
+} from "./form.js?v=desktop-history-jump-1";
 import { appState, resetRenderState, resetUiSelections } from "./state.js";
+import { applySettingsLabelMappings } from "./settings-labels.js?v=desktop-history-jump-1";
 import { renderApproval } from "./renderers/conversation.js";
 import {
   clearArtifactPanel,
@@ -25,9 +26,10 @@ import {
   renderArtifactFiles,
   renderManualWorkflowTrace,
   renderArtifactSummary,
+  renderWorkspaceArtifactLoadingState,
   updateWorkflowTraceTimers,
-} from "./renderers/artifacts.js?v=desktop-output-scroll-fix-1";
-import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=desktop-history-preview-cache-1";
+} from "./renderers/artifacts.js?v=trace-deck-collapse-1";
+import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=history-card-layout-2";
 import { arrayBufferToBase64, formatElapsedDuration, scrollIntoContainerView, stableStringify } from "./utils.js";
 
 const UI_MODE_STORAGE_KEY = "raster-svg-demo-ui-mode";
@@ -60,8 +62,8 @@ const DESKTOP_PROCESS_GUIDE = {
   upload: {
     eyebrow: "Step 1",
     title: "Upload",
-    body: "Add a source image and describe the target.",
-    notes: ["Paste or choose an image.", "Describe the target SVG.", "Start the conversion."],
+    body: "Add a source image, complete the needed configuration, and describe the target.",
+    notes: ["Paste or choose an image.", "Review or complete Settings if needed.", "Start the conversion."],
   },
   trace: {
     eyebrow: "Step 2",
@@ -119,6 +121,20 @@ function setStatus(text) {
   elements.statusText.textContent = text;
 }
 
+let desktopToastTimer = null;
+
+function showDesktopToast(message) {
+  if (!elements.desktopToast) {
+    return;
+  }
+  window.clearTimeout(desktopToastTimer);
+  elements.desktopToast.textContent = message;
+  elements.desktopToast.classList.remove("hidden");
+  desktopToastTimer = window.setTimeout(() => {
+    elements.desktopToast.classList.add("hidden");
+  }, 3200);
+}
+
 function updateStartRuntimeHint() {
   const readiness = getStartRuntimeReadiness();
   sendButtonLockedByRuntime = !readiness.ready;
@@ -144,20 +160,20 @@ function updateStartRuntimeHint() {
 const SETTINGS_FIELD_HELP = {
   "api-key": "Secret key used for model API calls; saved values stay hidden after update.",
   "base-url": "Endpoint base URL for the selected model API provider.",
-  "api-provider": "Provider adapter used to create model clients for conversions.",
-  "api-format": "Request protocol used when talking to the model API.",
+  "api-provider": "Compatibility protocol used to connect this app to the model service.",
+  "api-format": "Request format used by that API protocol.",
   "agent-model": "Model used by the coordinator that plans and reviews the conversion.",
   "subagent-model": "Model used by worker agents for region and object generation.",
-  "settings-workflow-mode": "Default pipeline depth for new conversions.",
-  "settings-region-processing-mode": "Whether regions are processed one by one or in parallel.",
+  "settings-workflow-mode": "How deeply the app refines the SVG after the first draft. Full Detail is slower but usually more accurate.",
+  "settings-region-processing-mode": "Whether detected areas are processed one at a time or in parallel.",
   "settings-region-concurrency": "Maximum number of regions that may run at the same time.",
   "max-budget": "Total model-call budget allowed for one conversion run.",
   "max-repair-retry": "Maximum repair attempts for SVG or local path issues.",
   "max-retries": "Low-level retry count for transient API request failures.",
   "use-previous-response-id": "Reuse previous response state when the provider supports it.",
-  "recognition-bbox-refine-mode": "Method used to refine detected object bounding boxes.",
+  "recognition-bbox-refine-mode": "Method used to improve detected object boxes before SVG generation.",
   "sam-enabled": "Enable SAM-assisted bbox refinement when available.",
-  "sam-provider-mode": "Choose whether SAM runs locally or through a remote service.",
+  "sam-provider-mode": "Choose whether segmentation assistance runs on this computer or through a remote service.",
   "sam-remote-url": "Remote SAM service endpoint used when provider mode is remote.",
   "sam-fallback-to-llm": "Use LLM refinement if SAM refinement is unavailable or fails.",
   "bbox-issue-concurrency": "Maximum bbox issue refinements that may run in parallel.",
@@ -192,6 +208,10 @@ function attachSettingsFieldHelp() {
   });
 }
 
+function applyFriendlySettingsLabels() {
+  applySettingsLabelMappings(document);
+}
+
 function openImageLightbox({ src, alt = "", caption = "" }) {
   if (!elements.imageLightbox || !elements.imageLightboxImage) {
     return;
@@ -221,6 +241,113 @@ function closeImageLightbox() {
     elements.imageLightboxCaption.textContent = "";
   }
   document.body.classList.remove("lightbox-open");
+}
+
+function confirmDesktopAction({
+  title = "Confirm Action",
+  message = "",
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+} = {}) {
+  return openDesktopActionDialog({
+    title,
+    message,
+    confirmLabel,
+    cancelLabel,
+    mode: "confirm",
+  });
+}
+
+function promptDesktopText({
+  title = "Enter Value",
+  message = "",
+  label = "Value",
+  value = "",
+  confirmLabel = "Save",
+  cancelLabel = "Cancel",
+} = {}) {
+  return openDesktopActionDialog({
+    title,
+    message,
+    confirmLabel,
+    cancelLabel,
+    inputLabel: label,
+    inputValue: value,
+    mode: "prompt",
+  });
+}
+
+function openDesktopActionDialog({
+  title,
+  message,
+  confirmLabel,
+  cancelLabel,
+  inputLabel = "",
+  inputValue = "",
+  mode = "confirm",
+} = {}) {
+  if (!elements.desktopConfirmModal) {
+    if (mode === "prompt") {
+      return Promise.resolve(window.prompt(message || title, inputValue));
+    }
+    return Promise.resolve(window.confirm(message || title));
+  }
+  const isPrompt = mode === "prompt";
+  elements.desktopConfirmTitle.textContent = title;
+  elements.desktopConfirmMessage.textContent = message;
+  elements.desktopConfirmOk.textContent = confirmLabel;
+  elements.desktopConfirmCancel.textContent = cancelLabel;
+  elements.desktopConfirmOk.classList.toggle("danger-primary-btn", !isPrompt);
+  if (elements.desktopConfirmInputWrap && elements.desktopConfirmInput) {
+    elements.desktopConfirmInputWrap.classList.toggle("hidden", !isPrompt);
+    elements.desktopConfirmInput.value = isPrompt ? inputValue : "";
+    if (elements.desktopConfirmInputLabel) {
+      elements.desktopConfirmInputLabel.textContent = inputLabel;
+    }
+  }
+  elements.desktopConfirmModal.classList.remove("hidden");
+  elements.desktopConfirmModal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("lightbox-open");
+
+  return new Promise((resolve) => {
+    const cleanup = (result) => {
+      elements.desktopConfirmModal.classList.add("hidden");
+      elements.desktopConfirmModal.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("lightbox-open");
+      elements.desktopConfirmModal.removeEventListener("click", handleClick);
+      document.removeEventListener("keydown", handleKeydown);
+      elements.desktopConfirmOk.classList.add("danger-primary-btn");
+      if (elements.desktopConfirmInputWrap && elements.desktopConfirmInput) {
+        elements.desktopConfirmInputWrap.classList.add("hidden");
+        elements.desktopConfirmInput.value = "";
+      }
+      resolve(result);
+    };
+    const handleClick = (event) => {
+      const action = event.target instanceof Element ? event.target.closest("[data-confirm-action]")?.getAttribute("data-confirm-action") : null;
+      if (action === "confirm") {
+        cleanup(isPrompt ? elements.desktopConfirmInput?.value ?? "" : true);
+      } else if (action === "cancel") {
+        cleanup(isPrompt ? null : false);
+      }
+    };
+    const handleKeydown = (event) => {
+      if (event.key === "Escape") {
+        cleanup(isPrompt ? null : false);
+      } else if (isPrompt && event.key === "Enter" && event.target === elements.desktopConfirmInput) {
+        event.preventDefault();
+        cleanup(elements.desktopConfirmInput.value);
+      }
+    };
+    elements.desktopConfirmModal.addEventListener("click", handleClick);
+    document.addEventListener("keydown", handleKeydown);
+    if (isPrompt && elements.desktopConfirmInput) {
+      elements.desktopConfirmInput.focus();
+      elements.desktopConfirmInput.select();
+    } else {
+      elements.desktopConfirmOk.focus();
+    }
+  });
 }
 
 function hasUsableArtifactOutput(snapshot) {
@@ -317,21 +444,6 @@ function getPipelineElapsedInfo(snapshot) {
     return { startedAt: null, endedAt: null, durationMs: summaryDuration };
   }
   return { startedAt: null, endedAt: null, durationMs: 0 };
-}
-
-function getExportDownloadUrl(snapshot) {
-  if (!snapshot?.available) {
-    return "";
-  }
-  const selectedAdjustment = appState.selectedManualAdjustmentId
-    ? (snapshot.manual_adjustments || []).find((item) => item.adjustment_id === appState.selectedManualAdjustmentId)
-    : null;
-  const activeFrame = snapshot.output_frames?.[appState.selectedOutputFrameIndex] || null;
-  return selectedAdjustment?.download_url
-    || snapshot.previews?.output_svg_url
-    || activeFrame?.download_url
-    || snapshot.previews?.initial_svg_url
-    || "";
 }
 
 function syncRecentRunsHeight() {
@@ -468,7 +580,7 @@ function getGuideContent() {
       body: "Follow the four-step flow from source image to editable SVG asset.",
       step: journey.activeStep,
       primaryAction: { kind: "scroll", label: "Start From Input", target: "input" },
-      secondaryAction: { kind: "scroll", label: "Open Refinement", target: "manual" },
+      secondaryAction: { kind: "scroll", label: "Open Refine", target: "manual" },
     },
     image_ready_needs_prompt: {
       title: "Image ready. Add the task next.",
@@ -528,34 +640,34 @@ function getGuideContent() {
     },
     result_ready_review_overall: {
       title: "Result ready.",
-      body: "Review the full output first. Use local edits only for small fixes.",
+      body: "Review the full output first. Use Refine only for small fixes.",
       step: journey.activeStep,
       primaryAction: { kind: "scroll", label: "Inspect Output", target: "output" },
-      secondaryAction: { kind: "scroll", label: "Start Refinement", target: "manual" },
+      secondaryAction: { kind: "scroll", label: "Start Refine", target: "manual" },
     },
     result_ready_needs_local_refine: {
-      title: "Ready for local refinement.",
+      title: "Ready to refine.",
       body: "Inspect the output, then select the area that still needs cleanup.",
       step: journey.activeStep,
-      primaryAction: { kind: "scroll", label: "Start Refinement", target: "manual" },
+      primaryAction: { kind: "scroll", label: "Start Refine", target: "manual" },
       secondaryAction: { kind: "scroll", label: "Inspect Output", target: "output" },
     },
     manual_goal_missing: {
       title: "Target selected.",
-      body: "Describe the local change next.",
+      body: "Describe the refinement goal next.",
       step: "manual",
-      primaryAction: { kind: "scroll", label: "Describe Local Fix", target: "manual" },
+      primaryAction: { kind: "scroll", label: "Describe Goal", target: "manual" },
       secondaryAction: { kind: "scroll", label: "Inspect Selected Output", target: "output" },
     },
     manual_ready_to_apply: {
-      title: "Local edit ready.",
-      body: "Apply now, or add a reference image first if needed.",
+      title: "Ready to refine.",
+      body: "Apply now, or add a reference image only if needed.",
       step: "manual",
       primaryAction: { kind: "manual-apply", label: "Apply Refinement" },
-      secondaryAction: { kind: "scroll", label: "Add Reference Imagery", target: "manual" },
+      secondaryAction: { kind: "scroll", label: "Add References", target: "manual" },
     },
     manual_result_ready: {
-      title: "Local edit applied.",
+      title: "Refinement applied.",
       body: "Compare the result, refine again if needed, or export.",
       step: "manual",
       primaryAction: { kind: "scroll", label: "Compare Changes", target: "manual" },
@@ -567,61 +679,86 @@ function getGuideContent() {
 
 function getManualGuidanceContent() {
   const journey = deriveJourneyState();
+  const readiness = getManualReadinessState();
+  if (readiness.canOpenRefine) {
+    if (readiness.hasManualResult) {
+      return {
+        title: "Refined result ready.",
+        body: "Compare with the base frame, refine again, or export.",
+      };
+    }
+    if (!readiness.hasTarget) {
+      return {
+        title: "Select a target.",
+        body: "Click an overlay or draw an area on the output preview.",
+      };
+    }
+    if (!readiness.hasGoal) {
+      return {
+        title: "Describe the change.",
+        body: "Keep the refinement goal specific to the selected target.",
+      };
+    }
+    return {
+      title: "Ready to refine.",
+      body: "Apply refinement now, or add a reference image only if needed.",
+    };
+  }
   const contentByState = {
     empty: {
-      title: "Refine unlocks after the first result.",
-      body: "Start a conversion first. Local edits open once output is visible.",
+      title: "Refine is locked.",
+      body: "Run the conversion first. Refine unlocks after the main flow finishes with a usable output.",
     },
     image_ready_needs_prompt: {
-      title: "Finish setup before local edits.",
-      body: "Add the goal and start the conversion first.",
+      title: "Refine is locked.",
+      body: "Add the conversion goal and start the run first.",
     },
     ready_to_start: {
-      title: "Start the conversion first.",
-      body: "Refine is for improving a generated result.",
+      title: "Refine is locked.",
+      body: "Start the conversion first; refine improves an existing result.",
     },
     running_layout_analysis: {
-      title: "Waiting for the first usable frame.",
-      body: "Local edits open after the first stable output appears.",
+      title: "Refine is locked.",
+      body: "Waiting for the first usable output frame.",
     },
     running_region_generation: {
-      title: "Preparing editable regions.",
-      body: "Watch the trace now. Start local edits when output appears.",
+      title: "Refine is locked.",
+      body: "Preparing editable regions. Refine unlocks when output appears.",
     },
     running_repair: {
-      title: "Auto-repair is running.",
-      body: "Let this pass finish, then refine only what remains.",
+      title: "Refine is locked.",
+      body: "Auto-repair is running. Refine after this pass if anything remains.",
     },
     running_trace: {
-      title: "Wait for output before local edits.",
-      body: "Follow the trace until a visible frame is ready.",
+      title: "Refine is locked.",
+      body: "Follow the trace until a visible output frame is ready.",
     },
     paused_resume_available: {
-      title: "Resume or refine.",
-      body: "If the current output is close, edit locally. Otherwise resume the conversion.",
+      title: "Refine may be available.",
+      body: "If output is visible, select a target. Otherwise resume the conversion.",
     },
     failed_recoverable: {
-      title: "Conversion stopped before local edit was ready.",
-      body: "Check the trace. If output exists, you can still refine it here.",
+      title: "Check output availability.",
+      body: "If output exists, select a target to refine. Otherwise inspect the trace.",
     },
     result_ready_review_overall: {
-      title: "Select a target area.",
-      body: "Click an overlay or draw a selection, then describe the change.",
+      title: "Select a target.",
+      body: "Click an overlay or draw an area on the output preview.",
     },
     result_ready_needs_local_refine: {
-      title: "Ready for local refinement.",
-      body: "Select the area that needs work, then keep the edit request specific.",
+      title: "Select a target.",
+      body: "Choose the area that needs work, then describe the change.",
     },
     manual_goal_missing: {
-      title: "Target selected.",
-      body: "Describe what should change in that area.",
+      title: "Describe the change.",
+      body: "Keep the refinement goal specific to the selected target.",
     },
     manual_ready_to_apply: {
-      title: "Local edit ready.",
-      body: "Apply now, or add a reference image first if needed.",
+      title: "Ready to refine.",
+      body: "Apply refinement now, or add a reference image only if needed.",
     },
     manual_result_ready: {
-      title: "Local result ready.",
+      title: "Refined result ready.",
       body: "Compare with the base frame, refine again, or export.",
     },
   };
@@ -646,6 +783,12 @@ function runGuideAction(action) {
   }
   if (action.kind !== "scroll") {
     return;
+  }
+  if (action.target === "trace") {
+    document.querySelector('[data-workspace-sidebar-tab="trace"]')?.click();
+  }
+  if (action.target === "manual") {
+    document.querySelector('[data-workspace-sidebar-tab="refine"]')?.click();
   }
   const targetMap = {
     input: elements.invocationSection,
@@ -780,11 +923,69 @@ function setReadinessChip(element, { label, ready = false, active = false }) {
   element.classList.toggle("is-active", active);
 }
 
+function isMainFlowComplete(snapshot = appState.latestArtifactSnapshot) {
+  const runStatus = String(snapshot?.status || "").toLowerCase();
+  if (!runStatus) {
+    return Boolean(snapshot?.available);
+  }
+  return !["queued", "running"].includes(runStatus);
+}
+
+function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
+  const hasOutput = hasUsableArtifactOutput(snapshot);
+  const mainFlowDone = isMainFlowComplete(snapshot);
+  const hasTarget = Boolean(
+    appState.manualConfirmedTarget?.selectionBox
+    || appState.manualSelectionBox
+    || appState.selectedOverlay?.regionId
+  );
+  const hasGoal = Boolean((elements.manualUserIntroduction?.value || "").trim() || (elements.manualTargetDescription?.value || "").trim());
+  const hasManualResult = Boolean(getLatestManualAdjustment(snapshot));
+  const canOpenRefine = Boolean(mainFlowDone && hasOutput);
+  const readyToApply = Boolean(canOpenRefine && hasTarget && hasGoal);
+  const title = canOpenRefine
+    ? "Open local refinement tools."
+    : mainFlowDone
+      ? "Refine unlocks when the finished run has a usable output."
+      : "Refine unlocks after the main flow finishes.";
+  return {
+    mainFlowDone,
+    hasOutput,
+    hasTarget,
+    hasGoal,
+    hasManualResult,
+    canOpenRefine,
+    canSelectTarget: canOpenRefine,
+    canApply: readyToApply,
+    readyToApply,
+    label: canOpenRefine ? "Ready" : "Locked",
+    title,
+  };
+}
+
+function getManualReadinessState(snapshot = appState.latestArtifactSnapshot) {
+  return getRefineReadinessState(snapshot);
+}
+
+function syncRefineActionButton(button, readiness, { readyLabel = "Open Refine", lockedLabel = "Locked", updateLabel = false } = {}) {
+  if (!(button instanceof HTMLButtonElement)) {
+    return;
+  }
+  const enabled = Boolean(readiness.canOpenRefine);
+  button.disabled = !enabled;
+  button.classList.toggle("is-ready", enabled);
+  button.title = readiness.title;
+  button.setAttribute("aria-disabled", enabled ? "false" : "true");
+  if (updateLabel) {
+    button.textContent = enabled ? readyLabel : lockedLabel;
+  }
+}
+
 function updateSimpleArtifactsReadiness(snapshot) {
   const hasInput = Boolean(snapshot?.previews?.input_image_url);
   const hasBbox = Boolean(snapshot?.regions?.length);
   const hasOutput = hasUsableArtifactOutput(snapshot);
-  const localReady = hasOutput;
+  const localReady = getRefineReadinessState(snapshot).canOpenRefine;
   const stage = (snapshot?.current_stage || "").toLowerCase();
 
   setReadinessChip(elements.artifactReadinessInput, {
@@ -803,7 +1004,7 @@ function updateSimpleArtifactsReadiness(snapshot) {
     active: (stage.includes("region") || stage.includes("object") || stage.includes("repair")) && !localReady,
   });
   setReadinessChip(elements.artifactReadinessManual, {
-    label: localReady ? "Local edit ready" : "Local edit pending",
+    label: localReady ? "Refine ready" : "Refine locked",
     ready: localReady,
     active: localReady,
   });
@@ -843,12 +1044,12 @@ function updateWorkflowTraceSummary(snapshot) {
       next = "Let the current repair loop finish.";
       break;
     case "result_ready_review_overall":
-      next = "Review the full output before local edits.";
+      next = "Review the full output before refining.";
       break;
     case "result_ready_needs_local_refine":
     case "manual_goal_missing":
     case "manual_ready_to_apply":
-      next = "Select the target, describe the fix, then apply.";
+      next = "Select the target, describe the refinement goal, then apply.";
       break;
     case "manual_result_ready":
       next = "Compare the result, refine again, or export.";
@@ -898,46 +1099,24 @@ function updateWorkflowTraceSummary(snapshot) {
 }
 
 function updateWorkspaceActionAvailability(snapshot) {
-  const hasOutput = hasUsableArtifactOutput(snapshot);
-  const exportUrl = getExportDownloadUrl(snapshot);
-  if (elements.exportSvgButton) {
-    elements.exportSvgButton.disabled = !exportUrl;
-    elements.exportSvgButton.dataset.downloadUrl = exportUrl || "";
-    elements.exportSvgButton.classList.toggle("is-ready", Boolean(exportUrl));
-    elements.exportSvgButton.title = exportUrl
-      ? "Export the current editable SVG asset."
-      : hasOutput
-        ? "Export unlocks when the final SVG asset is ready."
-        : "Export unlocks after the pipeline produces an SVG preview.";
-  }
-  if (elements.exportStatus) {
-    elements.exportStatus.textContent = exportUrl
-      ? "Ready"
-      : hasOutput
-        ? "Final SVG pending"
-        : "Waiting for preview";
-    elements.exportStatus.classList.toggle("is-ready", Boolean(exportUrl));
-  }
-
-  const refineReady = Boolean(hasOutput);
-  const pipelineDone = Boolean(snapshot?.available);
-  const refineMessage = refineReady
-    ? pipelineDone
-      ? "Ready for local fixes"
-      : "Available while pipeline continues"
-    : "Available after first preview";
+  const readiness = getRefineReadinessState(snapshot);
+  const refineReady = readiness.canOpenRefine;
+  document.body.dataset.refineLocked = refineReady ? "false" : "true";
   const refineToggle = document.getElementById("desktop-refine-toggle");
-  if (refineToggle instanceof HTMLButtonElement) {
-    refineToggle.disabled = !refineReady;
-    refineToggle.classList.toggle("is-ready", refineReady);
-    refineToggle.title = refineMessage;
-  }
+  syncRefineActionButton(refineToggle, readiness);
+  const traceRefineButton = document.querySelector(".trace-refine-guide-btn");
+  syncRefineActionButton(traceRefineButton, readiness, { updateLabel: true });
   if (elements.refineStatus) {
-    elements.refineStatus.textContent = refineMessage;
+    elements.refineStatus.textContent = readiness.label;
+    elements.refineStatus.title = readiness.title;
     elements.refineStatus.classList.toggle("is-ready", refineReady);
   }
-  if (!refineReady && document.body.dataset.refineSidebar === "expanded") {
-    document.body.dataset.refineSidebar = "collapsed";
+  if (
+    !refineReady
+    && document.body.dataset.workspaceSidebar === "expanded"
+    && document.body.dataset.workspaceSidebarActivePanel === "refine"
+  ) {
+    document.querySelector('[data-workspace-sidebar-tab="trace"]')?.click();
     refineToggle?.setAttribute("aria-expanded", "false");
   }
 }
@@ -950,51 +1129,42 @@ function updateManualSimpleModeVisibility(snapshot) {
     return;
   }
 
-  const journey = deriveJourneyState();
-  const hasOutput = hasUsableArtifactOutput(snapshot);
-  const hasTarget = Boolean(
-    appState.manualConfirmedTarget?.selectionBox
-    || appState.manualSelectionBox
-    || appState.selectedOverlay?.regionId
-  );
-  const hasGoal = Boolean((elements.manualUserIntroduction?.value || "").trim() || (elements.manualTargetDescription?.value || "").trim());
-  const readyToApply = Boolean(hasOutput && hasTarget && hasGoal);
+  const { canOpenRefine, hasTarget, hasGoal, readyToApply } = getRefineReadinessState(snapshot);
 
-  setReadinessChip(elements.manualEntryOutput, {
-    label: hasOutput ? "Output ready" : "Output pending",
-    ready: hasOutput,
-    active: !hasOutput,
-  });
-  setReadinessChip(elements.manualEntryTarget, {
-    label: hasTarget ? "Target selected" : "Target not selected",
-    ready: hasTarget,
-    active: hasOutput && !hasTarget,
-  });
-  setReadinessChip(elements.manualEntryGoal, {
-    label: hasGoal ? "Goal ready" : "Goal missing",
-    ready: hasGoal,
-    active: hasTarget && !hasGoal,
+  [elements.manualEntryOutput, elements.manualEntryTarget, elements.manualEntryGoal].forEach((chip) => {
+    chip?.classList.add("hidden");
   });
   setReadinessChip(elements.manualEntryReady, {
-    label: readyToApply ? "Ready to apply" : "Not ready to apply",
-    ready: readyToApply,
-    active: readyToApply,
+    label: !canOpenRefine ? "Locked" : readyToApply ? "Ready" : "Available",
+    ready: canOpenRefine,
+    active: readyToApply || !canOpenRefine,
   });
 
   if (elements.manualEntryText) {
-    if (!hasOutput) {
-      elements.manualEntryText.textContent = "Wait for the first usable output.";
+    if (!canOpenRefine) {
+      elements.manualEntryText.textContent = "Refine is locked until the main flow finishes with a usable output.";
     } else if (!hasTarget) {
-      elements.manualEntryText.textContent = "Select or draw the local target.";
+      elements.manualEntryText.textContent = "Refine is available. Select a target to continue.";
     } else if (!hasGoal) {
-      elements.manualEntryText.textContent = "Target locked. Describe the local change.";
+      elements.manualEntryText.textContent = "Target is set. Describe the refinement goal.";
     } else {
-      elements.manualEntryText.textContent = "Ready to apply. Add references only if needed.";
+      elements.manualEntryText.textContent = "Ready to apply refinement.";
+    }
+  }
+  if (elements.manualSubmitStatus && !appState.manualAdjustmentRequestInFlight) {
+    if (!canOpenRefine) {
+      elements.manualSubmitStatus.textContent = "Refine unlocks after the main flow finishes with a usable output.";
+    } else if (!hasTarget) {
+      elements.manualSubmitStatus.textContent = "Select a target before applying refinement.";
+    } else if (!hasGoal) {
+      elements.manualSubmitStatus.textContent = "Describe the refinement goal before applying.";
+    } else {
+      elements.manualSubmitStatus.textContent = "Ready to apply refinement.";
     }
   }
 
-  const collapseWorkflow = !hasOutput;
-  const collapseEditCore = !hasOutput;
+  const collapseWorkflow = !canOpenRefine;
+  const collapseEditCore = !canOpenRefine;
   elements.manualWorkflowBar?.classList.toggle("manual-section-collapsed", collapseWorkflow);
   elements.manualEditCore?.classList.toggle("manual-section-collapsed", collapseEditCore);
 
@@ -1006,7 +1176,7 @@ function updateManualSimpleModeVisibility(snapshot) {
 
   if (elements.manualReferencePanel && !elements.manualReferencePanel.dataset.userToggled) {
     elements.manualReferencePanel.open = Boolean(
-      hasOutput
+      canOpenRefine
       && hasTarget
       && !hasGoal
       && elements.manualUseReferenceImages?.checked
@@ -1144,6 +1314,29 @@ function getRunList(snapshot) {
   });
 }
 
+function isDeletedRun(run) {
+  if (!run) {
+    return false;
+  }
+  return Boolean(
+    (run.run_id && appState.deletedRunIds.has(run.run_id))
+    || (run.artifact_dir && appState.deletedRunArtifactDirs.has(run.artifact_dir))
+  );
+}
+
+function filterDeletedRunsFromSnapshot(snapshot) {
+  if (!snapshot) {
+    return snapshot;
+  }
+  const currentRun = isDeletedRun(snapshot.current_run) ? null : snapshot.current_run;
+  return {
+    ...snapshot,
+    current_run: currentRun,
+    recent_runs: (snapshot.recent_runs || []).filter((run) => !isDeletedRun(run)),
+    status: currentRun ? snapshot.status : (snapshot.approval_request ? "needs_approval" : "completed"),
+  };
+}
+
 function getSelectedRun(snapshot = appState.snapshot) {
   const runs = getRunList(snapshot);
   if (!runs.length) {
@@ -1161,6 +1354,149 @@ function getSelectedRun(snapshot = appState.snapshot) {
 function isLiveRunSelected(snapshot = appState.snapshot) {
   const selectedRun = getSelectedRun(snapshot);
   return Boolean(selectedRun && snapshot?.current_run && selectedRun.run_id === snapshot.current_run.run_id);
+}
+
+function removeRunFromSnapshot(runId, artifactDir = null) {
+  if (!appState.snapshot || !runId) {
+    return;
+  }
+  appState.deletedRunIds.add(runId);
+  if (artifactDir) {
+    appState.deletedRunArtifactDirs.add(artifactDir);
+  }
+  const matchesDeletedRun = (run) => {
+    if (!run) {
+      return false;
+    }
+    if (run.run_id === runId) {
+      return true;
+    }
+    return Boolean(artifactDir && run.artifact_dir === artifactDir);
+  };
+  const nextSnapshot = {
+    ...appState.snapshot,
+    current_run: matchesDeletedRun(appState.snapshot.current_run) ? null : appState.snapshot.current_run,
+    recent_runs: (appState.snapshot.recent_runs || []).filter((run) => !matchesDeletedRun(run)),
+  };
+  if (matchesDeletedRun(appState.snapshot.current_run)) {
+    nextSnapshot.status = nextSnapshot.approval_request ? "needs_approval" : "completed";
+  }
+  appState.snapshot = nextSnapshot;
+  appState.artifactCache.delete(runId);
+  if (artifactDir) {
+    for (const [cacheKey, cached] of appState.artifactCache.entries()) {
+      if (cached?.snapshot?.artifact_dir === artifactDir) {
+        appState.artifactCache.delete(cacheKey);
+      }
+    }
+  }
+  if (matchesDeletedRun(appState.latestArtifactSnapshot)) {
+    appState.latestArtifactSnapshot = null;
+  }
+  if (appState.selectedRunId === runId || matchesDeletedRun(getSelectedRun(nextSnapshot))) {
+    appState.selectedRunId = null;
+  }
+}
+
+function updateRunProjectNameInSnapshot(updatedRun) {
+  if (!updatedRun?.run_id || !appState.snapshot) {
+    return;
+  }
+  const matchesUpdatedRun = (run) => run && (
+    run.run_id === updatedRun.run_id
+    || (updatedRun.artifact_dir && run.artifact_dir === updatedRun.artifact_dir)
+  );
+  const mergeRun = (run) => (matchesUpdatedRun(run) ? { ...run, ...updatedRun } : run);
+  appState.snapshot = {
+    ...appState.snapshot,
+    current_run: mergeRun(appState.snapshot.current_run),
+    recent_runs: (appState.snapshot.recent_runs || []).map(mergeRun),
+  };
+  if (matchesUpdatedRun(appState.latestArtifactSnapshot)) {
+    appState.latestArtifactSnapshot = {
+      ...appState.latestArtifactSnapshot,
+      project_name: updatedRun.project_name,
+      updated_at: updatedRun.updated_at || appState.latestArtifactSnapshot.updated_at,
+    };
+  }
+}
+
+async function renameRunProject(run) {
+  if (!appState.threadId || !run?.run_id) {
+    return;
+  }
+  const currentName = run.project_name || "Untitled project";
+  const nextName = await promptDesktopText({
+    title: "Rename Project",
+    message: "Update the display name for this saved project.",
+    label: "Project name",
+    value: currentName,
+    confirmLabel: "Rename",
+    cancelLabel: "Cancel",
+  });
+  if (nextName == null) {
+    return;
+  }
+  const normalizedName = nextName.trim().replace(/\s+/g, " ");
+  if (!normalizedName || normalizedName === currentName) {
+    return;
+  }
+  setStatus("Renaming project...");
+  try {
+    const updatedRun = await fetchJson(`/threads/${encodeURIComponent(appState.threadId)}/runs/${encodeURIComponent(run.run_id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_name: normalizedName }),
+    });
+    updateRunProjectNameInSnapshot(updatedRun);
+    renderState.recentRunsSig = null;
+    renderViews();
+    const successMessage = `Renamed to "${normalizedName}"`;
+    setStatus(successMessage);
+    showDesktopToast(successMessage);
+    await refreshSnapshot({ silent: true });
+  } catch (error) {
+    setStatus(error.message || "Rename failed");
+  }
+}
+
+async function deleteRunProject(run) {
+  if (!appState.threadId || !run?.run_id) {
+    return;
+  }
+  const projectName = run.project_name || "Untitled project";
+  const confirmed = await confirmDesktopAction({
+    title: "Delete Project",
+    message: `Delete "${projectName}" and its saved artifacts? This cannot be undone.`,
+    confirmLabel: "Delete",
+    cancelLabel: "Cancel",
+  });
+  if (!confirmed) {
+    return;
+  }
+  setStatus("Deleting project...");
+  try {
+    const artifactQuery = run.artifact_dir ? `?artifact_dir=${encodeURIComponent(run.artifact_dir)}` : "";
+    const deleted = await fetchJson(`/threads/${encodeURIComponent(appState.threadId)}/runs/${encodeURIComponent(run.run_id)}${artifactQuery}`, {
+      method: "DELETE",
+    });
+    const deletedRunId = deleted.run_id || run.run_id;
+    removeRunFromSnapshot(deletedRunId, deleted.artifact_dir || run.artifact_dir || null);
+    const remainingRuns = getRunList(appState.snapshot);
+    const pageSize = appState.desktopHistoryPageSize || 6;
+    const maxPage = Math.max(1, Math.ceil(remainingRuns.length / pageSize));
+    appState.desktopHistoryPage = Math.min(appState.desktopHistoryPage || 1, maxPage);
+    renderState.recentRunsSig = null;
+    renderViews();
+    const deletedName = deleted.project_name || projectName;
+    const successMessage = `Deleted "${deletedName}"`;
+    setStatus(successMessage);
+    showDesktopToast(successMessage);
+    await refreshSnapshot({ silent: true });
+    await refreshArtifactsForSelection({ silent: true, force: true });
+  } catch (error) {
+    setStatus(error.message || "Delete failed");
+  }
 }
 
 function renderViews() {
@@ -1183,6 +1519,7 @@ function renderViews() {
     () => setSelectedRun(null),
     document.body.classList.contains("desktop-body")
       ? {
+        loading: !appState.snapshot && appState.snapshotRequestInFlight,
         pagination: {
           enabled: true,
           filterStatus: appState.desktopHistoryFilter,
@@ -1194,6 +1531,8 @@ function renderViews() {
             appState.desktopHistoryPage = page;
           },
         },
+        onRenameRun: renameRunProject,
+        onDeleteRun: deleteRunProject,
       }
       : {},
   );
@@ -1373,7 +1712,7 @@ function resolveSelectionFromCurrentState(snapshot) {
 }
 
 function confirmManualSelection(snapshot) {
-  if (!hasUsableArtifactOutput(snapshot)) {
+  if (!getRefineReadinessState(snapshot).canSelectTarget) {
     return;
   }
   const resolved = resolveSelectionFromCurrentState(snapshot);
@@ -1402,7 +1741,7 @@ function confirmManualSelection(snapshot) {
 
 function confirmManualReferenceSelection(snapshot) {
   const hasCustomPaths = getManualReferencePaths().length > 0;
-  const hasDrawnSelection = Boolean(hasUsableArtifactOutput(snapshot) && appState.manualReferenceSelectionShape?.bbox);
+  const hasDrawnSelection = Boolean(getRefineReadinessState(snapshot).canSelectTarget && appState.manualReferenceSelectionShape?.bbox);
   if (!hasCustomPaths && !hasDrawnSelection) {
     return;
   }
@@ -1553,7 +1892,7 @@ function renderConfirmedTargetCard(activeFrame) {
   const target = appState.manualConfirmedTarget;
   if (!target) {
     elements.manualConfirmedTarget.className = "manual-confirmed-target empty-state";
-    elements.manualConfirmedTarget.textContent = "Confirm a selection to pin the target region, objects, bbox, and base output frame.";
+    elements.manualConfirmedTarget.textContent = "Set a target to pin the region, bbox, and base frame.";
     return;
   }
   const customReferencePaths = getManualReferencePaths();
@@ -1754,7 +2093,7 @@ function renderManualAdjustmentResult(snapshot, activeFrame) {
   const heading = document.createElement("div");
   heading.className = "manual-result-title-row";
   heading.innerHTML = `
-    <div class="compare-title">Adjustment Result</div>
+    <div class="compare-title">Refined Result</div>
     <div class="structure-meta">${latestAdjustment.adjustment_id || ""}</div>
   `;
   elements.manualAdjustmentResult.className = "manual-adjustment-result";
@@ -1796,19 +2135,20 @@ function renderManualAdjustmentPanel(snapshot) {
   const activeFrame = snapshot?.output_frames?.[appState.selectedOutputFrameIndex] || null;
   const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
   elements.manualBaseFrame.value = activeFrame ? `${activeFrame.title} (${activeFrame.frame_id})` : "";
-  const usableOutputReady = hasUsableArtifactOutput(snapshot);
-  elements.manualApplyButton.disabled = !usableOutputReady || appState.manualAdjustmentRequestInFlight;
-  elements.manualConfirmSelection.disabled = !usableOutputReady;
-  elements.manualReferenceConfirmSelection.disabled = !usableOutputReady;
-  elements.manualReferenceClearSelection.disabled = !usableOutputReady;
-  elements.manualReferencePaths.disabled = !elements.manualUseReferenceImages.checked;
-  elements.manualPasteReferenceButton.disabled = !elements.manualUseReferenceImages.checked;
+  const readiness = getRefineReadinessState(snapshot);
+  const referenceImagesEnabled = Boolean(readiness.canOpenRefine && elements.manualUseReferenceImages.checked);
+  elements.manualApplyButton.disabled = !readiness.canApply || appState.manualAdjustmentRequestInFlight;
+  elements.manualConfirmSelection.disabled = !readiness.canSelectTarget;
+  elements.manualReferenceConfirmSelection.disabled = !readiness.canSelectTarget;
+  elements.manualReferenceClearSelection.disabled = !readiness.canSelectTarget;
+  elements.manualReferencePaths.disabled = !referenceImagesEnabled;
+  elements.manualPasteReferenceButton.disabled = !referenceImagesEnabled;
   elements.manualReferenceCaptureButton.disabled =
-    !elements.manualUseReferenceImages.checked || !snapshot?.previews?.input_image_url;
-  elements.manualReferencePastezone.tabIndex = elements.manualUseReferenceImages.checked ? 0 : -1;
-  elements.manualUploadButton.disabled = !elements.manualUseReferenceImages.checked;
-  elements.manualUploadInput.disabled = !elements.manualUseReferenceImages.checked;
-  elements.manualIncludeDefaultCrop.disabled = !elements.manualUseReferenceImages.checked;
+    !referenceImagesEnabled || !snapshot?.previews?.input_image_url;
+  elements.manualReferencePastezone.tabIndex = referenceImagesEnabled ? 0 : -1;
+  elements.manualUploadButton.disabled = !referenceImagesEnabled;
+  elements.manualUploadInput.disabled = !referenceImagesEnabled;
+  elements.manualIncludeDefaultCrop.disabled = !referenceImagesEnabled;
   renderConfirmedTargetCard(activeFrame);
   renderManualAdjustmentResult(snapshot, activeFrame);
   renderManualWorkflowTrace(selectedManualAdjustment || snapshot, (node) => {
@@ -1880,7 +2220,7 @@ function loadImageElement(src) {
 }
 
 async function captureReferenceImageFromInput(snapshot) {
-  if (!hasUsableArtifactOutput(snapshot) || !snapshot?.previews?.input_image_url) {
+  if (!getRefineReadinessState(snapshot).canOpenRefine || !snapshot?.previews?.input_image_url) {
     throw new Error("Input preview is not ready yet.");
   }
   const selection =
@@ -1990,9 +2330,17 @@ function buildManualAdjustmentPayload(snapshot) {
 
 async function applyManualAdjustment() {
   const snapshot = appState.latestArtifactSnapshot;
-  const hasOutput = hasUsableArtifactOutput(snapshot);
-  if (!appState.threadId || !hasOutput || !snapshot?.run_id) {
-    setStatus("Output is not ready for refinement.");
+  const readiness = getRefineReadinessState(snapshot);
+  if (!appState.threadId || !readiness.canOpenRefine || !snapshot?.run_id) {
+    setStatus(readiness.title || "Output is not ready for refinement.");
+    if (elements.manualSubmitStatus) {
+      elements.manualSubmitStatus.textContent = readiness.title || "Refine is locked.";
+    }
+    return;
+  }
+  if (!readiness.hasTarget) {
+    setStatus("Please select a refinement target.");
+    elements.manualSubmitStatus.textContent = "Select a target before applying refinement.";
     return;
   }
   const goal = elements.manualUserIntroduction.value.trim() || elements.manualTargetDescription.value.trim();
@@ -2049,7 +2397,7 @@ async function applyManualAdjustment() {
     appState.manualAdjustmentBaseRunId = null;
     appState.selectedRunId = baseRunId;
     stopManualAdjustmentPolling();
-    elements.manualApplyButton.disabled = false;
+    elements.manualApplyButton.disabled = !getRefineReadinessState(appState.latestArtifactSnapshot).canApply;
   }
 }
 
@@ -2075,24 +2423,30 @@ function setSelectedRun(runId = null) {
     appState.manualReferenceUploads = [];
   }
   renderViews();
+  if (previousRunId !== nextRunId) {
+    const selectedRun = getSelectedRun();
+    renderWorkspaceArtifactLoadingState(selectedRun);
+    updateWorkspaceActionAvailability({ status: selectedRun?.status || null, available: false });
+  }
   void refreshArtifactsForSelection({ silent: true, force: true });
   schedulePolling();
 }
 
 function applySnapshot(snapshot) {
-  appState.snapshot = snapshot;
-  appState.threadId = snapshot.thread_id;
+  const filteredSnapshot = filterDeletedRunsFromSnapshot(snapshot);
+  appState.snapshot = filteredSnapshot;
+  appState.threadId = filteredSnapshot.thread_id;
   elements.threadId.textContent = appState.threadId;
-  appState.pendingApproval = snapshot.approval_request || null;
-  const currentRunRevision = snapshot.current_run?.artifact_revision || null;
+  appState.pendingApproval = filteredSnapshot.approval_request || null;
+  const currentRunRevision = filteredSnapshot.current_run?.artifact_revision || null;
   if (currentRunRevision) {
-    const cached = appState.artifactCache.get(snapshot.current_run.run_id);
+    const cached = appState.artifactCache.get(filteredSnapshot.current_run.run_id);
     if (cached && cached.snapshot?.artifact_revision !== currentRunRevision) {
-      appState.artifactCache.delete(snapshot.current_run.run_id);
+      appState.artifactCache.delete(filteredSnapshot.current_run.run_id);
     }
   }
 
-  if (appState.selectedRunId && !getRunList(snapshot).some((run) => run.run_id === appState.selectedRunId)) {
+  if (appState.selectedRunId && !getRunList(filteredSnapshot).some((run) => run.run_id === appState.selectedRunId)) {
     appState.selectedRunId = null;
   }
 
@@ -2206,12 +2560,16 @@ async function loadRuntimeOverrides() {
 async function saveRuntimeOverrides() {
   elements.runtimeConfigSave.disabled = true;
   elements.runtimeConfigStatus.textContent = "Saving...";
+  const submittedApiKey = Boolean(elements.apiKey?.value?.trim?.());
   try {
     const data = await fetchJson("/config/runtime-overrides", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildRuntimeOverridesPayload()),
     });
+    if (submittedApiKey && !data.api_key_configured) {
+      throw new Error("API key was submitted but was not confirmed by saved settings.");
+    }
     applyRuntimeOverrides(data);
     updateStartRuntimeHint();
     elements.runtimeConfigStatus.textContent = "Saved";
@@ -2224,7 +2582,30 @@ async function saveRuntimeOverrides() {
   }
 }
 
-async function refreshArtifactsForSelection({ silent = false, force = false } = {}) {
+async function resetRuntimeOverrides() {
+  if (!window.confirm("Reset saved settings to the app defaults? This will not change your .env file or saved projects.")) {
+    return;
+  }
+  elements.runtimeConfigReset.disabled = true;
+  elements.runtimeConfigSave.disabled = true;
+  elements.runtimeConfigStatus.textContent = "Resetting...";
+  try {
+    const data = await fetchJson("/config/runtime-overrides", { method: "DELETE" });
+    applyRuntimeOverrides(data);
+    await loadFrontendDefaults();
+    updateStartRuntimeHint();
+    elements.runtimeConfigStatus.textContent = "Defaults restored";
+    setStatus("Runtime settings reset to defaults");
+  } catch (error) {
+    elements.runtimeConfigStatus.textContent = "Reset failed";
+    setStatus(error.message || "Runtime settings reset failed");
+  } finally {
+    elements.runtimeConfigReset.disabled = false;
+    elements.runtimeConfigSave.disabled = false;
+  }
+}
+
+async function refreshArtifactsForSelection({ silent = false, force = false, showLoading = false } = {}) {
   if (!appState.threadId || appState.artifactRequestInFlight) {
     return;
   }
@@ -2257,6 +2638,21 @@ async function refreshArtifactsForSelection({ silent = false, force = false } = 
   }
 
   appState.artifactRequestInFlight = true;
+  const currentArtifactMatchesSelection = Boolean(
+    appState.latestArtifactSnapshot
+    && (
+      appState.latestArtifactSnapshot.run_id === selectedRun.run_id
+      || (
+        appState.latestArtifactSnapshot.artifact_dir
+        && selectedRun.artifact_dir
+        && appState.latestArtifactSnapshot.artifact_dir === selectedRun.artifact_dir
+      )
+    )
+  );
+  if (showLoading || !currentArtifactMatchesSelection) {
+    renderWorkspaceArtifactLoadingState(selectedRun);
+    updateWorkspaceActionAvailability({ status: selectedRun.status, available: false });
+  }
   try {
     const runQuery = selectedRun.run_id ? `?run_id=${encodeURIComponent(selectedRun.run_id)}` : "";
     const data = await fetchJson(`/threads/${appState.threadId}/artifacts${runQuery}`);
@@ -2359,6 +2755,9 @@ async function refreshSnapshot({ silent = false } = {}) {
     return;
   }
   appState.snapshotRequestInFlight = true;
+  if (!appState.snapshot) {
+    renderViews();
+  }
   try {
     const data = await fetchJson(`/threads/${appState.threadId}/snapshot`);
     applySnapshot(data);
@@ -2368,6 +2767,9 @@ async function refreshSnapshot({ silent = false } = {}) {
     }
   } finally {
     appState.snapshotRequestInFlight = false;
+    if (!appState.snapshot) {
+      renderViews();
+    }
     scheduleSnapshotPolling();
   }
 }
@@ -2411,6 +2813,9 @@ async function sendMessage() {
     appState.threadId = data.thread_id;
     elements.threadId.textContent = appState.threadId;
     resetUiSelections();
+    if (document.body.classList.contains("desktop-body")) {
+      window.dispatchEvent(new CustomEvent("desktop-open-workspace-trace"));
+    }
     setStatus("Running");
     await refreshSnapshot({ silent: true });
   } catch (error) {
@@ -2774,6 +3179,10 @@ function bindActionEvents() {
     await saveRuntimeOverrides();
   });
 
+  elements.runtimeConfigReset?.addEventListener("click", async () => {
+    await resetRuntimeOverrides();
+  });
+
   elements.newThread.addEventListener("click", async () => {
     stopSnapshotPolling();
     stopArtifactPolling();
@@ -2789,29 +3198,13 @@ function bindActionEvents() {
     }
   });
 
-  elements.refreshArtifacts.addEventListener("click", async () => {
-    try {
-      await refreshArtifactsForSelection({ force: true });
-    } catch (error) {
-      setStatus(error.message || "Artifact refresh failed");
-    }
-  });
-
   elements.resumeRun.addEventListener("click", async () => {
     await resumeRunFromArtifacts();
   });
 
-  elements.exportSvgButton?.addEventListener("click", () => {
-    const url = elements.exportSvgButton.dataset.downloadUrl || "";
-    if (!url || elements.exportSvgButton.disabled) {
-      return;
-    }
-    window.open(url.includes("download=true") ? url : `${url}${url.includes("?") ? "&" : "?"}download=true`, "_blank", "noopener,noreferrer");
-  });
-
   elements.manualUseSelection.addEventListener("click", () => {
     const snapshot = appState.latestArtifactSnapshot;
-    if (!hasUsableArtifactOutput(snapshot)) {
+    if (!getRefineReadinessState(snapshot).canSelectTarget) {
       return;
     }
     const nextBox = getOverlayBox(snapshot, appState.selectedOverlay);
@@ -2984,7 +3377,6 @@ function bindActionEvents() {
         startManualAdjustmentPolling();
       }
       void refreshSnapshot({ silent: true });
-      void refreshArtifactsForSelection({ silent: true, force: true });
       window.requestAnimationFrame(refreshWorkflowTraceLayout);
     }
   });
@@ -3035,6 +3427,7 @@ function bindActionEvents() {
 
 export async function initApp() {
   loadUiModePreference();
+  applyFriendlySettingsLabels();
   bindFieldListeners();
   bindFormEvents();
   bindStartRuntimeHintUpdates();

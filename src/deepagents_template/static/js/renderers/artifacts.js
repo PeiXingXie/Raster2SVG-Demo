@@ -1,5 +1,6 @@
 import { elements } from "../dom.js";
 import { DEFAULT_MESSAGE, renderState, appState } from "../state.js";
+import { createLoadingState } from "../components/loading-state.js";
 import {
   captureDetailsState,
   createCollapsibleContent,
@@ -13,6 +14,13 @@ import {
 
 const traceViewportState = new WeakMap();
 const previewPreloadCache = new Map();
+const traceDeckExpansionState = new Map();
+const TRACE_DECK_COLLAPSED = "__collapsed__";
+let tracePendingFocusNodeId = null;
+const TRACE_MIN_ZOOM = 0.75;
+const TRACE_MAX_ZOOM = 1.8;
+const TRACE_ZOOM_STEP = 1.12;
+const TRACE_AUTO_FOLLOW_RESUME_PX = 32;
 
 const SIMPLE_TRACE_KIND_LABELS = {
   root: "Run Overview",
@@ -89,6 +97,50 @@ function createImageZoomButton({ src, alt, caption = "" }) {
   return button;
 }
 
+function getPreviewAspectRatio(canvasWidth, canvasHeight) {
+  const width = Number.parseFloat(canvasWidth);
+  const height = Number.parseFloat(canvasHeight);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return `${width} / ${height}`;
+  }
+  return "4 / 3";
+}
+
+function getPreviewAspectRatioValue(canvasWidth, canvasHeight) {
+  const width = Number.parseFloat(canvasWidth);
+  const height = Number.parseFloat(canvasHeight);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return width / height;
+  }
+  return 4 / 3;
+}
+
+function applyPreviewAspectRatio(element, canvasWidth, canvasHeight) {
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+  element.style.aspectRatio = getPreviewAspectRatio(canvasWidth, canvasHeight);
+  element.style.setProperty("--preview-aspect-ratio", String(getPreviewAspectRatioValue(canvasWidth, canvasHeight)));
+}
+
+function createPreviewMetaRow(title, metaText = "") {
+  const metaRow = document.createElement("div");
+  metaRow.className = "compare-stage-meta";
+  const titleElement = document.createElement("span");
+  titleElement.textContent = title;
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "compare-stage-title-group";
+  titleGroup.appendChild(titleElement);
+  if (metaText) {
+    const meta = document.createElement("span");
+    meta.className = "output-progress-meta compare-stage-inline-meta";
+    meta.textContent = metaText;
+    titleGroup.appendChild(meta);
+  }
+  metaRow.appendChild(titleGroup);
+  return metaRow;
+}
+
 function preloadPreviewImage(url) {
   if (!url) {
     return Promise.resolve();
@@ -133,6 +185,37 @@ function renderInputMessage(message) {
     maxLength: 220,
     key: "workspace-input-message",
   }));
+}
+
+function getDownloadUrl(url) {
+  if (!url) {
+    return "";
+  }
+  return url.includes("download=true") ? url : `${url}${url.includes("?") ? "&" : "?"}download=true`;
+}
+
+function withPreviewCacheKey(url, keyParts = []) {
+  if (!url) {
+    return "";
+  }
+  const cacheKey = keyParts.filter(Boolean).map((part) => String(part).trim()).filter(Boolean).join(":");
+  if (!cacheKey) {
+    return url;
+  }
+  return `${url}${url.includes("?") ? "&" : "?"}view_key=${encodeURIComponent(cacheKey)}`;
+}
+
+function updateWorkspaceDownload(link, url) {
+  if (!link) {
+    return;
+  }
+  const downloadUrl = getDownloadUrl(url);
+  const enabled = Boolean(downloadUrl);
+  link.href = enabled ? downloadUrl : "#";
+  link.classList.toggle("is-disabled", !enabled);
+  link.setAttribute("aria-disabled", enabled ? "false" : "true");
+  link.tabIndex = enabled ? 0 : -1;
+  link.title = enabled ? "Download this preview." : "Download is available after this preview is ready.";
 }
 
 function buildSelectionOverlay(selectionState, canvasWidth, canvasHeight) {
@@ -254,44 +337,33 @@ export function createOverlayPreview({
 }) {
   const wrapper = document.createElement("div");
   if (!previewUrl) {
-    wrapper.className = "compare-body empty-state";
-    wrapper.textContent = fallbackText;
+    wrapper.className = "compare-body";
+    const stage = document.createElement("div");
+    stage.className = "compare-stage";
+    stage.appendChild(createPreviewMetaRow(title, metaText));
+    const frame = document.createElement("div");
+    frame.className = "overlay-stage overlay-stage-empty";
+    applyPreviewAspectRatio(frame, canvasWidth, canvasHeight);
+    const empty = document.createElement("div");
+    empty.className = "compare-preview-empty empty-state";
+    empty.textContent = fallbackText;
+    frame.appendChild(empty);
+    stage.appendChild(frame);
+    wrapper.appendChild(stage);
     return wrapper;
   }
 
   wrapper.className = "compare-body";
   const stage = document.createElement("div");
   stage.className = "compare-stage";
-  const metaRow = document.createElement("div");
-  metaRow.className = "compare-stage-meta";
-  const titleElement = document.createElement("span");
-  titleElement.textContent = title;
-  const titleGroup = document.createElement("div");
-  titleGroup.className = "compare-stage-title-group";
-  titleGroup.appendChild(titleElement);
-  if (metaText) {
-    const meta = document.createElement("span");
-    meta.className = "output-progress-meta compare-stage-inline-meta";
-    meta.textContent = metaText;
-    titleGroup.appendChild(meta);
+  if (downloadUrl) {
+    wrapper.dataset.downloadUrl = getDownloadUrl(downloadUrl);
   }
-  metaRow.appendChild(titleGroup);
-  const actionGroup = document.createElement("div");
-  actionGroup.className = "compare-stage-actions";
-  const downloadLink = document.createElement("a");
-  downloadLink.href = downloadUrl || previewUrl;
-  downloadLink.target = "_blank";
-  downloadLink.rel = "noreferrer";
-  downloadLink.textContent = "Download";
-  actionGroup.appendChild(downloadLink);
-  metaRow.appendChild(actionGroup);
-  stage.appendChild(metaRow);
+  stage.appendChild(createPreviewMetaRow(title, metaText));
 
   const frame = document.createElement("div");
   frame.className = "overlay-stage";
-  if (canvasWidth && canvasHeight) {
-    frame.style.aspectRatio = `${canvasWidth} / ${canvasHeight}`;
-  }
+  applyPreviewAspectRatio(frame, canvasWidth, canvasHeight);
   frame.appendChild(createImageZoomButton({
     src: previewUrl,
     alt: title,
@@ -467,6 +539,109 @@ export function createOverlayPreview({
   return wrapper;
 }
 
+function createWorkspacePreviewLoading({ title, canvasWidth, canvasHeight }) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "compare-body workspace-preview-loading";
+
+  const stage = document.createElement("div");
+  stage.className = "compare-stage";
+
+  const metaRow = document.createElement("div");
+  metaRow.className = "compare-stage-meta";
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "compare-stage-title-group";
+  const titleElement = document.createElement("span");
+  titleElement.textContent = title;
+  titleGroup.appendChild(titleElement);
+  metaRow.append(titleGroup);
+
+  const frame = document.createElement("div");
+  frame.className = "overlay-stage workspace-preview-loading-stage";
+  applyPreviewAspectRatio(frame, canvasWidth, canvasHeight);
+  frame.appendChild(createLoadingState({
+    label: `Loading ${title.toLowerCase()}`,
+    message: "Preparing preview...",
+    fill: false,
+    compact: true,
+    className: "workspace-preview-loading-state",
+  }));
+
+  stage.append(metaRow, frame);
+  wrapper.appendChild(stage);
+  return wrapper;
+}
+
+export function renderWorkspaceArtifactLoadingState(run = null) {
+  const canvasWidth = run?.canvas_width || appState.latestArtifactSnapshot?.canvas_width || null;
+  const canvasHeight = run?.canvas_height || appState.latestArtifactSnapshot?.canvas_height || null;
+  const runLabel = run?.project_name || run?.run_id || "case";
+
+  updateWorkspaceDownload(elements.compareInputDownload, null);
+  updateWorkspaceDownload(elements.compareOutputDownload, null);
+
+  if (elements.compareInputMessage) {
+    elements.compareInputMessage.className = "workspace-context-card empty-state";
+    elements.compareInputMessage.textContent = "Loading case details...";
+  }
+  if (elements.resumeRun) {
+    elements.resumeRun.disabled = true;
+  }
+  if (elements.artifactStatus) {
+    elements.artifactStatus.textContent = `Loading ${runLabel} artifacts...`;
+  }
+  if (elements.artifactSummary) {
+    elements.artifactSummary.className = "artifact-summary";
+  }
+  if (elements.artifactSummaryContent) {
+    elements.artifactSummaryContent.className = "artifact-summary-content workspace-artifact-loading-summary";
+    elements.artifactSummaryContent.replaceChildren(createLoadingState({
+      label: "Loading workspace",
+      message: "Reading saved artifact data...",
+      fill: false,
+      compact: true,
+      className: "workspace-artifact-summary-loading-state",
+    }));
+  }
+  elements.compareInput?.replaceChildren(createWorkspacePreviewLoading({
+    title: "Input image",
+    canvasWidth,
+    canvasHeight,
+  }));
+  elements.compareOutput?.replaceChildren(createWorkspacePreviewLoading({
+    title: "Output",
+    canvasWidth,
+    canvasHeight,
+  }));
+  if (elements.outputVersionSelect) {
+    elements.outputVersionSelect.innerHTML = "";
+  }
+  if (elements.artifactStructure) {
+    elements.artifactStructure.className = "artifact-structure empty-state";
+    elements.artifactStructure.textContent = "Loading region data...";
+  }
+  if (elements.workflowTrace) {
+    elements.workflowTrace.className = "workflow-trace empty-state";
+    elements.workflowTrace.textContent = "Loading process trace...";
+  }
+  if (elements.outputProgress) {
+    elements.outputProgress.className = "output-progress empty-state";
+    elements.outputProgress.textContent = "Loading output timeline...";
+  }
+  if (elements.outputProgressSlider) {
+    elements.outputProgressSlider.className = "output-progress output-progress-inline empty-state";
+    elements.outputProgressSlider.textContent = "Loading versions...";
+  }
+  if (elements.outputProgressDetails) {
+    elements.outputProgressDetails.className = "output-progress-details hidden";
+    elements.outputProgressDetails.textContent = "";
+  }
+  renderState.artifactSig = stableStringify({
+    loadingRunId: run?.run_id || null,
+    canvasWidth,
+    canvasHeight,
+  });
+}
+
 function createPreviewLayer(options, stateClass = "is-active") {
   const layer = createOverlayPreview(options);
   layer.classList.add("output-preview-layer", stateClass);
@@ -600,14 +775,15 @@ export function renderArtifactStructure(snapshot, selectedOverlay, onSelectOverl
     const regionCard = document.createElement("article");
     const regionSelected = selectedOverlay.regionId === region.region_id;
     const regionActive = regionSelected && !selectedOverlay.objectId;
-    regionCard.className = `structure-card${regionActive ? " active" : ""}`;
+    regionCard.className = `structure-card${regionActive ? " active" : ""}${regionSelected ? " is-selected" : ""}`;
+    const regionDescription = regionSelected ? region.description : truncate(region.description, 180);
     regionCard.innerHTML = `
       <div class="structure-title-row">
         <div class="structure-title">${escapeHtml(region.region_id)}</div>
         <div class="structure-meta">${region.retry_used ?? 0}/${region.retry_limit ?? "-"} retries${region.retry_exhausted ? " | exhausted" : ""}</div>
       </div>
       <div class="structure-meta">bbox ${region.bbox.x}, ${region.bbox.y}, ${region.bbox.width}, ${region.bbox.height}</div>
-      <div class="structure-description">${escapeHtml(truncate(region.description, 180))}</div>
+      <div class="structure-description">${escapeHtml(regionDescription)}</div>
     `;
     regionCard.addEventListener("click", () => onSelectOverlay({ type: "region", regionId: region.region_id, objectId: null }));
 
@@ -673,6 +849,46 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
   progressFill.className = "output-progress-fill";
   progressFill.style.width = progressPercent;
   sliderShell.appendChild(progressFill);
+  const clampFrameIndex = (value) => Math.max(0, Math.min(snapshot.output_frames.length - 1, value));
+  let lastDragFrameIndex = selectedOutputFrameIndex;
+  const frameIndexFromClientX = (clientX, rect) => {
+    if (!rect.width) {
+      return selectedOutputFrameIndex;
+    }
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return clampFrameIndex(Math.round(ratio * denominator));
+  };
+  const selectFrameIndex = (index) => {
+    const nextIndex = clampFrameIndex(index);
+    if (nextIndex === lastDragFrameIndex) {
+      return;
+    }
+    lastDragFrameIndex = nextIndex;
+    onFrameChange(nextIndex);
+  };
+  sliderShell.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    sliderShell.classList.add("is-dragging");
+    const dragRect = sliderShell.getBoundingClientRect();
+    selectFrameIndex(frameIndexFromClientX(event.clientX, dragRect));
+
+    const handlePointerMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      selectFrameIndex(frameIndexFromClientX(moveEvent.clientX, dragRect));
+    };
+    const stopDrag = () => {
+      sliderShell.classList.remove("is-dragging");
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", stopDrag);
+      document.removeEventListener("pointercancel", stopDrag);
+    };
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", stopDrag, { once: true });
+    document.addEventListener("pointercancel", stopDrag, { once: true });
+  });
   const range = document.createElement("input");
   range.type = "range";
   range.className = "output-progress-range";
@@ -888,6 +1104,8 @@ function getTraceNodeKindLabel(node) {
 function createTraceCard(node, activeNodeId, onNodeSelect, summary = {}) {
   const card = document.createElement(node.event_index != null ? "button" : "div");
   card.className = `workflow-trace-card ${node.status} ${node.kind}${activeNodeId === node.node_id ? " active" : ""}`;
+  card.dataset.traceNodeId = node.node_id || "";
+  card.dataset.traceConnectorNodeId = node.node_id || "";
   if (card instanceof HTMLButtonElement) {
     card.type = "button";
     card.addEventListener("click", () => onNodeSelect?.(node));
@@ -959,20 +1177,169 @@ function createTraceCard(node, activeNodeId, onNodeSelect, summary = {}) {
   return card;
 }
 
+function traceNodeContainsActive(node, childrenByParent, activeNodeId) {
+  if (!node || !activeNodeId) {
+    return false;
+  }
+  if (node.node_id === activeNodeId) {
+    return true;
+  }
+  return (childrenByParent.get(node.node_id) || []).some((child) => (
+    traceNodeContainsActive(child, childrenByParent, activeNodeId)
+  ));
+}
+
+function getTraceTabLabel(node) {
+  const targetId = String(node?.target_id || "").trim();
+  if (node?.kind === "region" && targetId) {
+    return targetId;
+  }
+  if (node?.kind === "object" && targetId) {
+    return truncate(targetId.replace(/^object[:_-]?/i, ""), 8);
+  }
+  if (node?.kind === "loop") {
+    return typeof node.iteration === "number" ? `L${node.iteration}` : "Loop";
+  }
+  if (node?.kind === "stage") {
+    return truncate(String(node.stage_key || node.label || "Stage"), 8);
+  }
+  return truncate(String(node?.label || "Step"), 8);
+}
+
+function getTraceDeckKey(parentNode) {
+  return parentNode?.node_id || "__root__";
+}
+
+function chooseTraceDeckExpandedChild(parentNode, children, childrenByParent, activeNodeId) {
+  const savedChildId = traceDeckExpansionState.get(getTraceDeckKey(parentNode));
+  if (savedChildId === TRACE_DECK_COLLAPSED) {
+    return null;
+  }
+  const activeChild = children.find((child) => traceNodeContainsActive(child, childrenByParent, activeNodeId));
+  if (activeChild) {
+    return activeChild.node_id;
+  }
+  if (savedChildId && children.some((child) => child.node_id === savedChildId)) {
+    return savedChildId;
+  }
+  const priorityStatuses = ["running", "retrying", "blocked", "failed", "issue_detected"];
+  for (const status of priorityStatuses) {
+    const matched = children.find((child) => child.status === status);
+    if (matched) {
+      return matched.node_id;
+    }
+  }
+  const latestWithEvent = [...children]
+    .filter((child) => child.event_index != null)
+    .sort((a, b) => Number(b.event_index) - Number(a.event_index))[0];
+  return latestWithEvent?.node_id || children[0]?.node_id || null;
+}
+
+function setTraceDeckExpandedNode(branch, nodeId, onNodeSelect) {
+  if (!(branch instanceof HTMLElement)) {
+    return;
+  }
+  const branchKey = branch.dataset.traceBranchParentId || "__root__";
+  const collapseBranch = !nodeId;
+  traceDeckExpansionState.set(branchKey, collapseBranch ? TRACE_DECK_COLLAPSED : nodeId);
+  tracePendingFocusNodeId = collapseBranch ? null : nodeId;
+  branch.dataset.expandedTraceNodeId = collapseBranch ? "" : nodeId;
+  for (const item of branch.querySelectorAll(":scope > .workflow-trace-deck-item")) {
+    const expanded = !collapseBranch && item instanceof HTMLElement && item.dataset.traceDeckNodeId === nodeId;
+    item.classList.toggle("is-expanded", expanded);
+    item.classList.toggle("is-collapsed", !expanded);
+    const tab = item.querySelector(":scope > .workflow-trace-card-tab");
+    if (tab instanceof HTMLElement) {
+      tab.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
+  }
+  if (!collapseBranch) {
+    const selectedItem = Array.from(branch.querySelectorAll(":scope > .workflow-trace-deck-item"))
+      .find((item) => item instanceof HTMLElement && item.dataset.traceDeckNodeId === nodeId);
+    const selectedNodePayload = selectedItem instanceof HTMLElement ? selectedItem.__traceNodePayload : null;
+    if (selectedNodePayload) {
+      onNodeSelect?.(selectedNodePayload);
+    }
+  }
+  requestAnimationFrame(() => {
+    const viewport = branch.closest(".workflow-trace-viewport");
+    if (viewport instanceof HTMLElement) {
+      refreshWorkflowTraceLayout();
+      if (!collapseBranch) {
+        const didFocus = scrollTraceViewportToNode(viewport, nodeId);
+        if (didFocus && tracePendingFocusNodeId === nodeId) {
+          tracePendingFocusNodeId = null;
+        }
+      }
+    }
+  });
+}
+
+function createTraceDeckItem(child, childrenByParent, activeNodeId, expandedChildId, onNodeSelect, summary, depth) {
+  const item = document.createElement("div");
+  const activePath = traceNodeContainsActive(child, childrenByParent, activeNodeId);
+  const expanded = child.node_id === expandedChildId;
+  item.className = `workflow-trace-deck-item ${child.status} ${child.kind}${expanded ? " is-expanded" : " is-collapsed"}${activePath ? " is-active-path" : ""}`;
+  item.dataset.traceDeckNodeId = child.node_id || "";
+  item.dataset.traceDeckStatus = child.status || "";
+  item.__traceNodePayload = child;
+
+  const tab = document.createElement("button");
+  tab.type = "button";
+  tab.className = `workflow-trace-card-tab ${child.status} ${child.kind}${activePath ? " is-active-path" : ""}`;
+  tab.dataset.traceDeckChildId = child.node_id || "";
+  tab.dataset.traceConnectorNodeId = child.node_id || "";
+  tab.setAttribute("aria-expanded", expanded ? "true" : "false");
+  tab.setAttribute("aria-label", `Show ${child.label}${child.target_id ? ` ${child.target_id}` : ""}`);
+  tab.title = `${child.label}${child.target_id ? ` | ${child.target_id}` : ""}`;
+  tab.innerHTML = `
+    <span class="workflow-trace-tab-status" aria-hidden="true"></span>
+    <span class="workflow-trace-tab-label">${escapeHtml(getTraceTabLabel(child))}</span>
+  `;
+  tab.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const branch = tab.closest(".workflow-trace-deck");
+    setTraceDeckExpandedNode(branch, item.classList.contains("is-expanded") ? null : child.node_id, onNodeSelect);
+  });
+
+  item.appendChild(tab);
+  item.appendChild(buildTraceTree(child, childrenByParent, activeNodeId, onNodeSelect, summary, depth));
+  return item;
+}
+
 function buildTraceTree(node, childrenByParent, activeNodeId, onNodeSelect, summary = {}, depth = 0) {
   const lane = document.createElement("div");
-  lane.className = `workflow-trace-lane ${depth === 0 ? "root-lane" : "nested-lane"}`;
+  const activePath = traceNodeContainsActive(node, childrenByParent, activeNodeId);
+  lane.className = `workflow-trace-lane ${depth === 0 ? "root-lane" : "nested-lane"}${activePath ? " is-active-path" : ""}`;
   lane.appendChild(createTraceCard(node, activeNodeId, onNodeSelect, summary));
   const children = childrenByParent.get(node.node_id) || [];
   if (children.length) {
     const branch = document.createElement("div");
-    branch.className = `workflow-trace-branch ${children.length > 1 ? "parallel" : "serial"}`;
+    branch.className = `workflow-trace-branch ${children.length > 1 ? "parallel workflow-trace-deck" : "serial"}`;
+    branch.dataset.traceBranchParentId = getTraceDeckKey(node);
     if (node.kind === "region" && children.length === 1 && children[0]?.kind === "loop") {
       lane.classList.add("has-sidecar-loop");
       branch.classList.add("sidecar-loop");
     }
-    for (const child of children) {
-      branch.appendChild(buildTraceTree(child, childrenByParent, activeNodeId, onNodeSelect, summary, depth + 1));
+    if (children.length > 1) {
+      const expandedChildId = chooseTraceDeckExpandedChild(node, children, childrenByParent, activeNodeId);
+      branch.dataset.expandedTraceNodeId = expandedChildId || "";
+      for (const child of children) {
+        branch.appendChild(createTraceDeckItem(
+          child,
+          childrenByParent,
+          activeNodeId,
+          expandedChildId,
+          onNodeSelect,
+          summary,
+          depth + 1,
+        ));
+      }
+    } else {
+      for (const child of children) {
+        branch.appendChild(buildTraceTree(child, childrenByParent, activeNodeId, onNodeSelect, summary, depth + 1));
+      }
     }
     lane.appendChild(branch);
   }
@@ -1040,13 +1407,23 @@ function getTraceStallInfo(nodes, activeNodeId) {
 function createTraceEventFeed(nodes, activeNodeId) {
   const feed = document.createElement("section");
   feed.className = "workflow-trace-event-feed";
+  const label = document.createElement("div");
+  label.className = "workflow-trace-event-feed-label";
+  label.innerHTML = `
+    <span>Recent</span>
+    <span>Activity</span>
+  `;
+  feed.appendChild(label);
+
+  const body = document.createElement("div");
+  body.className = "workflow-trace-event-feed-body";
   const header = document.createElement("div");
   header.className = "workflow-trace-event-feed-head";
   header.innerHTML = `
     <span>Recent Activity</span>
     <small>latest updates only</small>
   `;
-  feed.appendChild(header);
+  body.appendChild(header);
 
   const stall = getTraceStallInfo(nodes, activeNodeId);
   if (stall) {
@@ -1056,7 +1433,7 @@ function createTraceEventFeed(nodes, activeNodeId) {
       <strong>${escapeHtml(stall.title)}</strong>
       <span>${escapeHtml(stall.body)}</span>
     `;
-    feed.appendChild(notice);
+    body.appendChild(notice);
   }
 
   const list = document.createElement("div");
@@ -1086,16 +1463,114 @@ function createTraceEventFeed(nodes, activeNodeId) {
     `;
     list.appendChild(eventItem);
   }
-  feed.appendChild(list);
+  body.appendChild(list);
+  feed.appendChild(body);
   requestAnimationFrame(() => {
-    const active = list.querySelector("[data-active-trace-event]");
-    if (active instanceof HTMLElement) {
-      list.scrollTop = active.offsetTop - (list.clientHeight / 2) + (active.clientHeight / 2);
-    } else {
-      list.scrollTop = list.scrollHeight;
-    }
+    list.scrollTop = list.scrollHeight;
   });
   return feed;
+}
+
+function scrollTraceViewportToElement(viewport, target) {
+  if (!(viewport instanceof HTMLElement) || !(target instanceof HTMLElement)) {
+    return;
+  }
+  const state = traceViewportState.get(viewport);
+  const scale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, state?.zoomMultiplier || 1));
+  const targetLeft = Math.max(0, target.offsetLeft * scale - (viewport.clientWidth - target.offsetWidth * scale) / 2);
+  const targetTop = Math.max(0, target.offsetTop * scale - Math.max(20, viewport.clientHeight * 0.24));
+  viewport.scrollLeft = targetLeft;
+  const panel = viewport.closest(".workspace-sidebar-panel");
+  if (panel instanceof HTMLElement) {
+    panel.scrollTop = Math.max(0, viewport.offsetTop + targetTop - Math.max(20, panel.clientHeight * 0.24));
+  } else {
+    viewport.scrollTop = targetTop;
+  }
+}
+
+function getTraceContainerFromViewport(viewport) {
+  const container = viewport?.closest?.(".workflow-trace");
+  return container instanceof HTMLElement ? container : null;
+}
+
+function getTraceRunSignature(nodes = []) {
+  const firstStartedNode = nodes.find((node) => node?.started_at);
+  const firstEventNode = nodes.find((node) => node?.event_index != null);
+  return firstStartedNode?.started_at
+    || (firstEventNode ? `event:${firstEventNode.event_index}` : "")
+    || nodes[0]?.node_id
+    || "";
+}
+
+function pauseTraceAutoFollow(viewport) {
+  const container = getTraceContainerFromViewport(viewport);
+  if (container) {
+    container.dataset.traceAutoFollow = "paused";
+  }
+}
+
+function resumeTraceAutoFollow(viewport) {
+  const container = getTraceContainerFromViewport(viewport);
+  if (container) {
+    container.dataset.traceAutoFollow = "active";
+  }
+}
+
+function shouldTraceAutoFollow(viewport) {
+  return getTraceContainerFromViewport(viewport)?.dataset.traceAutoFollow !== "paused";
+}
+
+function getTraceScrollPanel(viewport) {
+  const panel = viewport?.closest?.(".workspace-sidebar-panel");
+  return panel instanceof HTMLElement ? panel : null;
+}
+
+function isTraceScrollPanelNearBottom(panel) {
+  if (!(panel instanceof HTMLElement)) {
+    return false;
+  }
+  return panel.scrollTop + panel.clientHeight >= panel.scrollHeight - TRACE_AUTO_FOLLOW_RESUME_PX;
+}
+
+function resumeTraceAutoFollowIfNearBottom(viewport) {
+  const panel = getTraceScrollPanel(viewport);
+  if (isTraceScrollPanelNearBottom(panel)) {
+    resumeTraceAutoFollow(viewport);
+  }
+}
+
+function scrollTraceViewportToNode(viewport, nodeId) {
+  if (!(viewport instanceof HTMLElement) || !nodeId) {
+    return false;
+  }
+  const expandedItem = Array.from(viewport.querySelectorAll(".workflow-trace-deck-item.is-expanded"))
+    .find((item) => item instanceof HTMLElement && item.dataset.traceDeckNodeId === nodeId);
+  const target = expandedItem instanceof HTMLElement
+    ? expandedItem.querySelector(":scope > .workflow-trace-lane > .workflow-trace-card")
+    : Array.from(viewport.querySelectorAll("[data-trace-node-id]"))
+      .find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === nodeId);
+  if (target instanceof HTMLElement) {
+    scrollTraceViewportToElement(viewport, target);
+    return true;
+  }
+  return false;
+}
+
+function scrollTraceViewportToActive(viewport, options = {}) {
+  if (!(viewport instanceof HTMLElement)) {
+    return;
+  }
+  const activeNodeId = viewport.dataset.traceActiveNodeId || "";
+  let active = activeNodeId
+    ? Array.from(viewport.querySelectorAll("[data-trace-node-id]")).find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === activeNodeId)
+    : viewport.querySelector(".workflow-trace-card.active, .workflow-trace-card.running, .workflow-trace-card.retrying, .workflow-trace-card.failed, .workflow-trace-card.blocked");
+  if (!(active instanceof HTMLElement) && options.allowSelectedDeck) {
+    active = viewport.querySelector(".workflow-trace-deck-item.is-expanded > .workflow-trace-lane > .workflow-trace-card");
+  }
+  if (!(active instanceof HTMLElement)) {
+    return;
+  }
+  scrollTraceViewportToElement(viewport, active);
 }
 
 export function renderTraceInto(container, trace, emptyText, onNodeSelect = () => {}) {
@@ -1108,38 +1583,54 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   }
 
   const summary = trace.summary || {};
+  const runSignature = getTraceRunSignature(visibleNodes);
+  if (
+    runSignature
+    && container.dataset.traceRunSignature
+    && container.dataset.traceRunSignature !== runSignature
+  ) {
+    container.dataset.traceAutoFollow = "active";
+  }
+  if (runSignature) {
+    container.dataset.traceRunSignature = runSignature;
+  }
+  container.dataset.traceAutoFollow = container.dataset.traceAutoFollow || "active";
   container.className = "workflow-trace";
   const controls = document.createElement("div");
   controls.className = "workflow-trace-controls";
   controls.innerHTML = `
     <div class="workflow-trace-toolbar">
       <div class="workflow-trace-summary">
-        <span class="workflow-trace-chip">${escapeHtml(summary.status || "idle")}</span>
-        <span class="workflow-trace-chip workflow-trace-total-duration">${formatElapsedDuration(summary.total_duration_ms || 0)} total</span>
-        <span class="workflow-trace-chip">${summary.regions_total || 0} regions</span>
         <details class="workflow-trace-more">
           <summary>Details</summary>
-          <span>Run budget ${summary.budget_used ?? 0}/${summary.budget_limit ?? "-"}</span>
-          <span>${summary.loop_iterations_total || 0} loops</span>
-          <span>${summary.retrying_regions || 0} retrying</span>
-          <span>${summary.blocked_regions || 0} blocked</span>
+          <div class="workflow-trace-detail-popover">
+            <span>${escapeHtml(summary.status || "idle")}</span>
+            <span class="workflow-trace-total-duration">${formatElapsedDuration(summary.total_duration_ms || 0)} total</span>
+            <span>${summary.regions_total || 0} regions</span>
+            <span>${summary.budget_used ?? 0}/${summary.budget_limit ?? "-"} budget</span>
+            <span>${summary.loop_iterations_total || 0} loops</span>
+            <span>${summary.retrying_regions || 0} retrying</span>
+            <span>${summary.blocked_regions || 0} blocked</span>
+          </div>
         </details>
       </div>
       <div class="workflow-trace-zoom-group">
-        <span class="workflow-trace-controls-label">View</span>
-        <button class="workflow-trace-control-btn" type="button" data-trace-zoom="out">-</button>
-        <button class="workflow-trace-control-btn" type="button" data-trace-zoom="reset">Reset</button>
-        <button class="workflow-trace-control-btn" type="button" data-trace-zoom="in">+</button>
+        <button class="workflow-trace-control-btn" type="button" data-trace-zoom="out" aria-label="Zoom trace out">-</button>
+        <button class="workflow-trace-controls-label" type="button" data-trace-zoom="reset" aria-label="Reset trace zoom">100%</button>
+        <button class="workflow-trace-control-btn" type="button" data-trace-zoom="in" aria-label="Zoom trace in">+</button>
       </div>
     </div>
   `;
   container.appendChild(controls);
-  container.appendChild(createTraceEventFeed(visibleNodes, summary.active_node_id));
 
   const viewport = document.createElement("div");
   viewport.className = "workflow-trace-viewport";
+  viewport.dataset.traceActiveNodeId = summary.active_node_id || "";
   const canvas = document.createElement("div");
   canvas.className = "workflow-trace-canvas";
+  const connectorLayer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  connectorLayer.setAttribute("class", "workflow-trace-connector-layer");
+  connectorLayer.setAttribute("aria-hidden", "true");
   const body = document.createElement("div");
   body.className = "workflow-trace-body";
   const childrenByParent = new Map();
@@ -1157,9 +1648,11 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   for (const node of roots) {
     body.appendChild(buildTraceTree(node, childrenByParent, summary.active_node_id, onNodeSelect, summary));
   }
+  canvas.appendChild(connectorLayer);
   canvas.appendChild(body);
   viewport.appendChild(canvas);
   container.appendChild(viewport);
+  container.appendChild(createTraceEventFeed(visibleNodes, summary.active_node_id));
 
   initializeTraceViewport(viewport, canvas, body, controls);
   if ((summary.status === "running" || summary.status === "retrying") && trace?.nodes?.length) {
@@ -1175,7 +1668,17 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
       totalChip.dataset.elapsedEnded = "";
     }
   }
-  requestAnimationFrame(refreshWorkflowTraceLayout);
+  requestAnimationFrame(() => {
+    refreshWorkflowTraceLayout();
+    if (tracePendingFocusNodeId) {
+      const didFocus = scrollTraceViewportToNode(viewport, tracePendingFocusNodeId);
+      if (didFocus) {
+        tracePendingFocusNodeId = null;
+      }
+    } else if (shouldTraceAutoFollow(viewport)) {
+      scrollTraceViewportToActive(viewport);
+    }
+  });
 }
 
 export function renderWorkflowTrace(snapshot, onNodeSelect = () => {}) {
@@ -1264,36 +1767,103 @@ export function refreshWorkflowTraceLayout() {
   for (const viewport of document.querySelectorAll(".workflow-trace-viewport")) {
     const canvas = viewport.querySelector(".workflow-trace-canvas");
     const body = viewport.querySelector(".workflow-trace-body");
+    const connectorLayer = viewport.querySelector(".workflow-trace-connector-layer");
     if (!(viewport instanceof HTMLElement) || !(canvas instanceof HTMLElement) || !(body instanceof HTMLElement)) {
       continue;
     }
-    const viewportWidth = viewport.clientWidth;
     const contentWidth = body.scrollWidth;
     const contentHeight = body.scrollHeight;
-    if (!viewportWidth || !contentWidth) {
+    if (!contentWidth) {
       body.style.removeProperty("--trace-scale");
       canvas.style.removeProperty("width");
       canvas.style.removeProperty("height");
+      if (connectorLayer instanceof SVGSVGElement) {
+        connectorLayer.replaceChildren();
+      }
       continue;
     }
     const state = traceViewportState.get(viewport) || {
-      fitScale: 1,
       zoomMultiplier: 1,
       dragPointerId: null,
       dragStartX: 0,
-      dragStartY: 0,
       dragScrollLeft: 0,
-      dragScrollTop: 0,
       controls: null,
     };
-    const fitScale = Math.min(1, viewportWidth / contentWidth);
-    state.fitScale = fitScale || 1;
-    const currentScale = Math.max(0.2, Math.min(4, state.fitScale * (state.zoomMultiplier || 1)));
+    const currentScale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, state.zoomMultiplier || 1));
+    state.zoomMultiplier = currentScale;
     traceViewportState.set(viewport, state);
     body.style.setProperty("--trace-scale", String(currentScale));
     canvas.style.width = `${Math.ceil(contentWidth * currentScale)}px`;
     canvas.style.height = `${Math.ceil(contentHeight * currentScale)}px`;
     updateTraceControlState(viewport);
+    drawTraceConnectors(viewport, canvas, body, connectorLayer);
+  }
+}
+
+function getConnectorPoint(element, canvasRect, side = "right") {
+  const rect = element.getBoundingClientRect();
+  return {
+    x: side === "left" ? rect.left - canvasRect.left : rect.right - canvasRect.left,
+    y: rect.top - canvasRect.top + rect.height / 2,
+  };
+}
+
+function getBranchChildAnchors(branch) {
+  if (!(branch instanceof HTMLElement)) {
+    return [];
+  }
+  if (branch.classList.contains("workflow-trace-deck")) {
+    return Array.from(branch.querySelectorAll(":scope > .workflow-trace-deck-item"))
+      .map((item) => {
+        if (!(item instanceof HTMLElement)) {
+          return null;
+        }
+        const anchor = item.classList.contains("is-expanded")
+          ? item.querySelector(":scope > .workflow-trace-lane > .workflow-trace-card")
+          : item.querySelector(":scope > .workflow-trace-card-tab");
+        return anchor instanceof HTMLElement ? { anchor, item } : null;
+      })
+      .filter(Boolean);
+  }
+  return Array.from(branch.querySelectorAll(":scope > .workflow-trace-lane > .workflow-trace-card"))
+    .map((anchor) => anchor instanceof HTMLElement ? { anchor, item: anchor.closest(".workflow-trace-lane") } : null)
+    .filter(Boolean);
+}
+
+function drawTraceConnectors(viewport, canvas, body, connectorLayer) {
+  if (!(connectorLayer instanceof SVGSVGElement)) {
+    return;
+  }
+  connectorLayer.replaceChildren();
+  const canvasWidth = Math.max(1, canvas.clientWidth || Number.parseFloat(canvas.style.width) || 0);
+  const canvasHeight = Math.max(1, canvas.clientHeight || Number.parseFloat(canvas.style.height) || 0);
+  connectorLayer.setAttribute("viewBox", `0 0 ${canvasWidth} ${canvasHeight}`);
+  connectorLayer.setAttribute("width", String(canvasWidth));
+  connectorLayer.setAttribute("height", String(canvasHeight));
+  const canvasRect = canvas.getBoundingClientRect();
+  for (const branch of body.querySelectorAll(".workflow-trace-branch")) {
+    if (!(branch instanceof HTMLElement)) {
+      continue;
+    }
+    const parentLane = branch.parentElement;
+    const parentCard = parentLane?.querySelector(":scope > .workflow-trace-card");
+    if (!(parentCard instanceof HTMLElement)) {
+      continue;
+    }
+    const parentPoint = getConnectorPoint(parentCard, canvasRect, "right");
+    for (const child of getBranchChildAnchors(branch)) {
+      const childPoint = getConnectorPoint(child.anchor, canvasRect, "left");
+      const distance = Math.max(22, Math.abs(childPoint.x - parentPoint.x));
+      const controlOffset = Math.min(90, distance * 0.52);
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute(
+        "d",
+        `M ${parentPoint.x} ${parentPoint.y} C ${parentPoint.x + controlOffset} ${parentPoint.y}, ${childPoint.x - controlOffset} ${childPoint.y}, ${childPoint.x} ${childPoint.y}`
+      );
+      const activePath = child.item?.classList?.contains("is-active-path") || child.anchor.classList.contains("active");
+      path.setAttribute("class", `workflow-trace-connector${activePath ? " active" : ""}`);
+      connectorLayer.appendChild(path);
+    }
   }
 }
 
@@ -1304,21 +1874,22 @@ function updateTraceControlState(viewport) {
   }
   const label = state.controls.querySelector(".workflow-trace-controls-label");
   if (label) {
-    const viewPercent = Math.max(20, Math.min(400, Math.round((state.zoomMultiplier || 1) * 100)));
-    label.textContent = `View ${viewPercent}%`;
+    const viewPercent = Math.max(
+      Math.round(TRACE_MIN_ZOOM * 100),
+      Math.min(Math.round(TRACE_MAX_ZOOM * 100), Math.round((state.zoomMultiplier || 1) * 100)),
+    );
+    label.textContent = `${viewPercent}%`;
+    label.setAttribute("aria-label", `Reset trace zoom (${viewPercent}%)`);
   }
 }
 
 function initializeTraceViewport(viewport, canvas, body, controls) {
   const previous = traceViewportState.get(viewport);
   const state = previous || {
-    fitScale: 1,
     zoomMultiplier: 1,
     dragPointerId: null,
     dragStartX: 0,
-    dragStartY: 0,
     dragScrollLeft: 0,
-    dragScrollTop: 0,
     controls,
   };
   state.controls = controls;
@@ -1338,30 +1909,54 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     }
     event.preventDefault();
     if (action === "in") {
-      liveState.zoomMultiplier = Math.min(4, (liveState.zoomMultiplier || 1) * 1.15);
+      liveState.zoomMultiplier = Math.min(TRACE_MAX_ZOOM, (liveState.zoomMultiplier || 1) * TRACE_ZOOM_STEP);
     } else if (action === "out") {
-      liveState.zoomMultiplier = Math.max(0.2, (liveState.zoomMultiplier || 1) / 1.15);
+      liveState.zoomMultiplier = Math.max(TRACE_MIN_ZOOM, (liveState.zoomMultiplier || 1) / TRACE_ZOOM_STEP);
     } else {
       liveState.zoomMultiplier = 1;
       viewport.scrollLeft = 0;
-      viewport.scrollTop = 0;
     }
     refreshWorkflowTraceLayout();
   });
+
+  viewport.addEventListener("wheel", () => {
+    pauseTraceAutoFollow(viewport);
+    window.setTimeout(() => resumeTraceAutoFollowIfNearBottom(viewport), 0);
+  }, { passive: true });
+
+  const panel = getTraceScrollPanel(viewport);
+  if (panel && panel.dataset.traceAutoFollowListenerAttached !== "true") {
+    panel.dataset.traceAutoFollowListenerAttached = "true";
+    panel.addEventListener("wheel", () => {
+      const liveViewport = panel.querySelector(".workflow-trace-viewport");
+      if (liveViewport instanceof HTMLElement) {
+        pauseTraceAutoFollow(liveViewport);
+        window.setTimeout(() => resumeTraceAutoFollowIfNearBottom(liveViewport), 0);
+      }
+    }, { passive: true });
+    panel.addEventListener("scroll", () => {
+      const liveViewport = panel.querySelector(".workflow-trace-viewport");
+      if (liveViewport instanceof HTMLElement) {
+        resumeTraceAutoFollowIfNearBottom(liveViewport);
+      }
+    }, { passive: true });
+  }
 
   viewport.addEventListener("pointerdown", (event) => {
     const liveState = traceViewportState.get(viewport);
     if (!liveState) {
       return;
     }
-    if (event.target instanceof Element && event.target.closest(".workflow-trace-control-btn, .workflow-trace-card")) {
+    if (
+      event.target instanceof Element
+      && event.target.closest(".workflow-trace-control-btn, .workflow-trace-card, .workflow-trace-card-tab")
+    ) {
       return;
     }
+    pauseTraceAutoFollow(viewport);
     liveState.dragPointerId = event.pointerId;
     liveState.dragStartX = event.clientX;
-    liveState.dragStartY = event.clientY;
     liveState.dragScrollLeft = viewport.scrollLeft;
-    liveState.dragScrollTop = viewport.scrollTop;
     viewport.classList.add("is-dragging");
     viewport.setPointerCapture?.(event.pointerId);
   });
@@ -1373,7 +1968,6 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     }
     event.preventDefault();
     viewport.scrollLeft = liveState.dragScrollLeft - (event.clientX - liveState.dragStartX);
-    viewport.scrollTop = liveState.dragScrollTop - (event.clientY - liveState.dragStartY);
   });
 
   const stopDrag = (event) => {
@@ -1449,7 +2043,10 @@ function collectOutputPreviewUrls(snapshot) {
     snapshot?.previews?.output_svg_url,
     snapshot?.previews?.output_png_url,
     snapshot?.previews?.initial_svg_url,
-    ...(snapshot?.output_frames || []).map((frame) => frame.preview_url),
+    ...(snapshot?.output_frames || []).map((frame) => withPreviewCacheKey(frame.preview_url, [
+      frame.frame_id,
+      frame.modified_at,
+    ])),
     ...(snapshot?.manual_adjustments || []).flatMap((adjustment) => [
       adjustment.preview_url,
       adjustment.base_preview_url,
@@ -1524,6 +2121,8 @@ export function renderArtifactSummary(
   const isArtifactReady = Boolean(snapshot?.available);
 
   if (!hasSnapshot) {
+    updateWorkspaceDownload(elements.compareInputDownload, null);
+    updateWorkspaceDownload(elements.compareOutputDownload, null);
     elements.resumeRun.disabled = true;
     elements.artifactStatus.textContent = "No artifacts yet.";
     elements.artifactSummary.className = "artifact-summary";
@@ -1568,10 +2167,22 @@ export function renderArtifactSummary(
         : "Preparing artifact data.";
 
     const activeOverlays = hasRegionOverlayData ? getActiveOverlays(snapshot, selectedOverlay) : [];
+    const inputPreviewUrl = hasInputPreview ? snapshot.previews.input_image_url : null;
+    const outputPreviewUrl = hasOutputPreview
+      ? (snapshot.previews.output_svg_url || snapshot.previews.output_png_url || snapshot.previews.initial_svg_url)
+      : null;
+    const activeFrame = snapshot.output_frames?.[selectedOutputFrameIndex] || null;
+    const activeOutputPreviewUrl = withPreviewCacheKey(activeFrame?.preview_url, [
+      activeFrame?.frame_id,
+      activeFrame?.modified_at,
+    ]) || outputPreviewUrl;
+    const activeOutputDownloadUrl = activeFrame?.download_url || outputPreviewUrl;
+    updateWorkspaceDownload(elements.compareInputDownload, inputPreviewUrl);
+    updateWorkspaceDownload(elements.compareOutputDownload, activeOutputDownloadUrl);
     elements.compareInput.replaceChildren(createOverlayPreview({
       title: "Input image",
-      previewUrl: hasInputPreview ? snapshot.previews.input_image_url : null,
-      downloadUrl: hasInputPreview ? `${snapshot.previews.input_image_url}&download=true` : null,
+      previewUrl: inputPreviewUrl,
+      downloadUrl: inputPreviewUrl,
       fallbackText: "No input preview yet.",
       kind: "image",
       canvasWidth: snapshot?.canvas_width,
@@ -1584,18 +2195,17 @@ export function renderArtifactSummary(
     }));
 
     renderBufferedOutputPreview({
-      title: "Output",
-      previewUrl: hasOutputPreview
-        ? (snapshot.previews.output_svg_url || snapshot.previews.output_png_url || snapshot.previews.initial_svg_url)
-        : null,
-      downloadUrl: hasOutputPreview
-        ? `${snapshot.previews.output_svg_url || snapshot.previews.output_png_url || snapshot.previews.initial_svg_url}&download=true`
-        : null,
+      title: activeFrame?.title || "Output",
+      previewUrl: activeOutputPreviewUrl,
+      downloadUrl: activeOutputDownloadUrl,
       fallbackText: "Output preview will appear once the current stage produces it.",
       kind: "svg",
       canvasWidth: snapshot?.canvas_width,
       canvasHeight: snapshot?.canvas_height,
       overlays: activeOverlays,
+      metaText: activeFrame
+        ? `${activeFrame.scope}${activeFrame.iteration != null ? ` | iter ${activeFrame.iteration}` : ""}`
+        : "",
       onSelectOverlay,
       selectionState: outputSelectionState,
       selectionMode: outputSelectionMode,
@@ -1762,10 +2372,16 @@ export function renderArtifactSummary(
   ) || null;
   renderOutputVersionOptions(snapshot, selectedManualAdjustmentId, onManualAdjustmentChange);
   preloadPreviewUrls(collectOutputPreviewUrls(snapshot));
+  const activeOutputDownloadUrl = activeAdjustment?.download_url || activeFrame?.download_url || outputUrl;
+  const activeOutputPreviewUrl = activeAdjustment?.preview_url
+    || withPreviewCacheKey(activeFrame?.preview_url, [activeFrame?.frame_id, activeFrame?.modified_at])
+    || outputUrl;
+  updateWorkspaceDownload(elements.compareInputDownload, inputUrl);
+  updateWorkspaceDownload(elements.compareOutputDownload, activeOutputDownloadUrl);
   elements.compareInput.replaceChildren(createOverlayPreview({
     title: "Input image",
     previewUrl: inputUrl,
-    downloadUrl: inputUrl ? `${inputUrl}&download=true` : null,
+    downloadUrl: inputUrl,
     fallbackText: "No input preview yet.",
     kind: "image",
     canvasWidth: snapshot.canvas_width,
@@ -1778,8 +2394,8 @@ export function renderArtifactSummary(
   }));
   renderBufferedOutputPreview({
     title: activeAdjustment?.title || activeFrame?.title || (snapshot.previews?.output_svg_url ? "Final SVG" : snapshot.previews?.output_png_url ? "Final PNG" : "Initial SVG"),
-    previewUrl: activeAdjustment?.preview_url || activeFrame?.preview_url || outputUrl,
-    downloadUrl: activeAdjustment?.download_url || activeFrame?.download_url || (outputUrl ? `${outputUrl}&download=true` : null),
+    previewUrl: activeOutputPreviewUrl,
+    downloadUrl: activeOutputDownloadUrl,
     fallbackText: "No output preview yet.",
     kind: "svg",
     canvasWidth: snapshot.canvas_width,

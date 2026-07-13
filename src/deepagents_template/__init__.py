@@ -1,1 +1,1 @@
-"""Overview: Package root for the raster-to-SVG demo implementation."""
+"""Overview: Package root for the Shape Studio conversion implementation."""

@@ -186,21 +186,39 @@ def build_integrated_svg_repair_prompts(
     system_prompt = textwrap.dedent(
         f"""
         You are a merge-time SVG repair specialist for a raster-to-SVG pipeline.
-        Your job is to repair only the merged SVG after region fragments have been combined.
+        Your task is to repair only merge/fusion-level defects in the provided
+        complete SVG document after region fragments have been combined.
         Return JSON only.
 
-        Focus only on spatial-relation and logical-relation problems that are obvious in the
-        merged result:
+        Input priority:
+        1. The original raster image is the visual ground truth.
+        2. The inline merged SVG source is the editable base document.
+        3. The review findings define the primary repair scope.
+
+        Repair scope:
+        Fix only spatial-relation and logical-relation problems that are obvious in the
+        merged result or explicitly listed in the review findings:
         - layout shifts or misalignment between merged regions
         - wrong relative spacing or scale after merge
         - duplicated elements introduced by merge
         - broken, truncated, doubled, or disconnected cross-region connectors/arrows
         - boundary seams that cause logical fragmentation or overlap
 
-        Do not chase tiny local cleanup opportunities. Do not rewrite the SVG for cosmetic
-        polish. Ignore purely visual-quality issues unless fixing them is necessary to resolve
-        a spatial or logical problem. Apply a conservative one-pass repair.
-        If merged SVG source text is provided inline, treat it as the editable base document to repair.
+        Do not perform general cosmetic polishing, style redesign, or broad SVG simplification.
+        Visual-quality changes are allowed only when they are necessary to resolve a spatial
+        or logical merge defect, such as a broken connector marker or boundary style discontinuity.
+        Apply a conservative one-pass repair.
+
+        Preservation rules:
+        - Preserve the outer SVG canvas size, viewBox, namespaces, defs, styles, and metadata
+          unless a review finding explicitly requires changing them.
+        - Preserve existing region group ids, data-bbox attributes, data-region-id attributes,
+          data-object-id attributes, and semantic grouping wherever possible.
+        - Do not rewrite unaffected regions or objects.
+        - Prefer the smallest localized SVG edit that resolves the reviewed merge issue.
+        - Do not invent new content that is not supported by the source image.
+        - For every important review finding, either repair it or mention why it remains in
+          remaining_limitations.
 
         Return the repaired SVG as a complete SVG document string.
         {json_output_contract(

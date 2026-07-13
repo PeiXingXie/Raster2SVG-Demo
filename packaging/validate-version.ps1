@@ -38,7 +38,7 @@ if (Test-Path -LiteralPath $DesktopLockPath) {
     $DesktopLockText = Get-Content -Raw -LiteralPath $DesktopLockPath
     $LockVersionMatch = [regex]::Match(
         $DesktopLockText,
-        '"name"\s*:\s*"raster-svg-desktop-client",\s*\r?\n\s*"version"\s*:\s*"([^"]+)"'
+        '"name"\s*:\s*"shape-studio-desktop-client",\s*\r?\n\s*"version"\s*:\s*"([^"]+)"'
     )
     if (-not $LockVersionMatch.Success) {
         throw "Could not find top-level version in desktop/package-lock.json."
@@ -50,7 +50,7 @@ if (Test-Path -LiteralPath $DesktopLockPath) {
 
     $LockRootVersionMatch = [regex]::Match(
         $DesktopLockText,
-        '""\s*:\s*\{\s*\r?\n\s*"name"\s*:\s*"raster-svg-desktop-client",\s*\r?\n\s*"version"\s*:\s*"([^"]+)"'
+        '""\s*:\s*\{\s*\r?\n\s*"name"\s*:\s*"shape-studio-desktop-client",\s*\r?\n\s*"version"\s*:\s*"([^"]+)"'
     )
     if (-not $LockRootVersionMatch.Success) {
         throw "Could not find packages[''].version in desktop/package-lock.json."
@@ -61,11 +61,11 @@ if (Test-Path -LiteralPath $DesktopLockPath) {
     }
 }
 
-if ($DesktopPackage.build.appId -ne "com.local.rastertosvg") {
+if ($DesktopPackage.build.appId -ne "com.local.shapestudio") {
     throw "Unexpected appId '$($DesktopPackage.build.appId)'. Keep appId stable for overwrite updates."
 }
 
-if ($DesktopPackage.build.productName -ne "Raster to SVG") {
+if ($DesktopPackage.build.productName -ne "Shape Studio") {
     throw "Unexpected productName '$($DesktopPackage.build.productName)'. Keep productName stable for overwrite updates."
 }
 

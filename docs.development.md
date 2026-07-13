@@ -83,7 +83,7 @@ In shells where both a virtualenv and Conda are visible, the scripts now report 
 
 ## Recommended Conda Setup
 
-The repo already includes [environment.yml](/D:/Daily/Schedule/LH/EditableTransf/Demo/environment.yml:1).
+The repo already includes [environment.yml](./environment.yml).
 
 ### Windows
 
@@ -135,7 +135,7 @@ API-related settings live in the project-root `.env` file.
 
 If `.env` does not exist yet:
 
-- bootstrap creates it from [.env.example](/D:/Daily/Schedule/LH/EditableTransf/Demo/.env.example:1)
+- bootstrap creates it from [.env.example](./.env.example)
 
 When to fill it:
 
@@ -147,13 +147,26 @@ Where to fill it:
 
 - edit `.env` in the project root
 
+Most users only need to care about these settings before the first real conversion:
+
+| Setting | Required | Meaning |
+| --- | --- | --- |
+| `API_KEY` | Yes | Secret key used when calling your model provider |
+| `BASE_URL` | Yes | OpenAI-compatible API endpoint, usually ending in `/v1` |
+| `API_PROVIDER` | Usually keep default | Provider adapter; keep `openai_compatible` unless another adapter is added |
+| `API_FORMAT` | Usually keep default | Request protocol; use `openai_chat_completions` for chat-compatible endpoints or `openai_responses` for Responses API endpoints |
+| `AGENT_MODEL` | Yes | Coordinator model used for planning and main conversion decisions |
+| `SUBAGENT_MODEL` | Yes | Worker model used for subtasks; it can be the same value as `AGENT_MODEL` |
+
 At minimum, review and fill:
 
 ```env
 API_KEY=your-real-api-key
-BASE_URL=https://your-real-api-base-url/v1
+BASE_URL=https://your-openai-compatible-endpoint.example/v1
 API_PROVIDER=openai_compatible
 API_FORMAT=openai_chat_completions
+AGENT_MODEL=your-coordinator-model
+SUBAGENT_MODEL=your-worker-model
 APP_HOST=127.0.0.1
 APP_PORT=8120
 ```
@@ -432,9 +445,11 @@ Edit `.env` in the project root and fill:
 
 ```env
 API_KEY=your-real-api-key
-BASE_URL=https://your-real-api-base-url/v1
+BASE_URL=https://your-openai-compatible-endpoint.example/v1
 API_PROVIDER=openai_compatible
 API_FORMAT=openai_chat_completions
+AGENT_MODEL=your-coordinator-model
+SUBAGENT_MODEL=your-worker-model
 ```
 
 #### Step 3: Start backend only

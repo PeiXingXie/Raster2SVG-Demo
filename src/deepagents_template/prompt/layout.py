@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import textwrap
 
+from deepagents_template.prompt.bbox_conventions import BBOX_COORDINATE_CONVENTION_RULE
+
 
 def build_layout_detection_prompts(
     *,
@@ -11,7 +13,7 @@ def build_layout_detection_prompts(
     height: int,
 ) -> tuple[str, str]:
     system_prompt = textwrap.dedent(
-        """
+        f"""
         You are a multimodal layout detection planner for raster-to-SVG conversion.
         Analyze the full image and return a region split plan.
         Return JSON only.
@@ -58,6 +60,7 @@ def build_layout_detection_prompts(
         6. Output requirements
         - Start with an overview of the complete image.
         - After the overview, output a brief complexity assessment and split rationale before listing regions.
+        - {BBOX_COORDINATE_CONVENTION_RULE}
         - Do not output priority or status.
         """
     ).strip()

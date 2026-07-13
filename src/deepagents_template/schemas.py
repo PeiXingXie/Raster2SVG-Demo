@@ -303,6 +303,27 @@ class RegionPlan(BaseModel):
     )
 
 
+class ObjectFidelityHints(BaseModel):
+    """Optional object-local visual fidelity goals derived during recognition."""
+
+    verify_required: bool = Field(default=False)
+    fidelity_goals: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_hint_fields(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        if "fidelity_goals" not in data and "must_preserve" in data:
+            data["fidelity_goals"] = data.get("must_preserve")
+        goals = data.get("fidelity_goals")
+        if isinstance(goals, str):
+            data["fidelity_goals"] = [goals]
+        elif not isinstance(goals, list):
+            data["fidelity_goals"] = []
+        return data
+
+
 class ObjectCandidate(BaseModel):
     """A simplified object candidate recognized within one region."""
 
@@ -314,12 +335,20 @@ class ObjectCandidate(BaseModel):
         description="Concrete visible sub-elements semantically owned by this object.",
     )
     generation_focus: list[str] = Field(default_factory=list, description="Short structured preservation goals for generation.")
+    fidelity_hints: ObjectFidelityHints | None = Field(
+        default=None,
+        description="Optional object fidelity goals for distinctive details that should not be generically replaced.",
+    )
     relative_position: str = Field(default="", description="Crop-local semantic position hint for later bbox localization.")
     extent_hint: str = Field(default="", description="Short hint describing what the later bbox should include or avoid.")
     bbox: RegionBoundingBox | None = Field(
         default=None,
-        description="Optional crop-local bounding box for this object inside the region crop.",
+        description=(
+            "Optional object bounding box. Recognition/bbox workers use crop-local coordinates; "
+            "after bbox finalization, downstream SVG generation and review use global source-image coordinates."
+        ),
     )
+    bbox_space: Literal["region_local", "global"] = Field(default="region_local")
 
     @field_validator("object_type", mode="before")
     @classmethod
@@ -402,6 +431,13 @@ class LayoutDetectionResult(BaseModel):
 class RegionCheckItem(BaseModel):
     """A machine-readable region check result."""
 
+    issue_family: Literal[
+        "content_accuracy",
+        "shape_fidelity",
+        "internal_structure",
+        "style_appearance",
+        "containment_boundary",
+    ] = Field(default="style_appearance")
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
@@ -417,6 +453,13 @@ class RegionCheckItem(BaseModel):
 class RegionReviewIssue(BaseModel):
     """A problem-only issue emitted by region review."""
 
+    issue_family: Literal[
+        "layout_relation",
+        "containment_boundary",
+        "coverage_completeness",
+        "visual_consistency",
+        "editability_structure",
+    ] = Field(default="visual_consistency")
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
@@ -985,6 +1028,13 @@ class RegionObjectIssue(BaseModel):
     """Region review issue scoped to a recognized object."""
 
     object_id: str
+    issue_family: Literal[
+        "content_accuracy",
+        "shape_fidelity",
+        "internal_structure",
+        "style_appearance",
+        "containment_boundary",
+    ] = Field(default="style_appearance")
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
@@ -1310,6 +1360,12 @@ class FusionPolicyDecision(BaseModel):
     final_strategy_rationale: str | None = Field(default=None)
     accept_current_result: bool = Field(default=False)
     continue_refinement: bool = Field(default=True)
+    final_outcome: Literal[
+        "accepted_clean",
+        "accepted_minor_residuals",
+        "continue_refinement",
+        "stopped_with_residual_issues",
+    ] = Field(default="continue_refinement")
     final_reason: str = Field(default="")
     applied_rules: list[str] = Field(default_factory=list)
 
@@ -1524,6 +1580,11 @@ class AgentRequest(BaseModel):
         ge=0,
         description="Optional per-task repair retry override for this run.",
     )
+    fusion_max_retry: int | None = Field(
+        default=None,
+        ge=0,
+        description="Optional maximum number of merge-time fusion repair passes for this run.",
+    )
     max_budget: int | None = Field(
         default=None,
         ge=0,
@@ -1706,6 +1767,17 @@ class ThreadState(BaseModel):
     recent_runs: list[ExecutionRun] = Field(default_factory=list)
 
 
+class RunRenameRequest(BaseModel):
+    """Request body for renaming a saved desktop project."""
+
+    project_name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("project_name", mode="before")
+    @classmethod
+    def normalize_project_name(cls, value: object) -> str:
+        return " ".join(str(value or "").strip().split())
+
+
 class ThreadCreateResponse(BaseModel):
     """Thread creation response."""
 
@@ -1769,6 +1841,7 @@ class FrontendDefaultsResponse(BaseModel):
     agent_name: str = Field(default="")
     use_previous_response_id: bool = Field(default=False)
     max_retry: int = Field(default=0)
+    fusion_max_retry: int = Field(default=3)
     max_budget: int = Field(default=0)
     supervisor_memory_enabled: bool = Field(default=False)
     supervisor_memory_persist_enabled: bool = Field(default=True)
@@ -1800,6 +1873,10 @@ class RuntimeOverridesPayload(BaseModel):
         default=None,
         description="Read-only frontend hint indicating an API key override exists without echoing the secret.",
     )
+    runtime_config_path: str | None = Field(
+        default=None,
+        description="Read-only diagnostics path for the persisted runtime override file.",
+    )
     base_url: str | None = Field(default=None)
     api_provider: str | None = Field(default=None)
     api_format: str | None = Field(default=None)
@@ -1815,6 +1892,7 @@ class RuntimeOverridesPayload(BaseModel):
     agent_name: str | None = Field(default=None)
     use_previous_response_id: bool | None = Field(default=None)
     max_retry: int | None = Field(default=None, ge=0)
+    fusion_max_retry: int | None = Field(default=None, ge=0)
     max_budget: int | None = Field(default=None, ge=0)
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
@@ -1989,6 +2067,7 @@ class ArtifactRequestSummary(BaseModel):
     agent_name: str | None = Field(default=None)
     use_previous_response_id: bool | None = Field(default=None)
     max_retry: int | None = Field(default=None)
+    fusion_max_retry: int | None = Field(default=None)
     max_budget: int | None = Field(default=None)
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
@@ -2010,13 +2089,13 @@ class ArtifactBox(BaseModel):
 
 
 class ArtifactObjectOverlay(BaseModel):
-    """One recognized object with optional crop-local or canvas-local bbox."""
+    """One recognized object with an optional viewer bbox."""
 
     object_id: str
     object_type: str
     description: str = Field(default="")
     bbox: ArtifactBox | None = Field(default=None)
-    bbox_space: Literal["region_local", "global"] = Field(default="region_local")
+    bbox_space: Literal["region_local", "global"] = Field(default="global")
     retry_limit: int | None = Field(default=None)
     retry_used: int | None = Field(default=None)
     retry_exhausted: bool | None = Field(default=None)

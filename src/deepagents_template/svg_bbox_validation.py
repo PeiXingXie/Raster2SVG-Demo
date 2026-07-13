@@ -22,8 +22,6 @@ def build_region_bbox_review_feedback(
     wrapper = ET.fromstring(f'<fragment xmlns="http://www.w3.org/2000/svg">{fragment}</fragment>')
     feedback: list[dict] = []
 
-    offset_x = int((region_bbox or {}).get("x", 0))
-    offset_y = int((region_bbox or {}).get("y", 0))
     for obj in recognition.recognized_objects:
         bbox = obj.bbox.model_dump(mode="json") if obj.bbox is not None else None
         if bbox is None:
@@ -46,8 +44,8 @@ def build_region_bbox_review_feedback(
                 y = float(text.attrib.get("y", "0"))
             except ValueError:
                 continue
-            left = bbox["x"] + offset_x
-            top = bbox["y"] + offset_y
+            left = bbox["x"]
+            top = bbox["y"]
             right = left + bbox["width"]
             bottom = top + bbox["height"]
             if not (left <= x <= right):
@@ -62,6 +60,7 @@ def build_region_bbox_review_feedback(
                     "status": "bbox_constraint_risk",
                     "detail": "; ".join(issues[:3]),
                     "bbox": bbox,
+                    "bbox_space": "global",
                 }
             )
     return feedback

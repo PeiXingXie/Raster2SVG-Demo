@@ -199,7 +199,7 @@ function createWindow() {
     height: 980,
     minWidth: 1200,
     minHeight: 760,
-    title: "Raster to SVG",
+    title: "Shape Studio",
     icon: path.join(__dirname, "assets", process.platform === "win32" ? "icon.ico" : "icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),

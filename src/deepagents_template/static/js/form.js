@@ -8,6 +8,7 @@ import {
   truncate,
 } from "./utils.js";
 import { fetchJson } from "./api-client.js";
+import { getSettingsValueLabel } from "./settings-labels.js?v=desktop-settings-labels-1";
 
 function guessExtensionFromMimeType(mimeType) {
   switch ((mimeType || "").toLowerCase()) {
@@ -86,8 +87,8 @@ export const RUNTIME_FIELD_SPECS = [
   { id: "api-provider", key: "api_provider" },
   { id: "api-format", key: "api_format" },
   { id: "max-retries", key: "max_retries", summary: true },
-  { id: "settings-workflow-mode", key: "workflow_mode", summaryLabel: "workflow mode", summary: true },
-  { id: "settings-region-processing-mode", key: "region_processing_mode", summaryLabel: "region mode", summary: true },
+  { id: "settings-workflow-mode", key: "workflow_mode", summaryLabel: "refinement depth", summary: true },
+  { id: "settings-region-processing-mode", key: "region_processing_mode", summaryLabel: "processing schedule", summary: true },
   { id: "settings-region-concurrency", key: "region_concurrency", summaryLabel: "region concurrency", summary: true },
   { id: "agent-model", key: "agent_model" },
   { id: "subagent-model", key: "subagent_model" },
@@ -192,6 +193,13 @@ export function getEffectiveValue(spec) {
   return normalizeDisplayValue(fallback);
 }
 
+function getDisplayValueForSpec(spec, value) {
+  if (value === "" || value == null) {
+    return value;
+  }
+  return getSettingsValueLabel(spec.key || spec.id, value);
+}
+
 function getResolvedRuntimeValue(spec) {
   if (spec.id === "api-key") {
     if (appState.runtimeOverrides?.api_key) {
@@ -275,8 +283,8 @@ export function getStartRuntimeReadiness() {
   const requiredFields = [
     ["api-key", "API key"],
     ["base-url", "Base URL"],
-    ["api-provider", "API provider"],
-    ["api-format", "API format"],
+    ["api-provider", "API protocol"],
+    ["api-format", "request format"],
     ["agent-model", "Coordinator model"],
     ["subagent-model", "Worker model"],
   ];
@@ -308,7 +316,7 @@ function getFieldDisplayValue(spec) {
   if (effectiveValue === "" || effectiveValue == null) {
     return "-";
   }
-  return truncate(String(effectiveValue), 34);
+  return truncate(String(getDisplayValueForSpec(spec, effectiveValue)), 34);
 }
 
 export function updateEffectiveValues() {
@@ -329,17 +337,16 @@ export function updateEffectiveValues() {
     const slot = document.getElementById(`effective-${spec.id}`);
     if (slot) {
       slot.textContent = getFieldDisplayValue(spec);
-      slot.title = String(
-        effectiveValue === "" || effectiveValue == null
-          ? (RUNTIME_FIELD_SPECS.includes(spec) ? getRuntimeDefaultValue(spec) : "-")
-          : effectiveValue
-      );
+      const titleValue = effectiveValue === "" || effectiveValue == null
+        ? (RUNTIME_FIELD_SPECS.includes(spec) ? getRuntimeDefaultValue(spec) : "-")
+        : getDisplayValueForSpec(spec, effectiveValue);
+      slot.title = String(titleValue);
     }
     if (spec.summary && RUNTIME_FIELD_SPECS.includes(spec)) {
       const targetParts = runtimeSummaryParts;
       targetParts.push({
         label: spec.summaryLabel || spec.id.replaceAll("-", " "),
-        value: truncate(effectiveValue, 24),
+        value: String(getDisplayValueForSpec(spec, effectiveValue)),
       });
     }
   }
@@ -349,7 +356,13 @@ export function updateEffectiveValues() {
     for (const part of runtimeSummaryParts) {
       const chip = document.createElement("span");
       chip.className = "effective-chip";
-      chip.textContent = `${part.label}: ${part.value}`;
+      const label = document.createElement("span");
+      label.className = "effective-chip-label";
+      label.textContent = part.label;
+      const value = document.createElement("span");
+      value.className = "effective-chip-value";
+      value.textContent = part.value;
+      chip.append(label, value);
       elements.runtimeConfigSummary.appendChild(chip);
     }
   }

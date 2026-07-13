@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
@@ -22,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from deepagents_template.config import get_settings
 from deepagents_template.config import load_runtime_overrides
+from deepagents_template.config import RUNTIME_OVERRIDE_PATH
 from deepagents_template.config import save_runtime_overrides
 from deepagents_template.conversion import BudgetExceededError, RasterToSvgPipeline
 from deepagents_template.debug_review import DebugReviewService
@@ -65,6 +67,7 @@ from deepagents_template.schemas import (
     ResumePlan,
     ResumeRunRequest,
     ResumeResponse,
+    RunRenameRequest,
     RunStartResponse,
     ThreadCreateResponse,
     ThreadState,
@@ -79,6 +82,29 @@ logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="deepagents-template")
 artifact_store = ArtifactStore()
 DEV_SHUTDOWN_TOKEN = os.getenv("RASTER_SVG_DEV_SHUTDOWN_TOKEN", "").strip()
+_active_run_ids: set[str] = set()
+_active_run_lock = Lock()
+
+
+def _mark_active_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    with _active_run_lock:
+        _active_run_ids.add(run_id)
+
+
+def _unmark_active_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    with _active_run_lock:
+        _active_run_ids.discard(run_id)
+
+
+def _is_active_run(run_id: str | None) -> bool:
+    if not run_id:
+        return False
+    with _active_run_lock:
+        return run_id in _active_run_ids
 
 
 @asynccontextmanager
@@ -89,7 +115,7 @@ async def lifespan(_: FastAPI):
         executor.shutdown(wait=True)
 
 
-app = FastAPI(title="Raster-to-SVG Agent Demo", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Shape Studio API", version="0.1.0", lifespan=lifespan)
 static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -116,6 +142,7 @@ def build_frontend_defaults_response() -> FrontendDefaultsResponse:
         agent_name=settings.resolved_agent_name(),
         use_previous_response_id=settings.resolved_use_previous_response_id(),
         max_retry=settings.resolved_max_retry(),
+        fusion_max_retry=settings.resolved_fusion_max_retry(),
         max_budget=settings.resolved_max_budget(),
         supervisor_memory_enabled=settings.resolved_supervisor_memory_enabled(),
         supervisor_memory_persist_enabled=settings.resolved_supervisor_memory_persist_enabled(),
@@ -160,6 +187,7 @@ def build_runtime_overrides_response() -> RuntimeOverridesPayload:
     overrides = load_runtime_overrides()
     response_payload = {key: value for key, value in overrides.items() if key != "api_key"}
     response_payload["api_key_configured"] = bool(str(overrides.get("api_key") or "").strip())
+    response_payload["runtime_config_path"] = str(RUNTIME_OVERRIDE_PATH)
     return RuntimeOverridesPayload.model_validate(response_payload)
 
 
@@ -203,16 +231,19 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
         (message.content for message in reversed(thread.messages) if message.role == "assistant"),
         None,
     )
+    current_run = thread.current_run
+    if current_run is not None and current_run.artifact_dir and artifact_store.resolve_run_dir(current_run.artifact_dir) is None:
+        current_run = None
     status_value = "completed"
-    if thread.current_run is not None:
-        status_value = thread.current_run.status
+    if current_run is not None:
+        status_value = current_run.status
     elif thread.pending_approval is not None:
         status_value = "needs_approval"
 
     recent_runs = []
     seen_run_ids: set[str] = set()
-    if thread.current_run is not None:
-        seen_run_ids.add(thread.current_run.run_id)
+    if current_run is not None:
+        seen_run_ids.add(current_run.run_id)
     for run in artifact_store.list_recent_runs():
         if run.run_id in seen_run_ids:
             continue
@@ -220,7 +251,6 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
         recent_runs.append(run)
         seen_run_ids.add(run.run_id)
 
-    current_run = thread.current_run
     if current_run is not None:
         current_run = current_run.model_copy(deep=True)
         current_run.artifact_revision = _artifact_revision_for_run(current_run)
@@ -483,20 +513,22 @@ def _save_uploaded_image(payload: UploadImageRequest) -> UploadImageResponse:
 
 def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir: str) -> None:
     thread_store = get_thread_store()
+    active_run_id = thread_store.get(thread_id).current_run.run_id if thread_store.get(thread_id).current_run else None
+    _mark_active_run(active_run_id)
     settings = get_settings()
-    resolved_agent_model = settings.resolved_agent_model(request.agent_model)
-    resolved_subagent_model = settings.resolved_subagent_model(request.subagent_model)
-    thread = thread_store.push_event(
-        thread_id,
-        stage="preparing-context",
-        title="Preparing conversion context",
-        detail="Collected the current thread messages and assembled the raster-to-SVG request payload.",
-        status="running",
-    )
-    artifact_store.write_metadata(thread)
-    thread = thread_store.get(thread_id)
-
     try:
+        resolved_agent_model = settings.resolved_agent_model(request.agent_model)
+        resolved_subagent_model = settings.resolved_subagent_model(request.subagent_model)
+        thread = thread_store.push_event(
+            thread_id,
+            stage="preparing-context",
+            title="Preparing conversion context",
+            detail="Collected the current thread messages and assembled the Shape Studio conversion request payload.",
+            status="running",
+        )
+        artifact_store.write_metadata(thread)
+        thread = thread_store.get(thread_id)
+
         thread = thread_store.push_event(
             thread_id,
             stage="running-conversion",
@@ -506,6 +538,7 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             payload={
                 "image_path": request.image_path,
                 "max_retry": settings.resolved_max_retry(request.max_retry),
+                "fusion_max_retry": settings.resolved_fusion_max_retry(request.fusion_max_retry),
                 "max_budget": settings.resolved_max_budget(request.max_budget),
                 "region_processing_mode": settings.resolved_region_processing_mode(
                     request.region_processing_mode
@@ -574,6 +607,7 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
         )
         artifact_store.write_metadata(thread)
+        _unmark_active_run(active_run_id)
         return
     except Exception as exc:
         logger.exception("Conversion pipeline failed for thread %s", thread_id)
@@ -607,6 +641,7 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             ChatMessage(role="system", content=f"Conversion pipeline failed: {exc}"),
         )
         artifact_store.write_metadata(thread)
+        _unmark_active_run(active_run_id)
         return
 
     thread = thread_store.push_event(
@@ -625,16 +660,19 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
         status="completed",
         stage="completed",
         title="Run completed",
-        detail="The raster-to-SVG conversion result is ready.",
+        detail="The Shape Studio conversion result is ready.",
         level="success",
         payload={"character_count": len(final_content)},
     )
     artifact_store.write_output(thread.current_run, final_content)
     artifact_store.write_metadata(thread)
+    _unmark_active_run(active_run_id)
 
 
 def _resume_conversion_in_background(thread_id: str, request: AgentRequest, artifact_dir: str) -> None:
     thread_store = get_thread_store()
+    active_run_id = thread_store.get(thread_id).current_run.run_id if thread_store.get(thread_id).current_run else None
+    _mark_active_run(active_run_id)
     settings = get_settings()
     resolved_agent_model = settings.resolved_agent_model(request.agent_model)
     resolved_subagent_model = settings.resolved_subagent_model(request.subagent_model)
@@ -642,7 +680,7 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
         thread_id,
         stage="resuming-conversion",
         title="Resuming conversion pipeline",
-        detail="Loading persisted checkpoints and continuing the raster-to-SVG run.",
+        detail="Loading persisted checkpoints and continuing the Shape Studio run.",
         status="running",
     )
     artifact_store.write_metadata(thread)
@@ -687,6 +725,7 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
         )
         artifact_store.write_metadata(thread)
+        _unmark_active_run(active_run_id)
         return
     except Exception as exc:
         logger.exception("Conversion resume failed for thread %s", thread_id)
@@ -720,6 +759,7 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             ChatMessage(role="system", content=f"Conversion resume failed: {exc}"),
         )
         artifact_store.write_metadata(thread)
+        _unmark_active_run(active_run_id)
         return
 
     thread = thread_store.push_event(
@@ -737,12 +777,13 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
         status="completed",
         stage="completed",
         title="Resumed run completed",
-        detail="The resumed raster-to-SVG conversion finished successfully.",
+        detail="The resumed Shape Studio conversion finished successfully.",
         level="success",
         payload={"character_count": len(final_content)},
     )
     artifact_store.write_output(thread.current_run, final_content)
     artifact_store.write_metadata(thread)
+    _unmark_active_run(active_run_id)
 
 
 @app.get("/")
@@ -775,7 +816,7 @@ def update_runtime_overrides(payload: RuntimeOverridesPayload) -> RuntimeOverrid
     existing = load_runtime_overrides()
     normalized: dict = dict(existing)
     submitted_values = payload.model_dump(
-        exclude={"api_key_configured"},
+        exclude={"api_key_configured", "runtime_config_path"},
         exclude_unset=True,
     )
     for key, value in submitted_values.items():
@@ -788,6 +829,16 @@ def update_runtime_overrides(payload: RuntimeOverridesPayload) -> RuntimeOverrid
     stored = save_runtime_overrides(normalized)
     response_payload = {key: value for key, value in stored.items() if key != "api_key"}
     response_payload["api_key_configured"] = bool(str(stored.get("api_key") or "").strip())
+    response_payload["runtime_config_path"] = str(RUNTIME_OVERRIDE_PATH)
+    return RuntimeOverridesPayload.model_validate(response_payload)
+
+
+@app.delete("/config/runtime-overrides", response_model=RuntimeOverridesPayload)
+def reset_runtime_overrides() -> RuntimeOverridesPayload:
+    stored = save_runtime_overrides({})
+    response_payload = {key: value for key, value in stored.items() if key != "api_key"}
+    response_payload["api_key_configured"] = False
+    response_payload["runtime_config_path"] = str(RUNTIME_OVERRIDE_PATH)
     return RuntimeOverridesPayload.model_validate(response_payload)
 
 
@@ -815,6 +866,48 @@ def get_thread_snapshot(thread_id: str) -> AgentResponse:
 @app.get("/threads/{thread_id}/artifacts", response_model=ArtifactSnapshot)
 def get_thread_artifacts(thread_id: str, run_id: str | None = None) -> ArtifactSnapshot:
     return build_artifact_response(get_thread_store().get(thread_id), run_id=run_id)
+
+
+@app.patch("/threads/{thread_id}/runs/{run_id}", response_model=ExecutionRun)
+def rename_thread_run(thread_id: str, run_id: str, payload: RunRenameRequest) -> ExecutionRun:
+    thread_store = get_thread_store()
+    thread = thread_store.get(thread_id)
+    run = _find_run_for_thread(thread, run_id)
+    if run is None or not run.artifact_dir:
+        raise HTTPException(status_code=404, detail="Saved project was not found.")
+    try:
+        updated_run = artifact_store.update_run_project_name(run, payload.project_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    thread_store.update_run_project_name(thread_id, run_id, payload.project_name)
+    return updated_run
+
+
+@app.delete("/threads/{thread_id}/runs/{run_id}")
+def delete_thread_run(
+    thread_id: str,
+    run_id: str,
+    artifact_dir: str | None = None,
+) -> dict[str, bool | str | None]:
+    thread_store = get_thread_store()
+    thread = thread_store.get(thread_id)
+    run = _find_run_for_thread(thread, run_id)
+    target_artifact_dir = artifact_dir or (run.artifact_dir if run is not None else None)
+    if not target_artifact_dir:
+        raise HTTPException(status_code=404, detail="Saved project was not found.")
+    if _is_active_run(run_id):
+        raise HTTPException(status_code=409, detail="Active runs cannot be deleted.")
+    try:
+        deleted_dir = artifact_store.delete_run_dir(target_artifact_dir)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    thread_store.remove_run(thread_id, run_id)
+    return {
+        "ok": True,
+        "run_id": run.run_id if run is not None else run_id,
+        "project_name": run.project_name if run is not None else deleted_dir.name,
+        "artifact_dir": str(deleted_dir),
+    }
 
 
 @app.get("/runs/resume-plan", response_model=ResumePlan)
@@ -957,6 +1050,7 @@ def invoke_agent(payload: AgentRequest) -> RunStartResponse:
         artifact_dir=str(run_dir),
     )
     artifact_store.write_metadata(thread)
+    _mark_active_run(thread.current_run.run_id if thread.current_run else None)
     executor.submit(_run_agent_in_background, thread.thread_id, payload, str(run_dir))
     return RunStartResponse(thread_id=thread.thread_id, run=thread.current_run, messages=thread.messages)
 
@@ -999,5 +1093,6 @@ def resume_conversion_run(payload: ResumeRunRequest) -> RunStartResponse:
         artifact_dir=str(run_dir),
     )
     artifact_store.write_metadata(thread)
+    _mark_active_run(thread.current_run.run_id if thread.current_run else None)
     executor.submit(_resume_conversion_in_background, thread.thread_id, request, str(run_dir))
     return RunStartResponse(thread_id=thread.thread_id, run=thread.current_run, messages=thread.messages)

@@ -23,11 +23,13 @@ class IntegrateProcessNodeMixin:
         review_raw_path: Path,
         review_json_path: Path,
         detail: str,
+        trace_phase: str,
     ) -> tuple[str, FinalReviewResult, str]:
         self._push_event(
             "integrate-process",
             "Running integrate-process node",
             detail,
+            payload={"phase": trace_phase},
         )
         return self.workflow_agents.fusion.execute(
             copied_input_path=copied_input_path,

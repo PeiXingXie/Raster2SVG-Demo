@@ -103,11 +103,10 @@ class BaseWorkflowAgent:
         svg_path: Path,
         png_path: Path,
     ) -> tuple[Path, Path | None]:
-        region_bbox = region.get("bbox") or {}
         object_bbox = obj.get("bbox") or {}
         view_box = (
-            int(region_bbox.get("x", 0)) + int(object_bbox.get("x", 0)),
-            int(region_bbox.get("y", 0)) + int(object_bbox.get("y", 0)),
+            int(object_bbox.get("x", 0)),
+            int(object_bbox.get("y", 0)),
             max(int(object_bbox.get("width", 1)), 1),
             max(int(object_bbox.get("height", 1)), 1),
         )

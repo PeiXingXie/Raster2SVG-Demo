@@ -179,8 +179,8 @@ class DebugReviewService:
         wrapped_svg = wrap_svg_fragment(
             svg_text,
             view_box=(
-                int(region["bbox"]["x"]) + int(obj.bbox.x if obj.bbox else 0),
-                int(region["bbox"]["y"]) + int(obj.bbox.y if obj.bbox else 0),
+                int(obj.bbox.x if obj.bbox else 0),
+                int(obj.bbox.y if obj.bbox else 0),
                 max(int(obj.bbox.width if obj.bbox else 1), 1),
                 max(int(obj.bbox.height if obj.bbox else 1), 1),
             ),

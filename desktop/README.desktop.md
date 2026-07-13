@@ -14,7 +14,7 @@ Use this document when your main goal is:
 For overall project navigation, use the root [README.md](../README.md).
 For the developer entrypoint, use [README.developer.md](../README.developer.md).
 For the full detailed local development guide, use [docs.development.md](../docs.development.md).
-For packaging and migration, use [quick-start/README.quick-start.md](../quick-start/README.quick-start.md).
+For source-bundle deployment and migration, use [quick-start/README.quick-start.md](../quick-start/README.quick-start.md).
 
 ## What This README Covers
 
@@ -34,11 +34,9 @@ The project keeps the FastAPI-hosted web frontend for:
 - debugging
 - monitoring
 
-The desktop client now uses a desktop-specific frontend shell.
+The desktop client uses a desktop-specific shell page while sharing the same backend and frontend modules as the web UI:
 
-Instead:
-
-- FastAPI serves both the web development frontend and the desktop frontend
+- FastAPI serves both the web development frontend and the desktop frontend shell
 - the browser opens the web/development frontend at `/`
 - Electron opens the desktop product shell at `/static/desktop.html`
 - both shells reuse the same backend APIs and shared frontend modules
@@ -236,7 +234,7 @@ Current Windows bootstrap now tries three recovery steps automatically:
 
 If it still fails, check:
 
-- `C:\Users\<you>\AppData\Local\electron\Cache`
+- `%LOCALAPPDATA%\electron\Cache`
 - antivirus or file-lock interference during unzip
 - whether switching to Node.js 20 LTS or 22 LTS improves Electron installation stability
 

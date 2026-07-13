@@ -139,7 +139,7 @@ def render_conversion_report_markdown(report: dict) -> str:
     error_summary = report.get("errors") or {"warnings_total": 0, "errors_total": 0, "items": []}
 
     lines = [
-        "# Raster-to-SVG Report",
+        "# Shape Studio Report",
         "",
         "## Status",
         f"- Run status: `{report['status']}`",
@@ -156,6 +156,7 @@ def render_conversion_report_markdown(report: dict) -> str:
         f"- API provider: `{input_section['api_provider']}`",
         f"- API format: `{input_section['api_format']}`",
         f"- Max retry per repair task: `{input_section['max_retry']}`",
+        f"- Fusion max retry: `{input_section.get('fusion_max_retry', 3)}`",
         f"- Max API budget: `{input_section['max_budget']}`",
         f"- API calls used: `{input_section['api_calls_used']}`",
         f"- Run elapsed: `{input_section['run_elapsed_ms']} ms`",

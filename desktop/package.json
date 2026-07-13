@@ -1,9 +1,9 @@
 {
-  "name": "raster-svg-desktop-client",
-  "version": "0.1.5",
+  "name": "shape-studio-desktop-client",
+  "version": "0.2.0",
   "private": true,
-  "author": "Raster to SVG Contributors",
-  "description": "Electron desktop shell for the shared Raster-to-SVG frontend.",
+  "author": "Shape Studio Contributors",
+  "description": "Desktop app for turning raster images into editable shape-based SVG assets.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -15,8 +15,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.local.rastertosvg",
-    "productName": "Raster to SVG",
+    "appId": "com.local.shapestudio",
+    "productName": "Shape Studio",
     "artifactName": "${productName} Setup ${version}.${ext}",
     "directories": {
       "output": "../dist/installers"

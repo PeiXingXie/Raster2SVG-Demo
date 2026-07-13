@@ -32,10 +32,11 @@ class ObjectProcessNodeMixin:
             "object-process",
             f"Running object-process for {region['region_id']}",
             "Generating/refining object SVG fragments and reviewing object-scoped failures.",
-            payload={"region_id": region["region_id"], "object_issues": len(object_issues)},
+            payload={"region_id": region["region_id"], "object_issues": len(object_issues), "phase": "refine"},
             status="running",
         )
         started_at = time.perf_counter()
+        previous_trace_stage = self._set_current_trace_stage("refine")
         try:
             return self.workflow_agents.object.repair(
                 crop_path=crop_path,
@@ -47,6 +48,7 @@ class ObjectProcessNodeMixin:
                 object_issues=object_issues,
             )
         finally:
+            self._set_current_trace_stage(previous_trace_stage)
             self._record_node_timing(
                 "object-process",
                 phase="repair",
@@ -68,10 +70,11 @@ class ObjectProcessNodeMixin:
             "integrate-process",
             f"Integrating object-process output for {region['region_id']}",
             "Merging object fragments back into the region SVG and re-running region review.",
-            payload={"region_id": region["region_id"], "scope": "region-object"},
+            payload={"region_id": region["region_id"], "scope": "region-object", "phase": "region-object"},
             status="running",
         )
         started_at = time.perf_counter()
+        previous_trace_stage = self._set_current_trace_stage("refine")
         try:
             final_svg_elements = aggregate_region_object_svg(current_region_svg, object_svg_index, region)
             self._write_text(aggregate_path, final_svg_elements)
@@ -84,6 +87,7 @@ class ObjectProcessNodeMixin:
             )
             return final_svg_elements, review, review_raw
         finally:
+            self._set_current_trace_stage(previous_trace_stage)
             self._record_node_timing(
                 "integrate-process",
                 phase="region-object",
@@ -130,6 +134,7 @@ class ObjectProcessNodeMixin:
                 "region_id": region["region_id"],
                 "objects_total": len(work_items),
                 "extra_object_workers": borrowed_slots,
+                "phase": "refine",
             },
             status="running",
         )
@@ -184,6 +189,25 @@ class ObjectProcessNodeMixin:
     ) -> dict:
         issue = item["issue"]
         obj = item["obj"]
+        previous_trace_stage = self._set_current_trace_stage("refine")
+        try:
+            return self._process_single_object_issue_with_trace(
+                crop_path=crop_path,
+                region=region,
+                item=item,
+            )
+        finally:
+            self._set_current_trace_stage(previous_trace_stage)
+
+    def _process_single_object_issue_with_trace(
+        self,
+        *,
+        crop_path: Path,
+        region: dict,
+        item: dict,
+    ) -> dict:
+        issue = item["issue"]
+        obj = item["obj"]
         retry_task = self._object_retry_task_name(region["region_id"], issue.object_id)
         if not self._begin_retry(retry_task):
             record = {
@@ -203,7 +227,13 @@ class ObjectProcessNodeMixin:
 
         object_dir = item["objects_dir"] / obj.object_id
         object_dir.mkdir(parents=True, exist_ok=True)
-        object_crop_path = crop_object_image(region_crop_path=crop_path, obj=obj, object_dir=object_dir)
+        object_crop_path = crop_object_image(
+            region_crop_path=crop_path,
+            obj=obj,
+            object_dir=object_dir,
+            region=region,
+            bbox_space="global",
+        )
         failed_items = [{"criterion": issue.criterion, "reason": issue.reason}]
 
         current_object_svg = item["current_object_svg"]
@@ -327,7 +357,6 @@ class ObjectProcessNodeMixin:
         object_svg: str,
         failed_items: list[dict] | None = None,
     ) -> tuple[ObjectReviewResult, str]:
-        region_bbox = region.get("bbox") or {}
         object_bbox = obj.bbox.model_dump(mode="json") if obj.bbox else {}
         review_dir = self.root_intermediate_dir / "_review_assets" / region["region_id"] / obj.object_id
         review_dir.mkdir(parents=True, exist_ok=True)
@@ -337,8 +366,8 @@ class ObjectProcessNodeMixin:
         wrapped_svg = wrap_svg_fragment(
             object_svg,
             view_box=(
-                int(region_bbox.get("x", 0)) + int(object_bbox.get("x", 0)),
-                int(region_bbox.get("y", 0)) + int(object_bbox.get("y", 0)),
+                int(object_bbox.get("x", 0)),
+                int(object_bbox.get("y", 0)),
                 max(int(object_bbox.get("width", 1)), 1),
                 max(int(object_bbox.get("height", 1)), 1),
             ),

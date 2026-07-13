@@ -1,6 +1,7 @@
 import { fetchJson } from "./js/api-client.js";
 import { appState } from "./js/state.js";
 import { renderState } from "./js/state.js";
+import { createLoadingState, renderLoadingState } from "./js/components/loading-state.js";
 
 const casePreviewCache = new Map();
 const casePreviewRequestCache = new Map();
@@ -14,6 +15,19 @@ const PROCESS_GUIDE_AUTOPLAY_MS = 5000;
 let processGuideAutoplayTimer = null;
 
 appState.desktopHistoryPageSize = 6;
+
+function renderInitialHistoryLoadingState() {
+  const recentRuns = document.getElementById("recent-runs");
+  if (!(recentRuns instanceof HTMLElement)) {
+    return;
+  }
+  recentRuns.className = "recent-runs recent-runs-sidebar is-loading";
+  renderLoadingState(recentRuns, {
+    label: "Loading saved projects",
+    message: "Reading project history...",
+    className: "desktop-history-loading-state",
+  });
+}
 
 function refreshDesktopHistory() {
   renderState.recentRunsSig = null;
@@ -68,6 +82,28 @@ function setupDesktopHistoryControls() {
     appState.desktopHistoryPage += 1;
     refreshDesktopHistory();
   });
+  const pageInput = document.getElementById("desktop-history-page-input");
+  const pageGo = document.getElementById("desktop-history-page-go");
+  const jumpToPage = () => {
+    if (!(pageInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const requestedPage = Number.parseInt(pageInput.value, 10);
+    const maxPage = Number.parseInt(pageInput.max || "1", 10);
+    if (Number.isNaN(requestedPage)) {
+      pageInput.value = String(appState.desktopHistoryPage || 1);
+      return;
+    }
+    appState.desktopHistoryPage = Math.min(Math.max(1, requestedPage), Number.isNaN(maxPage) ? requestedPage : maxPage);
+    refreshDesktopHistory();
+  };
+  pageGo?.addEventListener("click", jumpToPage);
+  pageInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpToPage();
+    }
+  });
   setHistoryFilter(appState.desktopHistoryFilter || "all");
 }
 
@@ -116,6 +152,48 @@ function setupDesktopChrome() {
   const validPages = new Set(["start", "history", "workspace", "settings"]);
   const refineToggle = document.getElementById("desktop-refine-toggle");
   const refineClose = document.getElementById("desktop-refine-close");
+  const workspaceSidebar = document.getElementById("workspace-sidebar");
+  const workspaceSidebarResizeHandle = document.getElementById("workspace-sidebar-resize-handle");
+  const workspaceSidebarTabs = Array.from(document.querySelectorAll("[data-workspace-sidebar-tab]"));
+  const workspaceSidebarPanels = Array.from(document.querySelectorAll("[data-workspace-sidebar-panel]"));
+  const workspaceSidebarCloseButtons = Array.from(document.querySelectorAll("[data-workspace-sidebar-close]"));
+  const workspaceSidebarWidthStorageKey = "workspace-sidebar-width";
+  const workspaceSidebarMinWidth = 340;
+  const workspaceSidebarMaxWidth = 760;
+  const workspaceSidebarRegistry = new Map();
+  for (const panel of workspaceSidebarPanels) {
+    const panelId = panel.getAttribute("data-workspace-sidebar-panel");
+    if (!panelId) {
+      continue;
+    }
+    workspaceSidebarRegistry.set(panelId, {
+      id: panelId,
+      panel,
+      tab: workspaceSidebarTabs.find((item) => item.getAttribute("data-workspace-sidebar-tab") === panelId) || null,
+    });
+  }
+  const sidebarScrollTimers = new WeakMap();
+  const markWorkspacePanelScrolling = (panel) => {
+    if (!(panel instanceof HTMLElement)) {
+      return;
+    }
+    panel.classList.add("is-scrolling");
+    window.clearTimeout(sidebarScrollTimers.get(panel));
+    sidebarScrollTimers.set(panel, window.setTimeout(() => {
+      panel.classList.remove("is-scrolling");
+      sidebarScrollTimers.delete(panel);
+    }, 900));
+  };
+  for (const panel of workspaceSidebarPanels) {
+    panel.addEventListener("scroll", () => markWorkspacePanelScrolling(panel), { passive: true });
+    panel.addEventListener("wheel", () => markWorkspacePanelScrolling(panel), { passive: true });
+    panel.addEventListener("pointerdown", () => markWorkspacePanelScrolling(panel), { passive: true });
+    panel.addEventListener("keydown", (event) => {
+      if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key)) {
+        markWorkspacePanelScrolling(panel);
+      }
+    });
+  }
   const refreshTraceLayout = () => {
     window.setTimeout(() => {
       try {
@@ -125,6 +203,94 @@ function setupDesktopChrome() {
       }
     }, 40);
   };
+  const getWorkspaceSidebarWidthLimit = () => {
+    const availableWidth = Math.max(0, window.innerWidth || document.documentElement.clientWidth || 0);
+    if (!availableWidth) {
+      return workspaceSidebarMaxWidth;
+    }
+    const responsiveMaxWidth = availableWidth <= 1360 ? 420 : workspaceSidebarMaxWidth;
+    return Math.max(workspaceSidebarMinWidth, Math.min(responsiveMaxWidth, availableWidth - 520));
+  };
+  const clampWorkspaceSidebarWidth = (value) => {
+    const numericValue = Number.parseFloat(value);
+    const fallbackWidth = 460;
+    const width = Number.isFinite(numericValue) ? numericValue : fallbackWidth;
+    return Math.round(Math.min(Math.max(width, workspaceSidebarMinWidth), getWorkspaceSidebarWidthLimit()));
+  };
+  const applyWorkspaceSidebarWidth = (width, { persist = false } = {}) => {
+    const nextWidth = clampWorkspaceSidebarWidth(width);
+    document.documentElement.style.setProperty("--workspace-sidebar-width", `${nextWidth}px`);
+    workspaceSidebarResizeHandle?.setAttribute("aria-valuemin", String(workspaceSidebarMinWidth));
+    workspaceSidebarResizeHandle?.setAttribute("aria-valuemax", String(getWorkspaceSidebarWidthLimit()));
+    workspaceSidebarResizeHandle?.setAttribute("aria-valuenow", String(nextWidth));
+    workspaceSidebarResizeHandle?.setAttribute("aria-valuetext", `${nextWidth}px`);
+    if (persist) {
+      try {
+        window.localStorage.setItem(workspaceSidebarWidthStorageKey, String(nextWidth));
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+    refreshTraceLayout();
+    return nextWidth;
+  };
+  const getStoredWorkspaceSidebarWidth = () => {
+    try {
+      return window.localStorage.getItem(workspaceSidebarWidthStorageKey);
+    } catch {
+      return null;
+    }
+  };
+  applyWorkspaceSidebarWidth(getStoredWorkspaceSidebarWidth() || 460);
+  const getActiveWorkspaceSidebarPanel = () => {
+    const requested = document.body.dataset.workspaceSidebarPanel || "trace";
+    return workspaceSidebarRegistry.has(requested) ? requested : "trace";
+  };
+  const syncWorkspaceSidebarCompatState = () => {
+    const expanded = document.body.dataset.workspaceSidebar === "expanded";
+    const activePanel = getActiveWorkspaceSidebarPanel();
+    document.body.dataset.workspaceSidebarActivePanel = expanded ? activePanel : "none";
+    refineToggle?.setAttribute("aria-expanded", expanded && activePanel === "refine" ? "true" : "false");
+  };
+  const isRefineNavigationLocked = () => document.body.dataset.refineLocked !== "false";
+  const showLockedRefineHint = () => {
+    const status = document.getElementById("refine-status");
+    if (status) {
+      status.textContent = "Locked";
+      status.title = "Refine unlocks after the main flow finishes.";
+    }
+  };
+  const setWorkspaceSidebarExpanded = (expanded, panelId = getActiveWorkspaceSidebarPanel()) => {
+    const nextState = expanded ? "expanded" : "collapsed";
+    document.body.dataset.workspaceSidebar = nextState;
+    if (expanded) {
+      document.body.dataset.workspaceSidebarPanel = workspaceSidebarRegistry.has(panelId) ? panelId : getActiveWorkspaceSidebarPanel();
+    }
+    syncWorkspaceSidebarCompatState();
+    refreshTraceLayout();
+  };
+  const setWorkspaceSidebarPanel = (panelId, { expand = true } = {}) => {
+    const nextPanelId = workspaceSidebarRegistry.has(panelId) ? panelId : "trace";
+    if (nextPanelId === "refine" && isRefineNavigationLocked()) {
+      showLockedRefineHint();
+      if (expand) {
+        setWorkspaceSidebarPanel("trace", { expand: true });
+      }
+      return;
+    }
+    document.body.dataset.workspaceSidebarPanel = nextPanelId;
+    for (const entry of workspaceSidebarRegistry.values()) {
+      const active = entry.id === nextPanelId;
+      entry.panel.classList.toggle("is-active", active);
+      entry.panel.toggleAttribute("hidden", !active);
+      entry.tab?.classList.toggle("is-active", active);
+      entry.tab?.setAttribute("aria-selected", active ? "true" : "false");
+    }
+    syncWorkspaceSidebarCompatState();
+    if (expand) {
+      setWorkspaceSidebarExpanded(true, nextPanelId);
+    }
+  };
 
   const setDesktopPage = (page) => {
     const nextPage = validPages.has(page) ? page : "start";
@@ -133,10 +299,7 @@ function setupDesktopChrome() {
       button.classList.toggle("is-active", button.getAttribute("data-desktop-page-target") === nextPage);
     }
     if (nextPage !== "workspace") {
-      document.body.dataset.refineSidebar = "collapsed";
-      if (refineToggle) {
-        refineToggle.setAttribute("aria-expanded", "false");
-      }
+      setWorkspaceSidebarExpanded(false);
     }
     if (nextPage === "workspace") {
       refreshTraceLayout();
@@ -146,9 +309,18 @@ function setupDesktopChrome() {
     }
   };
 
+  const openWorkspaceTracePanel = () => {
+    setDesktopPage("workspace");
+    setWorkspaceSidebarPanel("trace", { expand: true });
+  };
+
   document.body.dataset.uiMode = "simple";
-  document.body.dataset.refineSidebar = document.body.dataset.refineSidebar || "collapsed";
+  document.body.dataset.workspaceSidebar = document.body.dataset.workspaceSidebar || "collapsed";
+  document.body.dataset.workspaceSidebarPanel = getActiveWorkspaceSidebarPanel();
+  document.body.dataset.refineLocked = document.body.dataset.refineLocked || "true";
+  syncWorkspaceSidebarCompatState();
   document.getElementById("app-shell")?.setAttribute("data-ui-mode", "simple");
+  setWorkspaceSidebarPanel(getActiveWorkspaceSidebarPanel(), { expand: document.body.dataset.workspaceSidebar === "expanded" });
 
   for (const button of navButtons) {
     button.addEventListener("click", () => {
@@ -164,27 +336,123 @@ function setupDesktopChrome() {
         return;
       }
       if (target.closest("#send-btn")) {
-        window.setTimeout(() => setDesktopPage("workspace"), 0);
+        window.setTimeout(openWorkspaceTracePanel, 0);
       }
-      if (target.closest("#recent-runs button") && !target.closest(".run-chip-preview-zoom")) {
+      if (
+        target.closest("#recent-runs button")
+        && !target.closest(".run-chip-preview-zoom")
+        && !target.closest("[data-history-management]")
+      ) {
         window.setTimeout(() => setDesktopPage("workspace"), 0);
       }
     },
     true,
   );
 
+  window.addEventListener("desktop-open-workspace-trace", openWorkspaceTracePanel);
+
   refineToggle?.addEventListener("click", () => {
-    const expanded = document.body.dataset.refineSidebar === "expanded";
-    document.body.dataset.refineSidebar = expanded ? "collapsed" : "expanded";
-    refineToggle.setAttribute("aria-expanded", expanded ? "false" : "true");
-    refreshTraceLayout();
+    if (isRefineNavigationLocked()) {
+      showLockedRefineHint();
+      return;
+    }
+    const expanded = document.body.dataset.workspaceSidebar === "expanded";
+    const activePanel = getActiveWorkspaceSidebarPanel();
+    if (!expanded || activePanel !== "refine") {
+      setWorkspaceSidebarPanel("refine", { expand: true });
+      return;
+    }
+    setWorkspaceSidebarExpanded(false);
   });
 
   refineClose?.addEventListener("click", () => {
-    document.body.dataset.refineSidebar = "collapsed";
-    refineToggle?.setAttribute("aria-expanded", "false");
-    refreshTraceLayout();
+    setWorkspaceSidebarExpanded(false);
   });
+
+  for (const tab of workspaceSidebarTabs) {
+    tab.addEventListener("click", () => {
+      const requestedPanel = tab.getAttribute("data-workspace-sidebar-tab") || "refine";
+      if (requestedPanel === "refine" && isRefineNavigationLocked()) {
+        showLockedRefineHint();
+        return;
+      }
+      const expanded = document.body.dataset.workspaceSidebar === "expanded";
+      if (expanded && requestedPanel === getActiveWorkspaceSidebarPanel()) {
+        setWorkspaceSidebarExpanded(false);
+        return;
+      }
+      setWorkspaceSidebarPanel(requestedPanel, { expand: true });
+    });
+  }
+
+  for (const closeButton of workspaceSidebarCloseButtons) {
+    closeButton.addEventListener("click", () => {
+      setWorkspaceSidebarExpanded(false);
+    });
+  }
+
+  if (workspaceSidebar instanceof HTMLElement && workspaceSidebarResizeHandle instanceof HTMLElement) {
+    let resizeStartX = 0;
+    let resizeStartWidth = 0;
+    const stopWorkspaceSidebarResize = (event) => {
+      if (event?.pointerId != null) {
+        workspaceSidebarResizeHandle.releasePointerCapture?.(event.pointerId);
+      }
+      document.body.dataset.workspaceSidebarResizing = "false";
+      window.removeEventListener("pointermove", resizeWorkspaceSidebar);
+      window.removeEventListener("pointerup", stopWorkspaceSidebarResize);
+      window.removeEventListener("pointercancel", stopWorkspaceSidebarResize);
+    };
+    const resizeWorkspaceSidebar = (event) => {
+      if (document.body.dataset.workspaceSidebarResizing !== "true") {
+        return;
+      }
+      const nextWidth = resizeStartWidth + (event.clientX - resizeStartX);
+      applyWorkspaceSidebarWidth(nextWidth, { persist: true });
+    };
+    workspaceSidebarResizeHandle.addEventListener("pointerdown", (event) => {
+      if (document.body.dataset.desktopPage !== "workspace" || document.body.dataset.workspaceSidebar !== "expanded") {
+        return;
+      }
+      event.preventDefault();
+      resizeStartX = event.clientX;
+      resizeStartWidth = workspaceSidebar.getBoundingClientRect().width;
+      document.body.dataset.workspaceSidebarResizing = "true";
+      workspaceSidebarResizeHandle.setPointerCapture?.(event.pointerId);
+      window.addEventListener("pointermove", resizeWorkspaceSidebar);
+      window.addEventListener("pointerup", stopWorkspaceSidebarResize);
+      window.addEventListener("pointercancel", stopWorkspaceSidebarResize);
+    });
+    workspaceSidebarResizeHandle.addEventListener("keydown", (event) => {
+      if (document.body.dataset.desktopPage !== "workspace" || document.body.dataset.workspaceSidebar !== "expanded") {
+        return;
+      }
+      const currentWidth = workspaceSidebar.getBoundingClientRect().width;
+      let nextWidth = currentWidth;
+      if (event.key === "ArrowLeft") {
+        nextWidth = currentWidth - (event.shiftKey ? 48 : 16);
+      } else if (event.key === "ArrowRight") {
+        nextWidth = currentWidth + (event.shiftKey ? 48 : 16);
+      } else if (event.key === "Home") {
+        nextWidth = workspaceSidebarMinWidth;
+      } else if (event.key === "End") {
+        nextWidth = getWorkspaceSidebarWidthLimit();
+      } else {
+        return;
+      }
+      event.preventDefault();
+      applyWorkspaceSidebarWidth(nextWidth, { persist: true });
+    });
+    window.addEventListener("resize", (event) => {
+      if (event.isTrusted === false) {
+        return;
+      }
+      const currentWidth = document.body.dataset.workspaceSidebar === "expanded"
+        ? workspaceSidebar.getBoundingClientRect().width
+        : getStoredWorkspaceSidebarWidth() || getComputedStyle(document.documentElement).getPropertyValue("--workspace-sidebar-width") || 460;
+      applyWorkspaceSidebarWidth(currentWidth);
+    });
+  }
 
   setDesktopPage(document.body.dataset.desktopPage || "start");
 }
@@ -283,7 +551,17 @@ function createPreviewPane(label, url, emptyText = "Preview pending") {
     button.appendChild(img);
     frame.appendChild(button);
   } else {
-    frame.appendChild(createPreviewEmpty(emptyText));
+    if (emptyText === "Loading") {
+      frame.appendChild(createLoadingState({
+        label: "",
+        message: "",
+        fill: false,
+        compact: true,
+        className: "run-chip-preview-loading-state",
+      }));
+    } else {
+      frame.appendChild(createPreviewEmpty(emptyText));
+    }
   }
 
   pane.append(labelNode, frame);
@@ -442,6 +720,17 @@ function ensureCasePreviewSlots() {
       card.dataset.runId = run.run_id;
     }
     if (card.querySelector(".run-chip-preview")) {
+      const preview = card.querySelector(".run-chip-preview");
+      if (
+        preview instanceof HTMLElement
+        && preview.dataset.previewState !== "ready"
+        && !preview.querySelector(".run-chip-preview-zoom")
+      ) {
+        preview.replaceChildren(
+          createPreviewPane("Input", null, "Loading"),
+          createPreviewPane("Output", null, "Loading"),
+        );
+      }
       queueCasePreview(card);
       continue;
     }
@@ -554,12 +843,13 @@ function setupDesktopImageLightbox() {
 setupDesktopChrome();
 setupDesktopHistoryControls();
 setupDesktopProcessGuideControls();
+renderInitialHistoryLoadingState();
 setupCasePreviewSlotObserver();
 setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=desktop-history-layout-fit-1");
+    const { initApp } = await import("./js/main.js?v=trace-deck-collapse-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);

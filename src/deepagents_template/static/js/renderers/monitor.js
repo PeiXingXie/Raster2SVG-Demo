@@ -1,5 +1,6 @@
 import { elements } from "../dom.js";
 import { renderState } from "../state.js";
+import { renderLoadingState } from "../components/loading-state.js";
 import {
   captureDetailsState,
   createCollapsibleContent,
@@ -307,6 +308,8 @@ function updateDesktopHistoryPagination(pagination, pageInfo) {
   const prevButton = document.getElementById("desktop-history-prev");
   const nextButton = document.getElementById("desktop-history-next");
   const status = document.getElementById("desktop-history-page-status");
+  const pageInput = document.getElementById("desktop-history-page-input");
+  const pageTotal = document.getElementById("desktop-history-page-total");
   if (!root || !prevButton || !nextButton || !status) {
     return;
   }
@@ -319,6 +322,14 @@ function updateDesktopHistoryPagination(pagination, pageInfo) {
   status.textContent = `${pageInfo.startItem}-${pageInfo.endItem} of ${pageInfo.totalRuns} ${filterLabel} | Page ${pageInfo.page} / ${pageInfo.totalPages}`;
   prevButton.disabled = pageInfo.page <= 1;
   nextButton.disabled = pageInfo.page >= pageInfo.totalPages;
+  if (pageInput instanceof HTMLInputElement) {
+    pageInput.min = "1";
+    pageInput.max = String(pageInfo.totalPages);
+    pageInput.value = String(pageInfo.page);
+  }
+  if (pageTotal) {
+    pageTotal.textContent = `/ ${pageInfo.totalPages}`;
+  }
 }
 
 function getRunSearchText(run) {
@@ -350,8 +361,27 @@ function formatProjectStatus(status) {
   return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function formatHistoryDuration(run) {
+  if (!run) {
+    return "0 min";
+  }
+  let durationMs = typeof run.duration_ms === "number" ? run.duration_ms : null;
+  if (durationMs == null && run.started_at) {
+    durationMs = Math.max(0, Date.now() - new Date(run.started_at).getTime());
+  }
+  const minutes = Math.max(0, (durationMs || 0) / 60_000);
+  if (minutes > 0 && minutes < 1) {
+    return "<1 min";
+  }
+  if (minutes < 10) {
+    return `${minutes.toFixed(1)} min`;
+  }
+  return `${Math.round(minutes)} min`;
+}
+
 export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, onReturnLive, options = {}) {
   const pagination = options.pagination || null;
+  const isLoading = Boolean(options.loading);
   const filterStatus = pagination?.filterStatus || "all";
   const isDesktopPaginated = Boolean(pagination?.enabled);
   const searchQuery = String(pagination?.search || "").trim().toLowerCase();
@@ -381,10 +411,13 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
   const signature = stableStringify({
     runs: pageRuns,
     selectedRunId,
+    isLoading,
     filterStatus,
     searchQuery,
     sort: pagination?.sort || "updated_desc",
     pageInfo,
+    hasRenameAction: typeof options.onRenameRun === "function",
+    hasDeleteAction: typeof options.onDeleteRun === "function",
   });
   if (renderState.recentRunsSig === signature) {
     updateDesktopHistoryPagination(pagination, pageInfo);
@@ -392,6 +425,25 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
   }
 
   elements.recentRuns.innerHTML = "";
+  if (isLoading) {
+    elements.recentRuns.className = "recent-runs recent-runs-sidebar is-loading";
+    elements.recentRunsClearSelection.classList.add("hidden");
+    renderLoadingState(elements.recentRuns, {
+      label: "Loading saved projects",
+      message: "Reading project history...",
+      className: "desktop-history-loading-state",
+    });
+    updateDesktopHistoryPagination(pagination, {
+      page: 1,
+      pageSize: Math.max(1, Number.parseInt(pagination?.pageSize || 1, 10)),
+      totalPages: 1,
+      totalRuns: 0,
+      startItem: 0,
+      endItem: 0,
+    });
+    renderState.recentRunsSig = signature;
+    return;
+  }
   if (!filteredRuns.length) {
     elements.recentRuns.textContent = searchQuery
       ? "No projects match your search."
@@ -415,12 +467,33 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
     const card = document.createElement("article");
     card.className = `run-chip ${run.status}${selectedRun?.run_id === run.run_id ? " selected" : ""}`;
     card.dataset.runId = run.run_id || "";
-    card.innerHTML = `
+    const projectName = escapeHtml(run.project_name || "Untitled project");
+    const durationLabel = isDesktopPaginated ? formatHistoryDuration(run) : formatDuration(run);
+    const headerMarkup = isDesktopPaginated
+      ? `
       <div class="run-chip-top">
         <strong>${formatProjectStatus(run.status)}</strong>
-        <span>${formatDuration(run)}</span>
+        <div class="run-chip-project">${projectName}</div>
+        <span class="run-chip-duration">${durationLabel}</span>
+      </div>`
+      : `
+      <div class="run-chip-top">
+        <strong>${formatProjectStatus(run.status)}</strong>
+        <span class="run-chip-duration">${durationLabel}</span>
       </div>
-      <div class="run-chip-project">${escapeHtml(run.project_name || "Untitled project")}</div>
+      <div class="run-chip-project">${projectName}</div>`;
+    const metaMarkup = isDesktopPaginated
+      ? `<div class="run-chip-meta-row"><span class="run-chip-time">${formatDate(run.updated_at)}</span></div>`
+      : `
+      <div class="run-chip-meta-row">
+        <span class="run-chip-stage">${escapeHtml(run.current_stage || "-")}</span>
+        <span class="run-chip-time">${formatDate(run.updated_at)}</span>
+      </div>`;
+    const revisionMarkup = !isDesktopPaginated && run.artifact_revision
+      ? `<div class="run-chip-meta-row"><span class="run-chip-stage">rev ${escapeHtml(String(run.artifact_revision).slice(0, 8))}</span></div>`
+      : "";
+    card.innerHTML = `
+      ${headerMarkup}
       ${isDesktop ? `
         <div class="run-chip-preview" data-preview-state="loading">
           <div class="run-chip-preview-pane">
@@ -433,25 +506,43 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
           </div>
         </div>
       ` : ""}
-      <div class="run-chip-meta-row">
-        <span class="run-chip-stage">${escapeHtml(run.current_stage || "-")}</span>
-        <span class="run-chip-time">${formatDate(run.updated_at)}</span>
-      </div>
-      ${run.artifact_revision ? `<div class="run-chip-meta-row"><span class="run-chip-stage">rev ${escapeHtml(String(run.artifact_revision).slice(0, 8))}</span></div>` : ""}
+      ${metaMarkup}
+      ${revisionMarkup}
     `;
 
     const actions = document.createElement("div");
     actions.className = "run-chip-actions";
 
     const reviewBtn = document.createElement("button");
-    reviewBtn.className = "ghost-btn";
+    reviewBtn.className = isDesktopPaginated ? "secondary-btn run-chip-primary-action" : "ghost-btn";
     reviewBtn.type = "button";
     reviewBtn.textContent = "Open";
     reviewBtn.disabled = selectedRun?.run_id === run.run_id;
     reviewBtn.addEventListener("click", () => onReviewRun(run.run_id));
+
+    if (isDesktopPaginated && typeof options.onRenameRun === "function") {
+      const renameBtn = document.createElement("button");
+      renameBtn.className = "ghost-btn";
+      renameBtn.type = "button";
+      renameBtn.textContent = "Rename";
+      renameBtn.dataset.historyManagement = "rename";
+      renameBtn.addEventListener("click", async () => options.onRenameRun(run));
+      actions.appendChild(renameBtn);
+    }
+
+    if (isDesktopPaginated && typeof options.onDeleteRun === "function") {
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "ghost-btn danger-btn";
+      deleteBtn.type = "button";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.dataset.historyManagement = "delete";
+      deleteBtn.addEventListener("click", async () => options.onDeleteRun(run));
+      actions.appendChild(deleteBtn);
+    }
+
     actions.appendChild(reviewBtn);
 
-    if (run.artifact_dir) {
+    if (!isDesktopPaginated && run.artifact_dir) {
       const resumeBtn = document.createElement("button");
       resumeBtn.className = "secondary-btn";
       resumeBtn.type = "button";
@@ -460,7 +551,18 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
       actions.appendChild(resumeBtn);
     }
 
-    card.appendChild(actions);
+    if (isDesktopPaginated) {
+      const metaRow = card.querySelector(".run-chip-meta-row");
+      const footer = document.createElement("div");
+      footer.className = "run-chip-footer";
+      if (metaRow) {
+        footer.appendChild(metaRow);
+      }
+      footer.appendChild(actions);
+      card.appendChild(footer);
+    } else {
+      card.appendChild(actions);
+    }
     elements.recentRuns.appendChild(card);
   }
 

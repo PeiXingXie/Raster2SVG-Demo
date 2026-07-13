@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Raster-to-SVG Agent Demo</title>
+    <title>Shape Studio</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -11,8 +11,8 @@
       <section class="hero">
         <div class="hero-topbar">
           <div>
-            <p class="eyebrow">Raster Workspace</p>
-            <h1>Raster-to-SVG Agent Demo</h1>
+            <p class="eyebrow">Shape Studio Workspace</p>
+            <h1>Shape Studio</h1>
           </div>
           <div class="view-toggle" role="tablist" aria-label="Interface mode">
             <button id="simple-mode-toggle" class="secondary-btn view-toggle-btn" type="button" aria-pressed="true">
@@ -45,13 +45,13 @@
                 <p class="guide-highlight-copy">Watch live decisions and progress without leaving the page.</p>
               </article>
               <article class="guide-highlight">
-                <div class="guide-highlight-title">Manual adjustment stays available</div>
+                <div class="guide-highlight-title">Refine unlocks after output</div>
                 <p class="guide-highlight-copy">Refine local areas after the first result instead of rerunning everything.</p>
               </article>
             </div>
             <div class="guide-actions">
               <button id="guide-primary-action" class="primary-btn" type="button">Start From Input</button>
-              <button id="guide-secondary-action" class="ghost-btn" type="button">Jump To Manual Adjustment</button>
+              <button id="guide-secondary-action" class="ghost-btn" type="button">Jump To Refine</button>
             </div>
           </section>
 
@@ -141,7 +141,7 @@
               <div>
                 <h2>Global Runtime Config</h2>
                 <p class="section-note">
-                  Shared by Invocation and Manual Adjustment. In Simple Mode this stays collapsed unless you need deeper control.
+                  Shared by conversion and refinement. In Simple Mode this stays collapsed unless you need deeper control.
                 </p>
               </div>
               <div class="header-actions">
@@ -152,6 +152,9 @@
             <details id="runtime-config-panel" class="runtime-config-panel" data-persist-key="runtime-config-panel">
               <summary>Configuration Fields</summary>
               <div class="runtime-config-body">
+                <p class="runtime-config-primer">
+                  Before converting, check API Key, Base URL, Request Format, Coordinator Model, and Worker Model.
+                </p>
                 <div id="runtime-config-summary" class="effective-summary"></div>
                 <div class="field-grid four-up advanced-grid">
                   <label class="field" data-field-id="api-key">
@@ -291,7 +294,7 @@
               <div class="simple-mode-intro">
                   <div class="simple-mode-intro-title">Quick start</div>
                   <p>
-                    Upload the image, add the task, follow the trace, then use Manual Adjustment for local fixes.
+                    Upload the image, add the task, follow the trace, then use Refine for local fixes.
                   </p>
                 </div>
 
@@ -461,7 +464,7 @@
               <div id="artifact-readiness-input" class="artifact-readiness-chip">Input pending</div>
               <div id="artifact-readiness-bbox" class="artifact-readiness-chip">BBox pending</div>
               <div id="artifact-readiness-output" class="artifact-readiness-chip">Output pending</div>
-              <div id="artifact-readiness-manual" class="artifact-readiness-chip">Local edit pending</div>
+              <div id="artifact-readiness-manual" class="artifact-readiness-chip">Refine locked</div>
             </div>
 
             <div id="artifact-summary" class="artifact-summary">
@@ -538,34 +541,30 @@
             <section id="manual-adjustment-section" class="manual-adjust-card">
               <div class="manual-adjust-header">
                 <div>
-                  <div class="compare-title">Manual Adjustment</div>
+                  <div class="compare-title">Refine</div>
                 </div>
               </div>
 
               <div class="manual-adjust-grid">
                 <section id="manual-entry-bar" class="manual-entry-bar">
                   <div class="manual-entry-copy">
-                    <div class="compare-title">Local Edit Entry</div>
                     <p id="manual-entry-text" class="section-note">
-                      Wait for the first usable output.
+                      Refine is locked until a usable output is available.
                     </p>
                   </div>
                   <div id="manual-entry-status-row" class="manual-entry-status-row">
-                    <span id="manual-entry-output" class="artifact-readiness-chip">Output pending</span>
-                    <span id="manual-entry-target" class="artifact-readiness-chip">Target not selected</span>
-                    <span id="manual-entry-goal" class="artifact-readiness-chip">Goal missing</span>
-                    <span id="manual-entry-ready" class="artifact-readiness-chip">Not ready to apply</span>
+                    <span id="manual-entry-ready" class="artifact-readiness-chip">Locked</span>
                   </div>
                 </section>
 
                 <section id="manual-workflow-bar" class="manual-workflow-bar">
                   <div class="manual-workflow-bar-top">
                     <div class="manual-workflow-overview">
-                      <div class="compare-title">Current Edit Status</div>
+                      <div class="compare-title">Target</div>
                     </div>
                     <div class="manual-toolbar">
                       <div class="manual-toolbar-block">
-                        <div class="manual-toolbar-label">Pick Target</div>
+                        <div class="manual-toolbar-label">Select Area</div>
                         <div class="manual-mode-group">
                           <button id="manual-select-mode" class="primary-btn" type="button">Select</button>
                           <button id="manual-draw-box" class="secondary-btn" type="button">Draw Box</button>
@@ -573,10 +572,10 @@
                         </div>
                       </div>
                       <div class="manual-toolbar-block">
-                        <div class="manual-toolbar-label">Apply Target</div>
+                        <div class="manual-toolbar-label">Set Target</div>
                         <div class="manual-action-group">
                           <button id="manual-use-selection" class="secondary-btn" type="button">Use Overlay</button>
-                          <button id="manual-confirm-selection" class="secondary-btn" type="button">Confirm Selection</button>
+                          <button id="manual-confirm-selection" class="secondary-btn" type="button">Set Target</button>
                           <button id="manual-clear-selection" class="ghost-btn" type="button">Clear</button>
                         </div>
                       </div>
@@ -585,15 +584,24 @@
 
                   <div class="manual-workflow-status">
                     <div id="manual-guidance" class="manual-guidance">
-                      <div id="manual-guidance-title" class="manual-guidance-title">Select a target area.</div>
+                      <div id="manual-guidance-title" class="manual-guidance-title">Refine is locked.</div>
                       <p id="manual-guidance-body" class="manual-guidance-body">
-                        Click an overlay or draw a selection, then describe the change.
+                        Run the conversion first; refine unlocks when output appears.
                       </p>
                     </div>
 
                     <div class="manual-adjust-copy manual-selection-summary-card">
-                      <div class="compare-title">Selection Status</div>
+                      <div class="compare-title">Selected Target</div>
                       <div id="manual-target-summary" class="manual-target-summary">Select a region or object, or draw a box on the output preview.</div>
+                    </div>
+
+                    <div class="manual-selection-preview manual-confirmed-target-card">
+                      <div class="manual-section-head">
+                        <div class="compare-title">Confirmed Target</div>
+                      </div>
+                      <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
+                        Set a target to pin the region, objects, bbox, and base output frame.
+                      </div>
                     </div>
                   </div>
                 </section>
@@ -602,47 +610,38 @@
                   <section class="manual-column manual-editor-column">
                     <div class="manual-editor-card">
                       <div class="manual-section-head">
-                        <div class="compare-title">Edit Goal</div>
+                        <div class="compare-title">Refinement Goal</div>
                         <p class="section-note">
-                          Describe exactly what should improve in the selected area, and mention any constraints that must be preserved.
+                          Describe the change for the selected area. Mention constraints only when they matter.
                         </p>
                       </div>
 
                       <label class="field">
-                        <span class="field-label">User Introduction / Goal</span>
+                        <span class="field-label">Change to Make</span>
                         <textarea
                           id="manual-user-introduction"
                           rows="5"
-                          placeholder="Describe the target state to achieve, for example: refine the selected local SVG while preserving ids and staying inside the chosen target"
+                          placeholder="Describe what should change in the selected area"
                         ></textarea>
                       </label>
 
                       <div class="manual-submit-card">
                         <div class="manual-submit-copy">
-                          <span id="manual-submit-status" class="status-text">Manual adjustment is ready when artifacts are available.</span>
+                          <span id="manual-submit-status" class="status-text">Refine unlocks when output is available.</span>
                         </div>
-                        <button id="manual-apply-button" class="primary-btn" type="button">Apply Manual Adjustment</button>
-                      </div>
-                    </div>
-
-                    <div class="manual-selection-preview manual-confirmed-target-card">
-                      <div class="manual-section-head">
-                        <div class="compare-title">Confirmed Target</div>
-                      </div>
-                      <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
-                        Confirm a selection to pin the target region, objects, bbox, and base output frame.
+                        <button id="manual-apply-button" class="primary-btn" type="button">Apply Refinement</button>
                       </div>
                     </div>
 
                     <details id="manual-advanced-panel" class="advanced-panel manual-advanced-panel" data-persist-key="manual-advanced-panel">
-                      <summary>Manual Adjustment Local Controls</summary>
+                      <summary>Advanced Refinement Options</summary>
                       <p class="section-note">
-                        These controls apply only to the current manual adjustment target. Shared model, budget, and runtime behavior stay in Global Runtime Config.
+                        These controls apply only to the current refinement target. Shared model, budget, and runtime behavior stay in Global Runtime Config.
                       </p>
                       <div class="manual-advanced-grid">
                         <div class="field-grid four-up">
                           <label class="field">
-                            <span class="field-label">Adjustment Mode</span>
+                            <span class="field-label">Refinement Mode</span>
                             <select id="manual-mode">
                               <option value="worker">Worker</option>
                               <option value="agent">Agent</option>
@@ -672,7 +671,7 @@
                             <input
                               id="manual-target-description"
                               type="text"
-                              placeholder="Optional local-edit note, for example: refine only the selected connector layout"
+                              placeholder="Optional target note, for example: refine only the selected connector layout"
                             />
                           </label>
                         </div>
@@ -788,20 +787,20 @@
 
                 <section class="manual-output-section">
                   <div class="manual-section-head">
-                    <div class="compare-title">Adjustment Result</div>
+                    <div class="compare-title">Refined Result</div>
                   </div>
                   <div id="manual-adjustment-result" class="manual-adjustment-result empty-state">
-                    Base and adjusted previews appear here after Manual Adjustment.
+                    Base and refined previews appear here after refinement.
                   </div>
                 </section>
 
                 <details id="manual-trace-panel" class="manual-trace-panel" data-persist-key="manual-trace-panel">
                   <summary>
-                    <span class="manual-reference-summary-title">Manual Adjustment Trace</span>
+                    <span class="manual-reference-summary-title">Refinement Trace</span>
                   </summary>
                   <section class="manual-trace-card">
                     <div id="manual-adjustment-trace" class="workflow-trace empty-state">
-                      Manual Adjustment trace appears here after you start it.
+                      Refinement trace appears here after you start it.
                     </div>
                     <div id="manual-adjustment-error" class="error-box hidden"></div>
                   </section>

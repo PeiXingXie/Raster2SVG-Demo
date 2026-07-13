@@ -26,6 +26,22 @@ copy_path() {
   cp -R "${source_path}" "${target_path}"
 }
 
+copy_desktop_source() {
+  copy_path "${PROJECT_ROOT}/desktop/assets" "${STAGE_DIR}/desktop/assets"
+  copy_path "${PROJECT_ROOT}/desktop/build" "${STAGE_DIR}/desktop/build"
+  copy_path "${PROJECT_ROOT}/desktop/bootstrap.bat" "${STAGE_DIR}/desktop/bootstrap.bat"
+  copy_path "${PROJECT_ROOT}/desktop/bootstrap.ps1" "${STAGE_DIR}/desktop/bootstrap.ps1"
+  copy_path "${PROJECT_ROOT}/desktop/bootstrap.sh" "${STAGE_DIR}/desktop/bootstrap.sh"
+  copy_path "${PROJECT_ROOT}/desktop/main.js" "${STAGE_DIR}/desktop/main.js"
+  copy_path "${PROJECT_ROOT}/desktop/package-lock.json" "${STAGE_DIR}/desktop/package-lock.json"
+  copy_path "${PROJECT_ROOT}/desktop/package.json" "${STAGE_DIR}/desktop/package.json"
+  copy_path "${PROJECT_ROOT}/desktop/preload.js" "${STAGE_DIR}/desktop/preload.js"
+  copy_path "${PROJECT_ROOT}/desktop/README.desktop.md" "${STAGE_DIR}/desktop/README.desktop.md"
+  copy_path "${PROJECT_ROOT}/desktop/start-desktop.bat" "${STAGE_DIR}/desktop/start-desktop.bat"
+  copy_path "${PROJECT_ROOT}/desktop/start-desktop.ps1" "${STAGE_DIR}/desktop/start-desktop.ps1"
+  copy_path "${PROJECT_ROOT}/desktop/start-desktop.sh" "${STAGE_DIR}/desktop/start-desktop.sh"
+}
+
 if [[ -e "${STAGE_DIR}" || -e "${ARCHIVE_PATH}" ]]; then
   echo "Error: target package already exists." >&2
   echo "Stage dir: ${STAGE_DIR}" >&2
@@ -42,7 +58,7 @@ echo "Output root:  ${OUTPUT_ROOT}"
 echo "Package name: ${PACKAGE_NAME}"
 
 copy_path "${PROJECT_ROOT}/src" "${STAGE_DIR}/src"
-copy_path "${PROJECT_ROOT}/desktop" "${STAGE_DIR}/desktop"
+copy_desktop_source
 copy_path "${PROJECT_ROOT}/quick-start" "${STAGE_DIR}/quick-start"
 copy_path "${PROJECT_ROOT}/pyproject.toml" "${STAGE_DIR}/pyproject.toml"
 copy_path "${PROJECT_ROOT}/README.md" "${STAGE_DIR}/README.md"

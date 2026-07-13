@@ -1,121 +1,121 @@
-"""Generate shape-based Raster to SVG application icons."""
+"""Generate production desktop icons from the selected Shape Studio artwork."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = ROOT / "desktop" / "assets"
+STATIC_ICON_DIR = ROOT / "src" / "deepagents_template" / "static" / "assets" / "icon"
+SOURCE_ICON = ASSET_DIR / "icon-source.png"
+
+ICON_SIZE = 1024
+SOURCE_CROP_LEFT = 155
+SOURCE_CROP_TOP = 150
+SOURCE_CROP_RIGHT = 145
+SOURCE_CROP_BOTTOM = 150
 
 
-def rounded_rectangle(draw: ImageDraw.ImageDraw, box, radius, fill, outline=None, width=1):
-    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+def _rounded_tile_mask(size: int) -> Image.Image:
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle((18, 18, size - 18, size - 18), radius=148, fill=255)
+    return mask
 
 
-def make_icon(size: int = 1024) -> Image.Image:
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
+def _foreground_mask(image: Image.Image) -> Image.Image:
+    """Keep the artwork and local shadows while dropping the source border."""
+    rgba = image.convert("RGBA")
+    mask = Image.new("L", rgba.size, 0)
+    src = rgba.load()
+    out = mask.load()
 
-    # Quiet dark base with enough contrast for Windows taskbar and installer surfaces.
-    rounded_rectangle(
-        draw,
-        (64, 64, size - 64, size - 64),
-        radius=168,
-        fill=(22, 30, 39, 255),
-        outline=(234, 241, 248, 32),
-        width=10,
-    )
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            r, g, b, a = src[x, y]
+            if a == 0:
+                continue
+            high = max(r, g, b)
+            low = min(r, g, b)
+            saturation = high - low
+            brightness = (r + g + b) / 3
+            if saturation > 35 or brightness < 205:
+                out[x, y] = 255
 
-    # Raster pixels on the left.
-    pixel = 76
-    gap = 16
-    start_x = 154
-    start_y = 238
-    colors = [
-        (244, 112, 82, 255),
-        (255, 194, 87, 255),
-        (77, 191, 157, 255),
-        (64, 143, 255, 255),
-        (235, 238, 244, 255),
-    ]
-    grid = [
-        [0, 1, 4],
-        [4, 2, 3],
-        [3, 4, 2],
-    ]
-    for row, values in enumerate(grid):
-        for col, color_index in enumerate(values):
-            x0 = start_x + col * (pixel + gap)
-            y0 = start_y + row * (pixel + gap)
-            rounded_rectangle(
-                draw,
-                (x0, y0, x0 + pixel, y0 + pixel),
-                radius=18,
-                fill=colors[color_index],
-            )
+    return mask.filter(ImageFilter.MaxFilter(17)).filter(ImageFilter.GaussianBlur(2.5))
 
-    # Transitional shapes: pixels progressively turn into editable primitives.
-    transition_x = 458
-    transition_y = 254
-    draw.polygon(
-        [(transition_x + 42, transition_y), (transition_x + 100, transition_y + 98), (transition_x - 16, transition_y + 98)],
-        fill=(255, 194, 87, 255),
-    )
-    draw.ellipse(
-        (transition_x + 6, transition_y + 132, transition_x + 108, transition_y + 234),
-        fill=(77, 191, 157, 255),
-    )
-    rounded_rectangle(
-        draw,
-        (transition_x - 4, transition_y + 268, transition_x + 112, transition_y + 344),
-        radius=38,
-        fill=(64, 143, 255, 255),
-    )
-    for x, y in [(transition_x + 42, transition_y), (transition_x + 100, transition_y + 98), (transition_x - 16, transition_y + 98)]:
-        draw.ellipse((x - 9, y - 9, x + 9, y + 9), fill=(235, 238, 244, 245))
 
-    # Arrow bridge: raster to editable shapes.
-    draw.line((386, 512, 466, 512), fill=(235, 238, 244, 210), width=18)
-    draw.polygon(
-        [(466, 512), (434, 482), (434, 542)],
-        fill=(235, 238, 244, 230),
-    )
+def _clean_background(image: Image.Image) -> Image.Image:
+    """Place the artwork on a clean borderless background."""
+    base = image.convert("RGBA")
+    size = base.width
 
-    # Vector path on the right: nodes and clean shape outlines.
-    path_points = [
-        (604, 710),
-        (672, 448),
-        (846, 304),
-        (812, 700),
-    ]
-    draw.line(path_points, fill=(235, 238, 244, 255), width=34, joint="curve")
-    draw.line(path_points, fill=(64, 143, 255, 255), width=16, joint="curve")
+    background = Image.new("RGBA", base.size, (238, 247, 255, 255))
+    background.putalpha(_rounded_tile_mask(size))
 
-    for x, y, radius, color in [
-        (604, 710, 48, (77, 191, 157, 255)),
-        (672, 448, 42, (255, 194, 87, 255)),
-        (846, 304, 50, (244, 112, 82, 255)),
-        (812, 700, 46, (64, 143, 255, 255)),
-    ]:
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-        draw.ellipse(
-            (x - radius + 11, y - radius + 11, x + radius - 11, y + radius - 11),
-            outline=(22, 30, 39, 180),
-            width=8,
+    foreground = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    foreground.alpha_composite(base)
+    foreground.putalpha(ImageChops.multiply(base.getchannel("A"), _foreground_mask(base)))
+
+    return Image.alpha_composite(background, foreground)
+
+
+def _transparent_foreground(image: Image.Image) -> Image.Image:
+    foreground = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    foreground.alpha_composite(image.convert("RGBA"))
+    foreground.putalpha(ImageChops.multiply(foreground.getchannel("A"), _foreground_mask(foreground)))
+    return foreground
+
+
+def _resize_and_center(source: Image.Image, size: int) -> Image.Image:
+    w, h = source.size
+    crop = source.crop(
+        (
+            SOURCE_CROP_LEFT,
+            SOURCE_CROP_TOP,
+            w - SOURCE_CROP_RIGHT,
+            h - SOURCE_CROP_BOTTOM,
         )
-    draw.polygon([(754, 392), (826, 450), (742, 494)], outline=(235, 238, 244, 245), fill=None)
-    draw.rectangle((700, 582, 780, 662), outline=(235, 238, 244, 245), width=12)
+    )
+    resized = crop.resize((size, size), Image.Resampling.LANCZOS)
 
-    return image
+    # The source is square and opaque. This mask keeps the icon in a standard
+    # rounded-square silhouette even if upstream artwork changes slightly.
+    mask = _rounded_tile_mask(size)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.alpha_composite(resized)
+    canvas.putalpha(ImageChops.multiply(canvas.getchannel("A"), mask))
+    return canvas
+
+
+def make_icon(size: int = ICON_SIZE) -> Image.Image:
+    if not SOURCE_ICON.exists():
+        raise FileNotFoundError(f"Missing source icon artwork: {SOURCE_ICON}")
+
+    source = Image.open(SOURCE_ICON).convert("RGBA")
+    icon = _resize_and_center(source, size)
+    return _clean_background(icon)
+
+
+def make_transparent_icon(size: int = ICON_SIZE) -> Image.Image:
+    if not SOURCE_ICON.exists():
+        raise FileNotFoundError(f"Missing source icon artwork: {SOURCE_ICON}")
+
+    source = Image.open(SOURCE_ICON).convert("RGBA")
+    icon = _resize_and_center(source, size)
+    return _transparent_foreground(icon)
 
 
 def main() -> None:
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    STATIC_ICON_DIR.mkdir(parents=True, exist_ok=True)
     icon = make_icon()
+    transparent_icon = make_transparent_icon()
     icon.save(ASSET_DIR / "icon.png")
+    transparent_icon.save(STATIC_ICON_DIR / "icon-transparent.png")
     icon.save(
         ASSET_DIR / "icon.ico",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],

@@ -23,7 +23,10 @@ $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
     -RecreatePackageVenv:$RecreatePackageVenv `
     -BundleMode $BundleMode
 
-$InstallerPath = Join-Path $ProjectRoot "dist\installers\Raster to SVG Setup $Version.exe"
+$DesktopPackagePath = Join-Path $ProjectRoot "desktop\package.json"
+$DesktopPackage = Get-Content -Raw -LiteralPath $DesktopPackagePath | ConvertFrom-Json
+$ProductName = [string]$DesktopPackage.build.productName
+$InstallerPath = Join-Path $ProjectRoot "dist\installers\$ProductName Setup $Version.exe"
 if (-not (Test-Path -LiteralPath $InstallerPath)) {
     throw "Expected versioned installer not found: $InstallerPath"
 }

@@ -1,6 +1,6 @@
-# Packaging README
+# Installer Packaging README
 
-This directory contains the packaging flow for building a desktop app that ordinary users can install by double-clicking an installer. Target users do not need Python, Node.js, conda, or a terminal to start the backend service manually.
+This directory contains the installer packaging flow for building desktop release artifacts. Windows users can install the app by downloading the Windows installer from the repository's Releases page and double-clicking it. Target Windows users do not need Python, Node.js, conda, or a terminal to start the backend service manually.
 
 The current packaging approach is:
 
@@ -29,6 +29,12 @@ packaging/
 - build-desktop.ps1
 - build-windows-installer.ps1
 - build-release-windows.ps1
+- validate-version.sh
+- set-version.sh
+- prepare-package-venv.sh
+- build-backend-macos.sh
+- build-desktop-macos.sh
+- build-release-macos.sh
 - set-version.ps1
 - validate-version.ps1
 - analyze-package-deps.ps1
@@ -42,19 +48,25 @@ File roles:
 - `build-desktop.ps1`: runs `electron-builder` to create the Windows installer.
 - `build-windows-installer.ps1`: full Windows build entrypoint; validates version metadata, builds the backend, then builds the desktop installer.
 - `build-release-windows.ps1`: Windows release build entrypoint; synchronizes version metadata first, then creates a versioned installer.
+- `validate-version.sh`: macOS/Linux-friendly version metadata validation.
+- `set-version.sh`: synchronizes version metadata from macOS/Linux shells.
+- `prepare-package-venv.sh`: creates `.venv_package` for macOS packaging.
+- `build-backend-macos.sh`: builds the macOS backend executable with PyInstaller.
+- `build-desktop-macos.sh`: builds the macOS Electron DMG after the backend has been bundled.
+- `build-release-macos.sh`: macOS release build entrypoint; synchronizes version metadata, builds the backend, then builds the DMG.
 - `set-version.ps1`: updates versions in `pyproject.toml`, `desktop/package.json`, and `desktop/package-lock.json`.
 - `validate-version.ps1`: checks version consistency and ensures `appId` and `productName` were not accidentally changed.
 - `analyze-package-deps.ps1`: reports the largest packages in `.venv_package`.
 - `generate-icon.py`: generates app icon assets.
 
-Windows has complete `.ps1` scripts today. macOS currently uses manual commands for the minimum packaging loop; a future improvement should add `build-release-macos.sh`.
+Windows has complete `.ps1` scripts. macOS now has Bash packaging scripts for developers who need to build a DMG on a Mac. There is still no supported macOS/Linux product-user installer release path yet; for ordinary macOS/Linux users, use the source-bundle backend startup flow in `quick-start/README.quick-start.md`.
 
 ## Installed App Startup Model
 
 After installation, app startup works like this:
 
 ```text
-user opens Raster to SVG
+user opens Shape Studio
 -> Electron finds a free local port
 -> Electron starts the bundled backend raster-svg-api
 -> Electron waits for /health
@@ -106,51 +118,49 @@ To skip `npm install` when `desktop/node_modules` is already current:
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-Verified optimized Windows build command in this workspace:
+Generic optimized Windows build command:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 ### Release A New Windows Version
 
 For real releases, prefer `build-release-windows.ps1`. Do not manually edit version numbers in multiple files.
 
-For example, to release `0.1.1` from `0.1.0`:
+For example, to release a new version:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
 If Python backend dependencies changed, recreate the clean packaging environment:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 The release script does three things:
 
 1. calls `set-version.ps1` to synchronize version metadata
 2. calls `validate-version.ps1` to validate version and app identity
-3. builds `dist/installers/Raster to SVG Setup <version>.exe`
+3. builds the versioned Windows installer under `dist/installers/`
 
 Windows outputs:
 
 ```text
 dist/backend/raster-svg-api/raster-svg-api.exe
-dist/installers/Raster to SVG Setup 0.1.1.exe
+dist/installers/
 dist/installers/win-unpacked/
 ```
 
-Current verified Windows installer size:
-
-```text
-Raster to SVG Setup 0.1.0.exe: about 156 MB
-```
+Current verified Windows installer size is about 156 MB.
 
 ## Build On macOS
 
 macOS packages must be built on a Mac. Do not build the macOS package directly on Windows.
+
+Important current status: macOS/Linux do not yet have supported product-user installers in this project. The notes below are for developer-side packaging experiments and future release work. Actual macOS/Linux users should start the backend service and use the browser UI.
 
 `desktop/package.json` already contains the macOS DMG target:
 
@@ -162,9 +172,82 @@ macOS packages must be built on a Mac. Do not build the macOS package directly o
 }
 ```
 
-There is no dedicated macOS `.sh` packaging script yet, so use the manual commands below for the current minimum loop.
+Use the macOS release script for the normal developer packaging flow. The manual commands below are kept as troubleshooting references.
 
-### 1. Prepare Python Packaging Environment
+### Recommended macOS Release Build
+
+Run from the project root on macOS:
+
+```bash
+chmod +x packaging/*.sh
+./packaging/build-release-macos.sh --version <new-version> --skip-npm-install
+```
+
+If Python backend dependencies changed, recreate the clean packaging environment:
+
+```bash
+./packaging/build-release-macos.sh --version <new-version> --recreate-package-venv --skip-npm-install
+```
+
+If `desktop/node_modules` is missing or Electron dependencies changed, omit `--skip-npm-install`:
+
+```bash
+./packaging/build-release-macos.sh --version <new-version> --recreate-package-venv
+```
+
+The script does five things:
+
+1. updates versions in `pyproject.toml`, `desktop/package.json`, and `desktop/package-lock.json`
+2. validates version metadata and stable app identity
+3. prepares `.venv_package` unless `--skip-package-venv` is used
+4. builds the macOS backend with PyInstaller
+5. runs `electron-builder` to create the DMG
+
+macOS outputs are written under:
+
+```text
+dist/backend/
+dist/installers/
+dist/installers/mac/
+```
+
+### macOS Step-by-step Scripts
+
+Prepare only the packaging venv:
+
+```bash
+./packaging/prepare-package-venv.sh --recreate
+```
+
+Build only the macOS backend:
+
+```bash
+./packaging/build-backend-macos.sh --python ./.venv_package/bin/python
+```
+
+Build only the macOS desktop DMG:
+
+```bash
+./packaging/build-desktop-macos.sh --skip-npm-install
+```
+
+Validate version metadata:
+
+```bash
+./packaging/validate-version.sh
+```
+
+Set a version without building:
+
+```bash
+./packaging/set-version.sh --version <new-version>
+```
+
+### Manual macOS Fallback
+
+Use this only when debugging the scripted flow.
+
+#### 1. Prepare Python Packaging Environment
 
 Run from the project root:
 
@@ -185,7 +268,7 @@ python3 -m venv .venv_package
 ./.venv_package/bin/python -m pip install pyinstaller
 ```
 
-### 2. Build The macOS Backend
+#### 2. Build The macOS Backend
 
 Run from the project root:
 
@@ -222,7 +305,7 @@ Ensure the backend file is executable:
 chmod +x dist/backend/raster-svg-api/raster-svg-api
 ```
 
-### 3. Build The macOS DMG
+#### 3. Build The macOS DMG
 
 Install Electron packaging dependencies:
 
@@ -242,25 +325,19 @@ npm run dist -- --mac dmg
 macOS outputs are usually under:
 
 ```text
-dist/installers/Raster to SVG Setup 0.1.0.dmg
+dist/installers/
 dist/installers/mac/
 ```
 
-### 4. How macOS Users Install It
+### 4. Current macOS User Path
 
-Send the `.dmg` file to the user:
+Do not treat the experimental `.dmg` as the current supported user path. For now, macOS users should start the backend service with the deployment/startup scripts and open the browser UI:
 
 ```text
-dist/installers/Raster to SVG Setup 0.1.0.dmg
+http://127.0.0.1:8120/
 ```
 
-User steps:
-
-1. double-click the `.dmg`
-2. drag `Raster to SVG.app` into `Applications`
-3. open the app from `Applications`
-
-For unsigned internal test builds, macOS may warn that it cannot verify the developer. Users can allow opening from Privacy & Security settings, or right-click the app and choose Open.
+See `quick-start/README.quick-start.md` for source-bundle backend startup.
 
 ### 5. macOS Work Needed Before Public Release
 
@@ -271,28 +348,29 @@ Unsigned DMGs are acceptable for internal testing. Before distributing to extern
 - notarization
 - DMG signing
 - Apple Silicon / Intel architecture strategy: `arm64`, `x64`, or `universal`
-- a dedicated macOS release script, such as `build-release-macos.sh`
+- verification of the generated DMG on clean Intel and Apple Silicon Macs
 
 ## Overwrite Update Behavior
 
-Windows currently uses the simplest reliable update path: the new installer overwrites the old installation.
+Windows currently uses the simplest reliable update path: the new installer downloaded from the repository's Releases page overwrites the old installation.
 
 Developer steps:
 
-1. bump the version, for example `0.1.0` -> `0.1.1`
-2. build the new installer: `Raster to SVG Setup 0.1.1.exe`
-3. send the new `.exe` to the user
+1. choose the new release version
+2. build the new Windows installer
+3. attach the installer to the project release
 
 User steps:
 
-1. close Raster to SVG if it is running
-2. double-click the new installer
-3. finish the installer wizard
-4. reopen the app from the Start Menu or desktop shortcut
+1. close Shape Studio if it is running
+2. download the latest Windows installer from the repository's Releases page
+3. double-click the new installer
+4. finish the installer wizard
+5. reopen the app from the Start Menu or desktop shortcut
 
 During overwrite install, the application directory is replaced by the new version. User configuration, API settings, run outputs, and logs are preserved by default.
 
-macOS updates currently use a replacement `.dmg`: users drag the new `Raster to SVG.app` into `Applications` and overwrite the old app. A productionized update path can later use electron-updater or Sparkle-style auto updates.
+macOS/Linux do not currently have a supported product-user installer/update path. A productionized desktop update path can later use electron-updater or Sparkle-style auto updates.
 
 Do not change these fields during ordinary version upgrades:
 
@@ -302,8 +380,8 @@ Do not change these fields during ordinary version upgrades:
 These fields determine whether the OS treats the new build as the same app. Current values should remain:
 
 ```text
-appId: com.local.rastertosvg
-productName: Raster to SVG
+appId: com.local.shapestudio
+productName: Shape Studio
 ```
 
 `validate-version.ps1` checks these fields before Windows builds, preventing accidental identity changes.
@@ -311,7 +389,7 @@ productName: Raster to SVG
 To set a version without building:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\set-version.ps1 -Version 0.1.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\set-version.ps1 -Version <new-version>
 ```
 
 To validate version metadata only:
@@ -327,13 +405,13 @@ Installed apps do not write configuration and run outputs back into the project 
 Windows usually stores user data under:
 
 ```text
-C:\Users\<user>\AppData\Roaming\Raster to SVG\
+%APPDATA%\Shape Studio\
 ```
 
 macOS usually stores user data under:
 
 ```text
-~/Library/Application Support/Raster to SVG/
+~/Library/Application Support/Shape Studio/
 ```
 
 Contents include:
@@ -357,20 +435,14 @@ inside the matching user-data directory.
 Windows uninstall is provided automatically by NSIS:
 
 - Windows Settings -> Apps -> Installed apps
-- the Start Menu uninstall shortcut created for `Raster to SVG`
+- the Start Menu uninstall shortcut created for `Shape Studio`
 
 During interactive uninstall, the uninstaller asks whether to remove user data. If users choose to remove it, saved settings, generated results, and logs are deleted from AppData. If users choose to keep it, only program files are removed.
 
-macOS uninstall usually means deleting:
+macOS/Linux currently use the backend/browser path. If you create an experimental macOS app bundle during development, cleanup is manual. To remove user data on macOS, delete:
 
 ```text
-/Applications/Raster to SVG.app
-```
-
-To remove user data too, delete:
-
-```text
-~/Library/Application Support/Raster to SVG/
+~/Library/Application Support/Shape Studio/
 ```
 
 ## Why The Installer Is Large
@@ -493,7 +565,7 @@ Confirm it is executable:
 chmod +x dist/backend/raster-svg-api/raster-svg-api
 ```
 
-Also confirm that `dist/installers/mac/Raster to SVG.app/Contents/Resources/backend/` contains the backend directory.
+Also confirm that `dist/installers/mac/Shape Studio.app/Contents/Resources/backend/` contains the backend directory.
 
 ### 5. Installer is not code signed
 
@@ -515,13 +587,13 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1
 Windows: release a new version:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
 Windows: release a new version after dependency changes:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 macOS minimum packaging loop:

@@ -1,6 +1,6 @@
-# User Installer MVP Guide
+# Windows Installer Guide
 
-This guide explains the new one-click installer path for the project.
+This guide explains the Windows installer path for the project. Product users should download the latest Windows installer from the repository's Releases page.
 
 ## What Changed
 
@@ -61,13 +61,13 @@ For a real release, use the versioned release script instead. It updates all app
 validates that the app identity is stable, and then builds the installer:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
 If backend dependencies changed, recreate the clean package venv:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 If your Python command is different:
@@ -88,10 +88,10 @@ If `desktop/node_modules` is already current and you want to skip `npm install`:
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-The verified optimized build command in this workspace was:
+Generic optimized build command:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 ## Expected Outputs
@@ -112,13 +112,12 @@ Current optimized MVP output:
 
 - backend onedir: `dist/backend/raster-svg-api/`
 - backend directory size: about 60 MB
-- installer: `dist/installers/Raster to SVG Setup 0.1.0.exe`
 - installer size: about 156 MB
 
-Release installers are versioned:
+Release installers are versioned and written under:
 
 ```text
-dist/installers/Raster to SVG Setup 0.1.1.exe
+dist/installers/
 ```
 
 The current MVP disables Windows executable resource editing and code signing to avoid local
@@ -151,27 +150,28 @@ choose the install directory.
 
 ## Updating an Existing Install
 
-The update path is intentionally simple: the new installer overwrites the old installed application.
+The update path is intentionally simple: the new Windows installer downloaded from the repository's Releases page overwrites the old installed application.
 Users do not need a developer environment, terminal, Python, or Node.js.
 
 For the developer:
 
-1. Increase the version number, for example from `0.1.0` to `0.1.1`.
-2. Build `dist/installers/Raster to SVG Setup 0.1.1.exe`.
-3. Send that new `.exe` installer to the user.
+1. Choose the new release version.
+2. Build the Windows installer with `build-release-windows.ps1`.
+3. Attach the installer from `dist/installers/` to the project release.
 
 The recommended command is:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
 For the user:
 
-1. Close Raster to SVG if it is open.
-2. Double-click `Raster to SVG Setup 0.1.1.exe`.
-3. Keep the default install location unless they intentionally want to move the app.
-4. Finish the installer and open Raster to SVG normally from the Start Menu.
+1. Close Shape Studio if it is open.
+2. Download the latest Windows installer from the repository's Releases page.
+3. Double-click the installer.
+4. Keep the default install location unless they intentionally want to move the app.
+5. Finish the installer and open Shape Studio normally from the Start Menu.
 
 The user's saved settings and generated data are preserved during an update because they live under
 the Electron user-data directory, not inside the installation directory.
@@ -199,13 +199,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\validate-version
 If you only want to set a version without building:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\set-version.ps1 -Version 0.1.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\set-version.ps1 -Version <new-version>
 ```
 
 Uninstall is provided automatically by NSIS. Users can uninstall from:
 
 - Windows Settings -> Apps -> Installed apps
-- the Start Menu uninstall shortcut created for `Raster to SVG`
+- the Start Menu uninstall shortcut created for `Shape Studio`
 
 During interactive uninstall, the uninstaller asks whether to remove user data. If the user chooses
 Yes, it removes saved API settings, generated artifacts, and backend logs from AppData. If the user

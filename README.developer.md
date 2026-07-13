@@ -1,4 +1,4 @@
-# Raster-to-SVG Developer Guide
+# Shape Studio Developer Guide
 
 This document is the developer entrypoint that used to live in the root `README.md`.
 
@@ -15,7 +15,7 @@ Project documents:
 - [docs.development.md](./docs.development.md): full developer manual for Conda or `.venv`, API configuration, automatic startup, manual startup, and troubleshooting
 - [packaging/README.packaging.md](./packaging/README.packaging.md): installer packaging, versioned release builds, overwrite-update behavior, and package-size notes
 - [docs.installer.md](./docs.installer.md): detailed installer MVP notes and installed-app behavior
-- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): deployment, migration, and packaging flow for another machine
+- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): source-bundle deployment and migration flow for another machine
 - [desktop/README.desktop.md](./desktop/README.desktop.md): Electron shell startup, runtime URL resolution, and desktop-specific troubleshooting
 - [environment.yml](./environment.yml): recommended Conda environment definition
 - [.env.example](./.env.example): template for API and runtime configuration
@@ -120,19 +120,26 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1
 For a versioned release installer that can overwrite an older installation:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
 If Python backend dependencies changed, recreate the clean packaging environment:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version 0.1.1 -Python .\.venv_test\Scripts\python.exe -RecreatePackageVenv -SkipNpmInstall
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
 ```
 
 The expected Windows installer output is:
 
 ```text
-dist/installers/Raster to SVG Setup <version>.exe
+dist/installers/
+```
+
+For a developer-side macOS DMG build, run this on macOS:
+
+```bash
+chmod +x packaging/*.sh
+./packaging/build-release-macos.sh --version <new-version> --skip-npm-install
 ```
 
 Read [packaging/README.packaging.md](./packaging/README.packaging.md) before publishing installers to users.
@@ -157,7 +164,7 @@ Open [packaging/README.packaging.md](./packaging/README.packaging.md) if you nee
 
 Open [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) if you need:
 
-- packaging
+- source-bundle deployment
 - migration to another machine
 - target-machine bootstrap
 
@@ -176,11 +183,17 @@ If you are developing locally:
 3. fill `.env` before the first real model-backed conversion
 4. use automatic startup first, then switch to manual startup when you need finer control
 
-If you are packaging or deploying:
+If you are building user installers:
 
 1. read [packaging/README.packaging.md](./packaging/README.packaging.md)
 2. use `build-release-windows.ps1` for real user-facing releases
 3. keep `desktop/package.json` `build.appId` and `build.productName` stable between versions
+
+If you are moving the source tree to another machine:
+
+1. read [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)
+2. create a source deployment bundle
+3. bootstrap the backend on the target machine
 
 If you are debugging the Electron shell:
 

@@ -1,4 +1,4 @@
-"""Overview: Geometry helpers for regions, bounding boxes, and crop-local coordinates."""
+"""Overview: Geometry helpers for regions, bounding boxes, and coordinate-frame conversion."""
 
 from __future__ import annotations
 
@@ -63,9 +63,12 @@ def compact_regions_for_prompt(regions: list[dict]) -> list[dict]:
 
 def build_region_context(region: dict) -> dict:
     return {
-        "bbox": region["bbox"],
+        "region_bounds_global": region["bbox"],
         "description": region["description"],
-        "coordinate_rule": "Use global SVG coordinates: crop-local x/y plus bbox.x/bbox.y.",
+        "coordinate_rule": (
+            "Use global SVG coordinates. Region bounds and recognized object bboxes are already global; "
+            "do not add region offsets yourself."
+        ),
     }
 
 
@@ -77,9 +80,9 @@ def build_region_recognition_context(region: dict) -> dict:
             "height": int(bbox["height"]),
         },
         "description": region["description"],
-        "coordinate_rule": (
-            "All object bboxes must be crop-local coordinates inside this cropped region. "
-            "Treat the crop top-left as (0, 0) and do not add the region bbox offset."
+        "localization_rule": (
+            "Do not output numeric bboxes during recognition. Use relative_position and extent_hint only; "
+            "a later bbox worker will localize objects in crop-local coordinates."
         ),
     }
 
@@ -162,11 +165,139 @@ def normalize_recognition_bboxes(recognition, *, region: dict):
     return recognition.model_copy(update={"recognized_objects": adjusted_objects})
 
 
+def _bbox_payload(bbox) -> dict | None:
+    if bbox is None:
+        return None
+    return bbox.model_dump(mode="json") if hasattr(bbox, "model_dump") else dict(bbox)
+
+
+def _coerce_box_payload(box: dict, *, width: int | None = None, height: int | None = None) -> dict:
+    x = int(box.get("x", 0))
+    y = int(box.get("y", 0))
+    box_width = max(int(box.get("width", 1)), 1)
+    box_height = max(int(box.get("height", 1)), 1)
+    if width is not None:
+        x = max(0, min(x, max(width - 1, 0)))
+        box_width = max(1, min(box_width, max(width - x, 1)))
+    if height is not None:
+        y = max(0, min(y, max(height - 1, 0)))
+        box_height = max(1, min(box_height, max(height - y, 1)))
+    return {"x": x, "y": y, "width": box_width, "height": box_height}
+
+
+def local_bbox_to_global(bbox: dict, *, region: dict) -> dict:
+    region_bbox = region.get("bbox") or {}
+    local = _coerce_box_payload(bbox)
+    return {
+        "x": int(region_bbox.get("x", 0)) + local["x"],
+        "y": int(region_bbox.get("y", 0)) + local["y"],
+        "width": local["width"],
+        "height": local["height"],
+    }
+
+
+def global_bbox_to_local(bbox: dict, *, region: dict) -> dict:
+    region_bbox = region.get("bbox") or {}
+    local = {
+        "x": int(bbox.get("x", 0)) - int(region_bbox.get("x", 0)),
+        "y": int(bbox.get("y", 0)) - int(region_bbox.get("y", 0)),
+        "width": max(int(bbox.get("width", 1)), 1),
+        "height": max(int(bbox.get("height", 1)), 1),
+    }
+    return _coerce_box_payload(
+        local,
+        width=max(int(region_bbox.get("width", 1)), 1),
+        height=max(int(region_bbox.get("height", 1)), 1),
+    )
+
+
+def _copy_object_with_bbox(obj, bbox_payload: dict):
+    bbox_model = getattr(obj, "bbox", None)
+    if bbox_model is not None and hasattr(bbox_model.__class__, "model_validate"):
+        bbox_value = bbox_model.__class__.model_validate(bbox_payload)
+    else:
+        bbox_value = bbox_payload
+    return obj.model_copy(update={"bbox": bbox_value})
+
+
+def _copy_object_with_bbox_and_space(obj, bbox_payload: dict, bbox_space: str):
+    bbox_model = getattr(obj, "bbox", None)
+    if bbox_model is not None and hasattr(bbox_model.__class__, "model_validate"):
+        bbox_value = bbox_model.__class__.model_validate(bbox_payload)
+    else:
+        bbox_value = bbox_payload
+    return obj.model_copy(update={"bbox": bbox_value, "bbox_space": bbox_space})
+
+
+def recognition_bboxes_to_global(recognition, *, region: dict):
+    adjusted_objects = []
+    changed = False
+    for obj in list(getattr(recognition, "recognized_objects", []) or []):
+        box = _bbox_payload(getattr(obj, "bbox", None))
+        if box is None:
+            adjusted_objects.append(obj)
+            continue
+        global_box = local_bbox_to_global(box, region=region)
+        changed = changed or global_box != box
+        changed = changed or getattr(obj, "bbox_space", None) != "global"
+        adjusted_objects.append(_copy_object_with_bbox_and_space(obj, global_box, "global"))
+    if not changed:
+        return recognition
+    return recognition.model_copy(update={"recognized_objects": adjusted_objects})
+
+
+def recognition_bboxes_to_global_if_local(recognition, *, region: dict):
+    region_bbox = region.get("bbox") or {}
+    crop_width = max(int(region_bbox.get("width", 1)), 1)
+    crop_height = max(int(region_bbox.get("height", 1)), 1)
+    boxes = [
+        box
+        for obj in list(getattr(recognition, "recognized_objects", []) or [])
+        if (box := _bbox_payload(getattr(obj, "bbox", None))) is not None
+    ]
+    if not boxes:
+        return recognition
+    spaces = [getattr(obj, "bbox_space", None) for obj in list(getattr(recognition, "recognized_objects", []) or []) if _bbox_payload(getattr(obj, "bbox", None)) is not None]
+    if spaces and all(space == "global" for space in spaces):
+        return recognition
+    if not all(space == "region_local" for space in spaces):
+        local_count = 0
+        for box in boxes:
+            x = int(box.get("x", 0))
+            y = int(box.get("y", 0))
+            width = max(int(box.get("width", 1)), 1)
+            height = max(int(box.get("height", 1)), 1)
+            if x >= 0 and y >= 0 and x + width <= crop_width and y + height <= crop_height:
+                local_count += 1
+        if local_count < len(boxes):
+            return recognition
+    return recognition_bboxes_to_global(recognition, region=region)
+
+
+def recognition_bboxes_to_crop_local(recognition, *, region: dict):
+    adjusted_objects = []
+    changed = False
+    for obj in list(getattr(recognition, "recognized_objects", []) or []):
+        box = _bbox_payload(getattr(obj, "bbox", None))
+        if box is None:
+            adjusted_objects.append(obj)
+            continue
+        local_box = global_bbox_to_local(box, region=region)
+        changed = changed or local_box != box
+        changed = changed or getattr(obj, "bbox_space", None) != "region_local"
+        adjusted_objects.append(_copy_object_with_bbox_and_space(obj, local_box, "region_local"))
+    if not changed:
+        return recognition
+    return recognition.model_copy(update={"recognized_objects": adjusted_objects})
+
+
 def crop_object_image(
     *,
     region_crop_path: Path,
     obj: ObjectCandidate,
     object_dir: Path,
+    region: dict | None = None,
+    bbox_space: str = "region_local",
 ) -> Path:
     object_crop_path = object_dir / "crop.png"
     if obj.bbox is None:
@@ -175,10 +306,15 @@ def crop_object_image(
 
     with Image.open(region_crop_path) as image:
         image.load()
-        bbox = obj.bbox
-        x = max(0, min(int(bbox.x), image.width - 1 if image.width > 0 else 0))
-        y = max(0, min(int(bbox.y), image.height - 1 if image.height > 0 else 0))
-        width = max(1, min(int(bbox.width), image.width - x))
-        height = max(1, min(int(bbox.height), image.height - y))
+        bbox_payload = obj.bbox.model_dump(mode="json")
+        if bbox_space == "global":
+            if region is None:
+                raise ValueError("region is required when cropping an object with a global bbox.")
+            bbox_payload = global_bbox_to_local(bbox_payload, region=region)
+        bbox = _coerce_box_payload(bbox_payload, width=image.width, height=image.height)
+        x = bbox["x"]
+        y = bbox["y"]
+        width = bbox["width"]
+        height = bbox["height"]
         image.crop((x, y, x + width, y + height)).save(object_crop_path)
     return object_crop_path

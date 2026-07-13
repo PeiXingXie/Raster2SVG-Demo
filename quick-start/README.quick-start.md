@@ -1,13 +1,13 @@
-# Quick Start for Packaging and Deployment
+# Source Deployment Quick Start
 
-This directory is the cross-platform packaging, migration, and deployment entrypoint for the project.
+This directory is the cross-platform source-bundle migration and deployment entrypoint for the project.
 
 ## Use This README When
 
 Use this document when your main goal is:
 
 - move the project to another machine
-- package a deployable source bundle
+- create a deployable source bundle
 - bootstrap the backend on a target machine
 - start the FastAPI service together with the shared frontend
 
@@ -16,9 +16,10 @@ For local development, use [README.developer.md](../README.developer.md).
 
 ## What This README Covers
 
-`quick-start/` is intentionally focused on deployment and migration.
+`quick-start/` is intentionally focused on source-bundle deployment and migration.
 
 It does not try to be the primary development guide.
+It also does not build product-user desktop installers; installer builds live under `packaging/`.
 
 It covers:
 
@@ -35,7 +36,7 @@ The target machine still needs:
 - network access to your model API endpoint
 
 Desktop shell support is included, but the backend remains the primary requirement.
-For day-to-day development, prefer the root startup scripts and the detailed guide in [docs.development.md](/D:/Daily/Schedule/LH/EditableTransf/Demo/docs.development.md:1).
+For day-to-day development, prefer the root startup scripts and the detailed guide in [docs.development.md](../docs.development.md).
 
 ## What This Directory Contains
 
@@ -46,16 +47,16 @@ For day-to-day development, prefer the root startup scripts and the detailed gui
 
 Related desktop scripts live in:
 
-- [desktop/bootstrap.ps1](/D:/Daily/Schedule/LH/EditableTransf/Demo/desktop/bootstrap.ps1:1)
-- [desktop/bootstrap.sh](/D:/Daily/Schedule/LH/EditableTransf/Demo/desktop/bootstrap.sh:1)
-- [desktop/start-desktop.ps1](/D:/Daily/Schedule/LH/EditableTransf/Demo/desktop/start-desktop.ps1:1)
-- [desktop/start-desktop.sh](/D:/Daily/Schedule/LH/EditableTransf/Demo/desktop/start-desktop.sh:1)
+- [desktop/bootstrap.ps1](../desktop/bootstrap.ps1)
+- [desktop/bootstrap.sh](../desktop/bootstrap.sh)
+- [desktop/start-desktop.ps1](../desktop/start-desktop.ps1)
+- [desktop/start-desktop.sh](../desktop/start-desktop.sh)
 
 ## Deployment Flow
 
 Recommended deployment flow:
 
-1. package the project on the source machine
+1. create a source deployment bundle on the source machine
 2. move the package to the target machine
 3. extract it
 4. bootstrap the backend
@@ -63,7 +64,7 @@ Recommended deployment flow:
 6. start the API
 7. optionally start the desktop shell
 
-## Step 1: Create a Deployment Package
+## Step 1: Create a Source Deployment Package
 
 ### Windows
 
@@ -110,7 +111,7 @@ dist/deploy-packages/
 By default the package includes:
 
 - `src/`
-- `desktop/`
+- selected `desktop/` source files and configuration
 - `quick-start/`
 - `pyproject.toml`
 - `README.md`
@@ -130,6 +131,10 @@ By default it does not include:
 - `.env`
 - `artifacts/`
 - `.frontend_runtime_overrides.json`
+- `desktop/node_modules/`
+- local Python virtual environments such as `.venv`, `.venv_test`, and `.venv_package`
+
+The source bundle intentionally excludes generated dependencies. If the target machine needs the Electron desktop shell, run `npm install` under `desktop/` on that machine to recreate `desktop/node_modules/`.
 
 ### Optional Packaging Flags
 
@@ -296,9 +301,11 @@ At minimum, fill or verify:
 
 ```env
 API_KEY=your-real-api-key
-BASE_URL=https://your-real-api-base-url/v1
+BASE_URL=https://your-openai-compatible-endpoint.example/v1
 API_PROVIDER=openai_compatible
 API_FORMAT=openai_chat_completions
+AGENT_MODEL=your-coordinator-model
+SUBAGENT_MODEL=your-worker-model
 APP_HOST=127.0.0.1
 APP_PORT=8120
 ```
@@ -315,6 +322,17 @@ Optional startup interaction setting:
 ```env
 PORT_PROMPT_TIMEOUT_SECONDS=15
 ```
+
+Minimum configuration guide:
+
+| Setting | What To Put |
+| --- | --- |
+| `API_KEY` | Secret key for the model provider |
+| `BASE_URL` | OpenAI-compatible endpoint, usually ending in `/v1` |
+| `API_PROVIDER` | Keep `openai_compatible` unless this project adds another provider adapter |
+| `API_FORMAT` | `openai_chat_completions` for chat-compatible APIs, or `openai_responses` for Responses API support |
+| `AGENT_MODEL` | Main/coordinator model name supported by your endpoint |
+| `SUBAGENT_MODEL` | Worker model name supported by your endpoint; often the same as `AGENT_MODEL` |
 
 ## Step 5: Start the Backend Service
 

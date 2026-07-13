@@ -44,6 +44,7 @@ RUNTIME_OVERRIDE_FIELDS = {
     "agent_name",
     "use_previous_response_id",
     "max_retry",
+    "fusion_max_retry",
     "max_budget",
     "supervisor_memory_enabled",
     "supervisor_memory_persist_enabled",
@@ -75,7 +76,12 @@ def save_runtime_overrides(overrides: dict) -> dict:
 
     normalized = {key: overrides[key] for key in RUNTIME_OVERRIDE_FIELDS if key in overrides}
     RUNTIME_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RUNTIME_OVERRIDE_PATH.write_text(json.dumps(normalized, ensure_ascii=True, indent=2), encoding="utf-8")
+    temp_path = RUNTIME_OVERRIDE_PATH.with_name(f"{RUNTIME_OVERRIDE_PATH.name}.tmp")
+    temp_path.write_text(
+        json.dumps(normalized, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(RUNTIME_OVERRIDE_PATH)
     return normalized
 
 
@@ -97,11 +103,11 @@ class Settings(BaseSettings):
     api_format: str = Field(default="openai_responses", alias="API_FORMAT")
     langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
-    langsmith_project: str = Field(default="raster-to-svg-agent-demo", alias="LANGSMITH_PROJECT")
+    langsmith_project: str = Field(default="shape-studio", alias="LANGSMITH_PROJECT")
 
     agent_model: str = Field(default="gpt-5.4-medium", alias="AGENT_MODEL")
     subagent_model: str = Field(default="gpt-5.4-medium", alias="SUBAGENT_MODEL")
-    agent_name: str = Field(default="raster-svg-coordinator", alias="AGENT_NAME")
+    agent_name: str = Field(default="shape-studio-coordinator", alias="AGENT_NAME")
     use_previous_response_id: bool = Field(default=False, alias="USE_PREVIOUS_RESPONSE_ID")
     max_retries: int = Field(default=2, validation_alias=AliasChoices("MAX_RETRIES", "OPENAI_MAX_RETRIES"))
 
@@ -114,6 +120,7 @@ class Settings(BaseSettings):
     run_artifacts_dir: str = Field(default="artifacts/runs", alias="RUN_ARTIFACTS_DIR")
     default_user_input: str = Field(default="Convert this image into SVG format", alias="DEFAULT_USER_INPUT")
     max_retry: int = Field(default=5, ge=0, alias="MAX_RETRY")
+    fusion_max_retry: int = Field(default=3, ge=0, alias="FUSION_MAX_RETRY")
     max_budget: int = Field(default=80, ge=0, alias="MAX_BUDGET")
     supervisor_memory_enabled: bool = Field(default=False, alias="SUPERVISOR_MEMORY_ENABLED")
     supervisor_memory_persist_enabled: bool = Field(default=True, alias="SUPERVISOR_MEMORY_PERSIST_ENABLED")
@@ -347,6 +354,14 @@ class Settings(BaseSettings):
         if runtime_override is not None:
             return max(0, int(runtime_override))
         return self.max_retry
+
+    def resolved_fusion_max_retry(self, override: int | None = None) -> int:
+        if override is not None:
+            return max(0, int(override))
+        runtime_override = self._runtime_override("fusion_max_retry")
+        if runtime_override is not None:
+            return max(0, int(runtime_override))
+        return self.fusion_max_retry
 
     def resolved_max_budget(self, override: int | None = None) -> int:
         if override is not None:

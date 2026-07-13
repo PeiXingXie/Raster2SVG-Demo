@@ -156,6 +156,102 @@ def _included_elements_from_object(obj: ObjectCandidate | dict) -> list[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
+_OWNED_SYMBOLIC_FIDELITY_TERMS = (
+    "icon",
+    "mark",
+    "badge",
+    "emblem",
+    "logo",
+)
+
+
+def _object_type_from_object(obj: ObjectCandidate | dict) -> str:
+    if isinstance(obj, dict):
+        return str(obj.get("object_type") or "").strip()
+    return str(obj.object_type or "").strip()
+
+
+def _description_from_object(obj: ObjectCandidate | dict) -> str:
+    if isinstance(obj, dict):
+        return str(obj.get("description") or "").strip()
+    return str(obj.description or "").strip()
+
+
+def _raw_fidelity_hints_from_object(obj: ObjectCandidate | dict) -> dict | None:
+    raw = obj.get("fidelity_hints") if isinstance(obj, dict) else getattr(obj, "fidelity_hints", None)
+    if raw is None:
+        return None
+    if hasattr(raw, "model_dump"):
+        return raw.model_dump(mode="json")
+    return raw if isinstance(raw, dict) else None
+
+
+def _contains_symbolic_term(text: str) -> bool:
+    normalized = " ".join(str(text or "").lower().replace("_", " ").replace("-", " ").split())
+    words = set(normalized.split())
+    return any((" " in term and term in normalized) or (term in words) for term in _OWNED_SYMBOLIC_FIDELITY_TERMS)
+
+
+def _goal_from_hint_text(text: str) -> str:
+    cleaned = " ".join(str(text or "").strip().split())
+    if not cleaned:
+        return ""
+    return f"Preserve visible fidelity of: {cleaned}."
+
+
+def _fidelity_hints_from_object(obj: ObjectCandidate | dict) -> dict | None:
+    raw = _raw_fidelity_hints_from_object(obj)
+    raw_goals: list[str] = []
+    verify_required = False
+    if raw is not None:
+        verify_required = bool(raw.get("verify_required"))
+        goals = raw.get("fidelity_goals")
+        if goals is None:
+            goals = raw.get("must_preserve")
+        if isinstance(goals, str):
+            goals = [goals]
+        if isinstance(goals, list):
+            raw_goals = [str(item).strip() for item in goals if str(item).strip()]
+        if raw_goals:
+            return {
+                "verify_required": bool(verify_required),
+                "fidelity_goals": list(dict.fromkeys(raw_goals))[:5],
+            }
+
+    included = _included_elements_from_object(obj)
+    focus = _generation_focus_from_object(obj) if not isinstance(obj, dict) else [
+        item.strip()
+        for item in (obj.get("generation_focus") or [])
+        if isinstance(item, str) and item.strip()
+    ][:3]
+    object_type = _object_type_from_object(obj)
+    if object_type == "icon":
+        verify_required = True
+
+    if not verify_required:
+        symbolic_candidates = [item for item in included if _contains_symbolic_term(item)]
+        if symbolic_candidates:
+            verify_required = True
+            raw_goals.extend(symbolic_candidates[:4])
+
+    if verify_required and not raw_goals:
+        raw_goals = (included or focus)[:5]
+    if verify_required and not raw_goals:
+        description = _description_from_object(obj)
+        if description:
+            raw_goals = [description]
+
+    fidelity_goals = list(
+        dict.fromkeys(goal for goal in (_goal_from_hint_text(item) for item in raw_goals) if goal)
+    )[:5]
+    if not verify_required and not fidelity_goals:
+        return None
+    return {
+        "verify_required": bool(verify_required),
+        "fidelity_goals": fidelity_goals,
+    }
+
+
 def build_recognition_generation_payload(recognition: RegionRecognitionResult) -> dict:
     return {
         "region_id": recognition.region_id,
@@ -181,7 +277,9 @@ def build_recognition_generation_payload(recognition: RegionRecognitionResult) -
                 ),
                 "included_elements": _included_elements_from_object(obj),
                 "generation_focus": _generation_focus_from_object(obj),
+                "fidelity_hints": _fidelity_hints_from_object(obj),
                 "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+                "bbox_space": getattr(obj, "bbox_space", None) if obj.bbox else None,
             }
             for obj in recognition.recognized_objects
         ],
@@ -205,6 +303,7 @@ def build_object_index_payload(recognition: RegionRecognitionResult) -> dict:
                 "object_id": obj.object_id,
                 "object_type": obj.object_type,
                 "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+                "bbox_space": getattr(obj, "bbox_space", None) if obj.bbox else None,
                 "description": _trim_text(
                     obj.description,
                     max_words=CONTEXT_PAYLOAD_WORD_BUDGET,
@@ -214,6 +313,7 @@ def build_object_index_payload(recognition: RegionRecognitionResult) -> dict:
                     target_id=obj.object_id,
                 ),
                 "included_elements": _included_elements_from_object(obj),
+                "fidelity_hints": _fidelity_hints_from_object(obj),
             }
             for obj in recognition.recognized_objects
         ]
@@ -226,6 +326,7 @@ def build_region_review_object_summary(recognition: RegionRecognitionResult) -> 
             "object_id": obj.object_id,
             "object_type": obj.object_type,
             "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+            "bbox_space": getattr(obj, "bbox_space", None) if obj.bbox else None,
             "description": _trim_text(
                 obj.description,
                 max_words=CONTEXT_PAYLOAD_WORD_BUDGET,
@@ -235,6 +336,7 @@ def build_region_review_object_summary(recognition: RegionRecognitionResult) -> 
                 target_id=obj.object_id,
             ),
             "included_elements": _included_elements_from_object(obj),
+            "fidelity_hints": _fidelity_hints_from_object(obj),
         }
         for obj in recognition.recognized_objects
     ]
@@ -254,7 +356,9 @@ def build_object_generation_payload(obj: ObjectCandidate) -> dict:
         ),
         "included_elements": _included_elements_from_object(obj),
         "generation_focus": _generation_focus_from_object(obj),
+        "fidelity_hints": _fidelity_hints_from_object(obj),
         "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+        "bbox_space": getattr(obj, "bbox_space", None) if obj.bbox else None,
     }
     return payload
 
@@ -265,6 +369,7 @@ def build_object_policy_payload(obj: ObjectCandidate | dict) -> dict:
             "object_id": obj.get("object_id", ""),
             "object_type": obj.get("object_type", ""),
             "bbox": obj.get("bbox"),
+            "bbox_space": obj.get("bbox_space") or ("global" if obj.get("bbox") else None),
             "description": _trim_text(
                 obj.get("description"),
                 max_words=CONTEXT_PAYLOAD_WORD_BUDGET,
@@ -274,11 +379,13 @@ def build_object_policy_payload(obj: ObjectCandidate | dict) -> dict:
                 target_id=str(obj.get("object_id", "")),
             ),
             "included_elements": _included_elements_from_object(obj),
+            "fidelity_hints": _fidelity_hints_from_object(obj),
         }
     return {
         "object_id": obj.object_id,
         "object_type": obj.object_type,
         "bbox": obj.bbox.model_dump(mode="json") if obj.bbox else None,
+        "bbox_space": getattr(obj, "bbox_space", None) if obj.bbox else None,
         "description": _trim_text(
             obj.description,
             max_words=CONTEXT_PAYLOAD_WORD_BUDGET,
@@ -288,6 +395,7 @@ def build_object_policy_payload(obj: ObjectCandidate | dict) -> dict:
             target_id=obj.object_id,
         ),
         "included_elements": _included_elements_from_object(obj),
+        "fidelity_hints": _fidelity_hints_from_object(obj),
     }
 
 

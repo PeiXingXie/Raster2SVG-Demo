@@ -16,6 +16,7 @@ from PIL import Image
 from deepagents_template.checklist import final_review_issues
 from deepagents_template.config import get_settings
 from deepagents_template.error_reporting import build_failure_diagnostic_from_exception
+from deepagents_template.geometry import recognition_bboxes_to_global_if_local
 from deepagents_template.memory import ThreadStore
 from deepagents_template.modeling.executor import MultimodalJsonCaller
 from deepagents_template.resume import create_run_state, load_run_state, write_run_state
@@ -81,6 +82,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self.max_retries = settings.resolved_max_retries(request.max_retries)
         self.user_message = settings.resolved_user_input(request.message)
         self.max_retry = settings.resolved_max_retry(request.max_retry)
+        self.fusion_max_retry = settings.resolved_fusion_max_retry(request.fusion_max_retry)
         self.max_budget = settings.resolved_max_budget(request.max_budget)
         self.supervisor_memory_enabled = settings.resolved_supervisor_memory_enabled(
             request.supervisor_memory_enabled
@@ -136,6 +138,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self._file_log_lock = threading.Lock()
         self._file_log_entries: list[dict] = []
         self._overview_lock = threading.Lock()
+        self._trace_context = threading.local()
         self._async_io_lock = threading.Lock()
         self._async_io_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="artifact-writer")
         self._async_io_futures: list[Future] = []
@@ -156,6 +159,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "bbox_issue_concurrency": self.bbox_issue_concurrency,
             "bbox_issue_stagnation_rounds": self.bbox_issue_stagnation_rounds,
             "bbox_global_stagnation_rounds": self.bbox_global_stagnation_rounds,
+            "fusion_max_retry": self.fusion_max_retry,
         }
         for directory in (
             self.root_input_dir,
@@ -190,6 +194,87 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self.workflow_agents = WorkflowAgentSuite(self)
         self.run_state = self._load_or_init_run_state()
         self._restore_runtime_counters_from_state()
+
+    @staticmethod
+    def _normalize_trace_stage(value: object) -> str | None:
+        stage = str(value or "").strip().lower().replace("_", "-")
+        aliases = {
+            "loading-input": "prepare-input",
+            "input": "prepare-input",
+            "prepare": "prepare-input",
+            "layout-detection": "layout",
+            "layout detection": "layout",
+            "initial-generation": "initial-generate",
+            "initial": "initial-generate",
+            "initial-integration": "initial-integrate",
+            "final-integration": "final-integrate",
+            "final": "final-integrate",
+            "region-process-initial": "initial-generate",
+            "region-process-refine": "refine",
+        }
+        stage = aliases.get(stage, stage)
+        if stage in {
+            "prepare-input",
+            "layout",
+            "initial-generate",
+            "initial-integrate",
+            "refine",
+            "final-integrate",
+        }:
+            return stage
+        return None
+
+    @classmethod
+    def _trace_stage_for_event(cls, stage: str | None, payload: dict | None = None) -> str | None:
+        payload = payload or {}
+        explicit_stage = cls._normalize_trace_stage(payload.get("trace_stage"))
+        if explicit_stage:
+            return explicit_stage
+
+        value = str(stage or "").strip().lower()
+        phase = str(payload.get("phase") or "").strip().lower()
+        if value in {"queued", "preparing-context", "loading-input", "running-conversion"}:
+            return "prepare-input"
+        if value == "layout detection" or "layout" in value:
+            return "layout"
+        if value in {"planning", "region-cropping"}:
+            return "initial-generate"
+        if value == "region-process":
+            return "refine" if phase in {"refine", "repair", "region-object"} else "initial-generate"
+        if value == "object-process":
+            return "refine"
+        if value == "integrate-process":
+            if phase == "initial":
+                return "initial-integrate"
+            if phase in {"final", "region-object"}:
+                return "final-integrate" if phase == "final" else "refine"
+        if value in {"summarizing-result", "completed", "paused-budget", "failed"}:
+            return "final-integrate"
+        return None
+
+    def _current_trace_stage(self) -> str | None:
+        return self._normalize_trace_stage(getattr(self._trace_context, "stage", None))
+
+    def _set_current_trace_stage(self, trace_stage: str | None) -> str | None:
+        previous = getattr(self._trace_context, "stage", None)
+        if trace_stage is None:
+            if hasattr(self._trace_context, "stage"):
+                delattr(self._trace_context, "stage")
+        else:
+            self._trace_context.stage = trace_stage
+        return previous
+
+    def _resolve_trace_stage(
+        self,
+        stage: str | None,
+        payload: dict | None = None,
+        explicit: str | None = None,
+    ) -> str | None:
+        return (
+            self._normalize_trace_stage(explicit)
+            or self._trace_stage_for_event(stage, payload)
+            or self._current_trace_stage()
+        )
 
     def _load_or_init_run_state(self) -> RunState:
         existing = load_run_state(self.artifact_dir)
@@ -331,7 +416,10 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 payload = self._load_json_payload(initial_result_path)
                 payload["crop_path"] = region_dir / "crop.png"
                 payload["region_dir"] = region_dir
-                payload["recognition_model"] = RegionRecognitionResult.model_validate(payload["recognition"])
+                recognition_model = RegionRecognitionResult.model_validate(payload["recognition"])
+                recognition_model = recognition_bboxes_to_global_if_local(recognition_model, region=payload["region"])
+                payload["recognition_model"] = recognition_model
+                payload["recognition"] = recognition_model.model_dump(mode="json")
                 payload["region_svg_generation_model"] = RegionSvgGenerationResult.model_validate(
                     payload["region_svg_generation"]
                 )
@@ -339,6 +427,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 continue
 
             recognition = self._load_json_payload(region_dir / "recognition.json")
+            recognition_model = RegionRecognitionResult.model_validate(recognition)
+            recognition_model = recognition_bboxes_to_global_if_local(recognition_model, region=region)
+            recognition = recognition_model.model_dump(mode="json")
             region_svg_generation = self._load_json_payload(region_dir / "region_svg_gen.json")
             initial_svg_elements = self._load_text_payload(region_dir / "region_svg_gen.svgfrag")
             generation = self._load_json_payload(region_dir / "generation.json")
@@ -350,7 +441,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     "crop_path": region_dir / "crop.png",
                     "region_dir": region_dir,
                     "task": task,
-                    "recognition_model": RegionRecognitionResult.model_validate(recognition),
+                    "recognition_model": recognition_model,
                     "region_svg_generation_model": RegionSvgGenerationResult.model_validate(region_svg_generation),
                     "recognition": recognition,
                     "region_svg_generation": region_svg_generation,
@@ -383,9 +474,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             self._write_json(self.root_input_dir / "request.json", self.request.model_dump(mode="json"))
             if self.run_state.checkpoints.get("input_prepared") and copied_input_path.is_file():
                 input_metadata = self._load_json_payload(self.root_input_dir / "input_metadata.json")
-                self._push_event("loading-input", "Resuming from prepared input", f"Reusing copied input image {copied_input_path}.")
+                self._push_event("loading-input", "Resuming from prepared input", f"Reusing copied input image {copied_input_path}.", trace_stage="prepare-input")
             else:
-                self._push_event("loading-input", "Loading input image", f"Reading raster image from {image_path}.")
+                self._push_event("loading-input", "Loading input image", f"Reading raster image from {image_path}.", trace_stage="prepare-input")
                 inspection = inspect_local_raster_asset(str(image_path))
                 shutil.copy2(image_path, copied_input_path)
                 with Image.open(copied_input_path) as prepared_image:
@@ -412,7 +503,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     checklist = self._load_json_payload(self.root_intermediate_dir / "checklist.json")
                     regions = self._load_json_payload(self.root_intermediate_dir / "regions.json")
                     svg_template = self._load_text_payload(self.root_intermediate_dir / "template.svg")
-                    self._push_event("layout detection", "Resuming from completed layout", "Reusing checklist, region split, and SVG template from artifacts.")
+                    self._push_event("layout detection", "Resuming from completed layout", "Reusing checklist, region split, and SVG template from artifacts.", trace_stage="layout")
                 else:
                     (
                         _layout_result,
@@ -440,7 +531,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                         }
                         for region in regions
                     ]
-                    self._push_event("region-cropping", "Resuming from cropped regions", f"Reusing {len(region_work_items)} existing region crops.")
+                    self._push_event("region-cropping", "Resuming from cropped regions", f"Reusing {len(region_work_items)} existing region crops.", trace_stage="initial-generate")
                 else:
                     region_work_items = self._timed_node_call(
                         "region-cropping",
@@ -454,7 +545,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 self._mark_stage_started("region-process-refine" if self.workflow_mode != "initial_only" else "region-process-initial")
                 if self.run_state.checkpoints.get("initial_regions_completed"):
                     initial_region_results = self._load_initial_region_results_from_artifacts()
-                    self._push_event("region-process", "Resuming from initial region outputs", f"Reusing {len(initial_region_results)} initial region results.")
+                    self._push_event("region-process", "Resuming from initial region outputs", f"Reusing {len(initial_region_results)} initial region results.", trace_stage="initial-generate")
                 else:
                     initial_region_results = self._timed_node_call(
                         "region-process",
@@ -473,7 +564,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     initial_review = FinalReviewResult.model_validate(
                         self._load_json_payload(self.root_intermediate_dir / "initial_review.json")
                     )
-                    self._push_event("integrate-process", "Resuming from initial integrated SVG", "Reusing the existing initial SVG and review artifacts.")
+                    self._push_event("integrate-process", "Resuming from initial integrated SVG", "Reusing the existing initial SVG and review artifacts.", trace_stage="initial-integrate")
                 else:
                     _initial_svg, initial_review, _initial_review_raw = self._timed_node_call(
                         "integrate-process",
@@ -487,6 +578,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                         review_raw_path=self.root_intermediate_dir / "initial_review_raw.txt",
                         review_json_path=self.root_intermediate_dir / "initial_review.json",
                         detail="Combining the first-pass region SVG fragments into the initial full SVG.",
+                        trace_phase="initial",
                     )
                     self._mark_checkpoint("initial_svg_completed", "initial-integration")
 
@@ -503,7 +595,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 self._mark_stage_started("region-process-refine")
                 if self.run_state.checkpoints.get("refinement_completed") and (self.root_intermediate_dir / "region_results.json").is_file():
                     region_results = self._load_final_region_results_from_artifacts()
-                    self._push_event("region-process", "Resuming from refined region outputs", f"Reusing {len(region_results)} completed region refinement results.")
+                    self._push_event("region-process", "Resuming from refined region outputs", f"Reusing {len(region_results)} completed region refinement results.", trace_stage="refine")
                 else:
                     region_results = self._timed_node_call(
                         "region-process",
@@ -531,7 +623,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 final_review = FinalReviewResult.model_validate(
                     self._load_json_payload(self.root_output_dir / "final_review.json")
                 )
-                self._push_event("integrate-process", "Resuming from final integrated SVG", "Reusing the existing final SVG and review artifacts.")
+                self._push_event("integrate-process", "Resuming from final integrated SVG", "Reusing the existing final SVG and review artifacts.", trace_stage="final-integrate")
             else:
                 merged_svg, final_review, _final_review_raw = self._timed_node_call(
                     "integrate-process",
@@ -545,6 +637,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     review_raw_path=self.root_output_dir / "final_review_raw.txt",
                     review_json_path=self.root_output_dir / "final_review.json",
                     detail="Combining the latest region SVG fragments into the final SVG.",
+                    trace_phase="final",
                 )
                 self._mark_checkpoint("final_svg_completed", "final-integration")
 
@@ -594,6 +687,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "api_provider": self.api_provider,
             "api_format": self.api_format,
             "max_retry": self.max_retry,
+            "fusion_max_retry": self.fusion_max_retry,
             "max_budget": self.max_budget,
             "api_calls_used": self._model_call_count,
             "supervisor_memory_enabled": self.supervisor_memory_enabled,
@@ -623,9 +717,12 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         **kwargs,
     ):
         started_at = time.perf_counter()
+        trace_stage = self._trace_stage_for_event(node_name, {"phase": phase})
+        previous_trace_stage = self._set_current_trace_stage(trace_stage)
         try:
             return func(**kwargs)
         finally:
+            self._set_current_trace_stage(previous_trace_stage)
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             self._record_node_timing(node_name, phase=phase, elapsed_ms=elapsed_ms)
 
@@ -957,6 +1054,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             self._persist_runtime_logs(rescan=False)
 
     def _record_model_request(self, payload: dict) -> int:
+        trace_stage = self._normalize_trace_stage(payload.get("trace_stage")) or self._current_trace_stage()
+        if trace_stage:
+            payload = {**payload, "trace_stage": trace_stage}
         with self._model_call_lock:
             if self._model_call_count >= self.max_budget:
                 raise BudgetExceededError(
@@ -1008,9 +1108,13 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         status: str | None = "running",
         worker_statuses: list[dict] | None = None,
         level: str = "info",
+        trace_stage: str | None = None,
     ) -> None:
         worker_snapshot = worker_statuses if worker_statuses is not None else self._worker_status_snapshot()
         enriched_payload = dict(payload or {})
+        resolved_trace_stage = self._resolve_trace_stage(stage, enriched_payload, trace_stage)
+        if resolved_trace_stage:
+            enriched_payload["trace_stage"] = resolved_trace_stage
         enriched_payload["parallel_scheduler"] = self._parallel_scheduler_snapshot()
         if worker_snapshot:
             enriched_payload["worker_statuses"] = worker_snapshot
@@ -1044,6 +1148,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             }
 
     def _record_model_response(self, overview: dict) -> None:
+        trace_stage = self._normalize_trace_stage(overview.get("trace_stage")) or self._current_trace_stage()
+        if trace_stage:
+            overview = {**overview, "trace_stage": trace_stage}
         call_index = overview.get("call_index")
         response_model = overview.get("response_model", "model")
         raw_text = overview.get("raw_text")
@@ -1078,9 +1185,13 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             detail,
             payload=event_overview,
             status="running",
+            trace_stage=trace_stage,
         )
 
     def _record_model_warning(self, overview: dict) -> None:
+        trace_stage = self._normalize_trace_stage(overview.get("trace_stage")) or self._current_trace_stage()
+        if trace_stage:
+            overview = {**overview, "trace_stage": trace_stage}
         call_index = overview.get("call_index")
         response_model = overview.get("response_model", "model")
         raw_text = overview.get("raw_text")
@@ -1114,9 +1225,13 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             payload=event_overview,
             status="running",
             level="warning",
+            trace_stage=trace_stage,
         )
 
     def _record_context_payload_warning(self, overview: dict) -> None:
+        trace_stage = self._normalize_trace_stage(overview.get("trace_stage")) or self._current_trace_stage()
+        if trace_stage:
+            overview = {**overview, "trace_stage": trace_stage}
         if overview.get("budget_kind") == "item_count":
             detail = (
                 f"{overview.get('builder')} preserved {overview.get('actual_item_count')} items in "
@@ -1141,6 +1256,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             payload=overview,
             status="running",
             level="warning",
+            trace_stage=trace_stage,
         )
 
     def _build_report_error_summary(self) -> dict:

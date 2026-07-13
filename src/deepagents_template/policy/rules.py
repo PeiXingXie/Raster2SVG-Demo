@@ -682,9 +682,45 @@ def _fusion_issue_entries(final_review: dict[str, Any]) -> list[dict[str, str]]:
         {
             "issue_id": f"fusion:{fusion_review_issue_id(issue, issue_kind=issue.get('issue_kind'))}",
             "severity": str(issue.get("severity", "medium")),
+            "issue_kind": str(issue.get("issue_kind") or "fusion"),
+            "criterion": str(issue.get("criterion") or ""),
+            "description": str(issue.get("description") or ""),
         }
         for issue in final_review_spatial_logical_issues(final_review)
     ]
+
+
+def _fusion_entry_text(entry: dict[str, Any]) -> str:
+    return " ".join(
+        str(entry.get(key) or "")
+        for key in ("issue_id", "issue_kind", "criterion", "description")
+    ).lower()
+
+
+def _is_actionable_fusion_entry(entry: dict[str, Any]) -> bool:
+    severity = str(entry.get("severity") or "medium")
+    if severity == "low":
+        return False
+    text = _fusion_entry_text(entry)
+    non_actionable_tokens = (
+        "cosmetic",
+        "polish",
+        "tiny",
+        "minor",
+        "slight",
+        "subtle",
+        "ambiguous",
+        "unlikely",
+        "purely local",
+        "ordinary single-region",
+        "single-region imperfection",
+        "not merge-time",
+        "not merge related",
+        "not boundary",
+    )
+    if severity != "high" and any(token in text for token in non_actionable_tokens):
+        return False
+    return True
 
 
 def _assessment_consistency_rules(
@@ -895,7 +931,8 @@ def apply_fusion_combined_policy_rules(
     review_payload = _clean_final_review(combined.review.model_dump(mode="json"))
     review = FinalReviewResult.model_validate(review_payload)
     rules: list[dict[str, Any]] = []
-    current_issue_ids = {entry["issue_id"] for entry in _fusion_issue_entries(review_payload)}
+    issue_entries = _fusion_issue_entries(review_payload)
+    current_issue_ids = {entry["issue_id"] for entry in issue_entries}
     rules.extend(
         _assessment_consistency_rules(
             assessments=combined.prior_issue_assessment,
@@ -903,24 +940,48 @@ def apply_fusion_combined_policy_rules(
             review_scope="fusion-combined",
         )
     )
-    severities = [entry["severity"] for entry in _fusion_issue_entries(review_payload)]
-    only_minor = _is_minor_residuals(severities)
+    severities = [entry["severity"] for entry in issue_entries]
+    all_low_residuals = bool(severities) and all(level == "low" for level in severities)
+    actionable_entries = [entry for entry in issue_entries if _is_actionable_fusion_entry(entry)]
     accept_current = combined.termination.acceptance_tendency == "accept"
     continue_refinement = combined.termination.stop_tendency == "continue"
-    has_issues = bool(final_review_spatial_logical_issues(review_payload))
+    final_outcome = "continue_refinement"
+    final_reason = _truncate_words(combined.termination.acceptance_rationale)
+    has_issues = bool(issue_entries)
     if not has_issues:
         accept_current = True
         continue_refinement = False
+        final_outcome = "accepted_clean"
+        final_reason = "fusion review passed"
         rules.append(_rule("fusion-combined.clean-review-terminal", changed=True, reason="Stop when no spatial/logical fusion issues remain."))
-    elif only_minor:
+    elif all_low_residuals:
         accept_current = True
         continue_refinement = False
-        rules.append(_rule("fusion-combined.accept-minor-residuals", changed=True, reason="Allow minor low-severity residual fusion issues to pass."))
+        final_outcome = "accepted_minor_residuals"
+        final_reason = "accepted with only low-severity residual fusion issues"
+        rules.append(_rule("fusion-combined.accept-minor-residuals", changed=True, reason="Allow low-severity residual fusion issues to pass."))
     elif retry_exhausted:
+        accept_current = False
         continue_refinement = False
+        final_outcome = "stopped_with_residual_issues"
+        final_reason = "stopped with residual fusion issues after fusion retry limit"
         rules.append(_rule("fusion-combined.stop-when-retry-exhausted", changed=True, reason="Stop when additional fusion repair is no longer allowed."))
+    elif not actionable_entries:
+        accept_current = False
+        continue_refinement = False
+        final_outcome = "stopped_with_residual_issues"
+        final_reason = "stopped with residual fusion issues that are not actionable for merge-time repair"
+        rules.append(_rule("fusion-combined.stop-without-actionable-repair", changed=True, reason="Stop when residual fusion issues are not actionable for conservative merge-time repair."))
     else:
         accept_current = False
+        continue_refinement = True
+        final_outcome = "continue_refinement"
+        final_reason = _truncate_words(
+            combined.termination.stop_rationale
+            or combined.repair_plan.route_rationale
+            or combined.termination.acceptance_rationale
+        )
+        rules.append(_rule("fusion-combined.continue-actionable-residuals", changed=True, reason="Continue while actionable medium/high fusion issues remain and retry capacity is available."))
 
     final_strategy_label = None
     final_strategy_rationale = None
@@ -942,9 +1003,8 @@ def apply_fusion_combined_policy_rules(
         final_strategy_rationale=final_strategy_rationale,
         accept_current_result=accept_current,
         continue_refinement=continue_refinement,
-        final_reason=_truncate_words(
-            combined.termination.stop_rationale if not continue_refinement else combined.termination.acceptance_rationale
-        ),
+        final_outcome=final_outcome,
+        final_reason=final_reason,
         applied_rules=[item["rule_id"] for item in rules if item.get("changed")],
     )
     return decision, rules
