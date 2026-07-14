@@ -20,7 +20,7 @@ from deepagents_template.schemas import (
     ObjectCandidate,
     RegionRecognitionResult,
 )
-from deepagents_template.utils.svg_rendering import write_svg_review_artifacts, wrap_svg_fragment
+from deepagents_template.utils.svg_rendering import SvgPreviewRenderError, write_svg_review_artifacts, wrap_svg_fragment
 
 
 class _DebugPipelineContext:
@@ -66,6 +66,40 @@ class _DebugPipelineContext:
 
     def _record_written_file(self, path: Path, *, kind: str) -> None:  # noqa: ARG002
         return
+
+    def _require_rendered_preview(
+        self,
+        *,
+        scope: str,
+        svg_path: Path,
+        png_path: Path,
+        render_result,
+    ) -> Path:
+        if render_result.ok and render_result.png_path is not None:
+            return render_result.png_path
+        error_path = png_path.with_suffix(".render_error.txt")
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        error_path.write_text(
+            "\n".join(
+                [
+                    f"scope: {scope}",
+                    f"svg_path: {svg_path}",
+                    f"png_path: {png_path}",
+                    f"renderer: {render_result.renderer or '-'}",
+                    f"error: {render_result.error or '-'}",
+                    "stderr:",
+                    render_result.stderr or "-",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        raise SvgPreviewRenderError(
+            scope=scope,
+            svg_path=svg_path,
+            png_path=png_path,
+            error_path=error_path,
+            render_result=render_result,
+        )
 
 
 class DebugReviewService:
@@ -122,7 +156,13 @@ class DebugReviewService:
                 max(int(region["bbox"]["height"]), 1),
             ),
         )
-        _, rendered_svg_path = write_svg_review_artifacts(svg_text=wrapped_svg, svg_path=svg_path, png_path=png_path)
+        _, _, render_result = write_svg_review_artifacts(svg_text=wrapped_svg, svg_path=svg_path, png_path=png_path)
+        rendered_svg_path = pipeline._require_rendered_preview(
+            scope=f"debug-region:{payload.region_id}",
+            svg_path=svg_path,
+            png_path=png_path,
+            render_result=render_result,
+        )
         review, raw_text = DebugRegionReviewWorkerAgent(pipeline).run(
             crop_path=crop_path,
             region=region,
@@ -185,7 +225,13 @@ class DebugReviewService:
                 max(int(obj.bbox.height if obj.bbox else 1), 1),
             ),
         )
-        _, rendered_svg_path = write_svg_review_artifacts(svg_text=wrapped_svg, svg_path=svg_path, png_path=png_path)
+        _, _, render_result = write_svg_review_artifacts(svg_text=wrapped_svg, svg_path=svg_path, png_path=png_path)
+        rendered_svg_path = pipeline._require_rendered_preview(
+            scope=f"debug-object:{payload.object_id}",
+            svg_path=svg_path,
+            png_path=png_path,
+            render_result=render_result,
+        )
         failed_items = None
         object_history_path = object_dir / "object_history.json"
         if object_history_path.is_file():
@@ -240,7 +286,13 @@ class DebugReviewService:
         review_assets_dir.mkdir(parents=True, exist_ok=True)
         svg_path = review_assets_dir / "merged-final-debug-review.svg"
         png_path = review_assets_dir / "merged-final-debug-review.png"
-        _, rendered_svg_path = write_svg_review_artifacts(svg_text=merged_svg, svg_path=svg_path, png_path=png_path)
+        _, _, render_result = write_svg_review_artifacts(svg_text=merged_svg, svg_path=svg_path, png_path=png_path)
+        rendered_svg_path = pipeline._require_rendered_preview(
+            scope="debug-fusion",
+            svg_path=svg_path,
+            png_path=png_path,
+            render_result=render_result,
+        )
         review, raw_text = DebugFinalReviewWorkerAgent(pipeline).run(
             copied_input_path=source_image_path,
             checklist=checklist,

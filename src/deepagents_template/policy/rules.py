@@ -122,7 +122,7 @@ REGION_REVIEW_ISSUES_SOFT_LIMIT = 8
 REGION_REVIEW_FIDELITY_VERIFICATIONS_SOFT_LIMIT = 8
 REGION_REVIEW_CRITERION_WORD_LIMIT = 12
 REGION_REVIEW_REASON_WORD_LIMIT = 24
-REGION_REVIEW_FIDELITY_RESULT_WORD_LIMIT = 23
+REGION_REVIEW_FIDELITY_REASON_WORD_LIMIT = 40
 REGION_REVIEW_PASSED_ITEM_WORD_LIMIT = 8
 FINAL_REVIEW_ISSUES_SOFT_LIMIT = 8
 FINAL_REVIEW_DESCRIPTION_WORD_LIMIT = 24
@@ -214,11 +214,11 @@ def _clean_region_review(review: RegionReviewResult) -> RegionReviewResult:
         )
     for index, item in enumerate(review.fidelity_verifications):
         check_word_budget(
-            item.result,
-            max_words=REGION_REVIEW_FIDELITY_RESULT_WORD_LIMIT,
-            max_chars=140,
+            item.reason,
+            max_words=REGION_REVIEW_FIDELITY_REASON_WORD_LIMIT,
+            max_chars=220,
             builder="clean_region_review",
-            field=f"fidelity_verifications[{index}].result",
+            field=f"fidelity_verifications[{index}].reason",
             scope="region",
             target_id=review.region_id,
         )

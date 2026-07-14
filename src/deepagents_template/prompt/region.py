@@ -55,7 +55,11 @@ def build_region_recognition_prompts(
         - Prioritize the most identity-critical goals first, because downstream payloads keep at most 5 goals.
         - fidelity_hints.fidelity_goals should be goals, not just a part list.
         - Each fidelity goal should stay under 18 words and name a concrete visible feature plus the preservation intent.
-        - Each fidelity goal should state what visual form aspect to preserve: silhouette/contour, internal marks/strokes, relative layout inside the owning object, z-order/layering, visual weight, local style, or avoiding generic replacement.
+        - Each fidelity goal should state what local visual form aspect to preserve: silhouette/contour, internal marks/strokes, relative layout inside the owning object, z-order/layering, visual weight, local style, or avoiding generic replacement.
+        - Object fidelity goals must be locally checkable inside that object's own bbox or owned SVG group.
+        - Do not put sibling-object spacing, content-stack alignment, cross-object scale balance, or region padding into any object's fidelity_hints.
+        - For container objects, fidelity_hints may describe the container's own border, fill, contour, corner shape, local decoration, or owned symbolic details only.
+        - For text objects, fidelity_hints may describe local text content, readability, typographic weight, or owned symbolic details only.
         - For icon/symbolic-mark/badge details owned by a non-icon object, keep them in the owning object and describe their fidelity goals there. Do not invent part types.
         - recognized_objects must be a list of object records.
         - Use the applicable checklist criteria as high-level guidance only.

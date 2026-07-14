@@ -33,6 +33,7 @@ export const appState = {
   desktopHistorySort: "updated_desc",
   deletedRunArtifactDirs: new Set(),
   deletedRunIds: new Set(),
+  dismissedFailureDialogs: new Set(),
   desktopProcessGuideStep: null,
   runtimeOverrides: null,
   manualAdjustmentBaseRunId: null,
@@ -41,6 +42,8 @@ export const appState = {
   manualConfirmedTarget: null,
   manualConfirmedReferenceSelection: null,
   manualCustomReferenceConfirmed: false,
+  manualReferenceAutoOpenedForTarget: false,
+  manualReferenceMode: "default",
   manualReferenceUploads: [],
   manualReferenceSelectionMode: "select",
   manualReferenceSelectionShape: null,
@@ -89,6 +92,8 @@ export function resetUiSelections() {
   appState.manualConfirmedTarget = null;
   appState.manualConfirmedReferenceSelection = null;
   appState.manualCustomReferenceConfirmed = false;
+  appState.manualReferenceAutoOpenedForTarget = false;
+  appState.manualReferenceMode = "default";
   appState.manualReferenceSelectionMode = "select";
   appState.manualReferenceSelectionShape = null;
   appState.manualReferenceUploads = [];

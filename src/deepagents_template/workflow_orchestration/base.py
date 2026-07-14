@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deepagents_template.schemas import SupervisorDecisionMemory, SupervisorIssueMemory
-from deepagents_template.utils.svg_rendering import wrap_svg_fragment, write_svg_review_artifacts
+from deepagents_template.utils.svg_rendering import (
+    SvgPreviewRenderError,
+    SvgRenderResult,
+    wrap_svg_fragment,
+    write_svg_review_artifacts,
+)
 
 if TYPE_CHECKING:
     from deepagents_template.conversion import RasterToSvgPipeline
@@ -53,6 +58,73 @@ class BaseWorkflowAgent:
         if path.is_file():
             self.pipeline._record_written_file(path, kind=kind)
 
+    def _record_svg_render_failure(
+        self,
+        *,
+        svg_path: Path,
+        png_path: Path,
+        render_result: SvgRenderResult,
+        scope: str,
+    ) -> Path:
+        error_path = png_path.with_suffix(".render_error.txt")
+        detail = "\n".join(
+            part
+            for part in [
+                f"scope: {scope}",
+                f"svg_path: {svg_path}",
+                f"png_path: {png_path}",
+                f"renderer: {render_result.renderer or '-'}",
+                f"error: {render_result.error or '-'}",
+                "stderr:",
+                render_result.stderr or "-",
+            ]
+            if part is not None
+        )
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        error_path.write_text(detail, encoding="utf-8")
+        self._record_review_asset(error_path, kind="txt")
+        push_event = getattr(self.pipeline, "_push_event", None)
+        if callable(push_event):
+            push_event(
+                "svg-render",
+                "SVG preview render failed",
+                f"Could not render SVG preview for {scope}; stopping before review without rendered image evidence.",
+                payload={
+                    "scope": scope,
+                    "svg_path": str(svg_path),
+                    "png_path": str(png_path),
+                    "error_path": str(error_path),
+                    "renderer": render_result.renderer,
+                    "error": render_result.error,
+                    "stderr": render_result.stderr,
+                },
+                status="running",
+                level="error",
+            )
+        return error_path
+
+    def _raise_svg_render_failure(
+        self,
+        *,
+        svg_path: Path,
+        png_path: Path,
+        render_result: SvgRenderResult,
+        scope: str,
+    ) -> None:
+        error_path = self._record_svg_render_failure(
+            svg_path=svg_path,
+            png_path=png_path,
+            render_result=render_result,
+            scope=scope,
+        )
+        raise SvgPreviewRenderError(
+            scope=scope,
+            svg_path=svg_path,
+            png_path=png_path,
+            error_path=error_path,
+            render_result=render_result,
+        )
+
     def _write_svg_prompt_attachment(
         self,
         *,
@@ -84,7 +156,7 @@ class BaseWorkflowAgent:
                 max(int(bbox.get("height", 1)), 1),
             ),
         )
-        written_svg, written_png = write_svg_review_artifacts(
+        written_svg, written_png, render_result = write_svg_review_artifacts(
             svg_text=wrapped_svg,
             svg_path=svg_path,
             png_path=png_path,
@@ -92,6 +164,13 @@ class BaseWorkflowAgent:
         self._record_review_asset(written_svg, kind="svg")
         if written_png is not None:
             self._record_review_asset(written_png, kind="png")
+        else:
+            self._raise_svg_render_failure(
+                svg_path=written_svg,
+                png_path=png_path,
+                render_result=render_result,
+                scope=f"region:{region.get('region_id', '')}",
+            )
         return written_svg, written_png
 
     def _write_object_review_assets(
@@ -111,7 +190,7 @@ class BaseWorkflowAgent:
             max(int(object_bbox.get("height", 1)), 1),
         )
         wrapped_svg = wrap_svg_fragment(svg_fragment, view_box=view_box)
-        written_svg, written_png = write_svg_review_artifacts(
+        written_svg, written_png, render_result = write_svg_review_artifacts(
             svg_text=wrapped_svg,
             svg_path=svg_path,
             png_path=png_path,
@@ -119,6 +198,13 @@ class BaseWorkflowAgent:
         self._record_review_asset(written_svg, kind="svg")
         if written_png is not None:
             self._record_review_asset(written_png, kind="png")
+        else:
+            self._raise_svg_render_failure(
+                svg_path=written_svg,
+                png_path=png_path,
+                render_result=render_result,
+                scope=f"object:{obj.get('object_id', '')}",
+            )
         return written_svg, written_png
 
     def _write_full_svg_review_assets(
@@ -128,7 +214,7 @@ class BaseWorkflowAgent:
         svg_path: Path,
         png_path: Path,
     ) -> tuple[Path, Path | None]:
-        written_svg, written_png = write_svg_review_artifacts(
+        written_svg, written_png, render_result = write_svg_review_artifacts(
             svg_text=svg_text,
             svg_path=svg_path,
             png_path=png_path,
@@ -136,6 +222,13 @@ class BaseWorkflowAgent:
         self._record_review_asset(written_svg, kind="svg")
         if written_png is not None:
             self._record_review_asset(written_png, kind="png")
+        else:
+            self._raise_svg_render_failure(
+                svg_path=written_svg,
+                png_path=png_path,
+                render_result=render_result,
+                scope="full-svg",
+            )
         return written_svg, written_png
 
     @staticmethod

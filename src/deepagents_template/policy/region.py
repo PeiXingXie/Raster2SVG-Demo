@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from deepagents_template.prompt import build_region_combined_policy_prompts
 from deepagents_template.prompt.supervisor import build_required_fidelity_checks
-from deepagents_template.schemas import RegionPolicyDecision, RegionSupervisorMemory
+from deepagents_template.schemas import RegionCombinedPolicyModelResult, RegionPolicyDecision, RegionSupervisorMemory
 
 from .failures import fail_policy_evaluation
 from .rules import (
@@ -21,6 +21,42 @@ if TYPE_CHECKING:
     from deepagents_template.conversion import RasterToSvgPipeline
     from deepagents_template.workflow_orchestration.workers import RegionCombinedPolicyModelWorker
 
+
+FIDELITY_CHECK_KEYS = ("vf", "is", "op", "ls", "si")
+FIDELITY_AXIS_ISSUE_FAMILIES = {
+    "vf": {"shape_fidelity"},
+    "is": {"internal_structure"},
+    "op": {"internal_structure"},
+    "ls": {"style_appearance"},
+    "si": {"internal_structure", "content_accuracy"},
+}
+FIDELITY_GENERIC_REASONS = {
+    "pass",
+    "ok",
+    "looks good",
+    "looks correct",
+    "recognizable",
+    "same category",
+    "semantically faithful",
+}
+FIDELITY_FAILURE_TERMS = (
+    "mismatch",
+    "mismatches",
+    "differ",
+    "differs",
+    "different",
+    "does not match",
+    "not match",
+    "missing",
+    "wrong",
+    "fails",
+    "failed",
+    "uncertain",
+    "unclear",
+    "unlike",
+    "generic substitution",
+    "generic replacement",
+)
 
 class FidelityVerificationValidationError(ValueError):
     """Recoverable contract error for required fidelity verification output."""
@@ -57,12 +93,11 @@ class RegionPolicyEngine:
             return
 
         verifications = list(getattr(proposed.review, "fidelity_verifications", []) or [])
-        by_object: dict[str, list[str]] = {}
+        by_object: dict[str, list[Any]] = {}
         for item in verifications:
             object_id = str(getattr(item, "object_id", "") or "").strip()
-            result = str(getattr(item, "result", "") or "").strip()
             if object_id:
-                by_object.setdefault(object_id, []).append(result)
+                by_object.setdefault(object_id, []).append(item)
 
         missing = [object_id for object_id in required_ids if object_id not in by_object]
         duplicates = [object_id for object_id, results in by_object.items() if object_id in required_ids and len(results) > 1]
@@ -77,47 +112,127 @@ class RegionPolicyEngine:
                 duplicates,
             )
 
-        generic_results = {"pass", "ok", "looks good", "looks correct", "recognizable", "same category", "semantically faithful"}
+        issue_families_by_object: dict[str, set[str]] = {}
+        for issue in proposed.review.object_issues:
+            issue_families_by_object.setdefault(str(issue.object_id).strip(), set()).add(str(issue.issue_family))
+
         for object_id in required_ids:
-            result = by_object[object_id][0]
-            normalized = " ".join(result.lower().split())
-            if not normalized or normalized in generic_results or len(normalized.split()) < 4:
+            verification = by_object[object_id][0]
+            reason = str(getattr(verification, "reason", "") or "").strip()
+            normalized = " ".join(reason.lower().split())
+            if not normalized or normalized in FIDELITY_GENERIC_REASONS or len(normalized.split()) < 4:
                 raise FidelityVerificationValidationError(
-                    f"RegionCombinedPolicyModelResult has generic fidelity verification for: {object_id}",
+                    f"RegionCombinedPolicyModelResult has generic fidelity verification reason for: {object_id}",
+                    [object_id],
+                )
+            checks = getattr(verification, "checks", None)
+            if not isinstance(checks, dict) or set(checks) != set(FIDELITY_CHECK_KEYS):
+                raise FidelityVerificationValidationError(
+                    f"RegionCombinedPolicyModelResult has invalid fidelity check keys for: {object_id}",
+                    [object_id],
+                )
+            invalid_values = [
+                key
+                for key, value in checks.items()
+                if str(value).strip().upper() not in {"Y", "N"}
+            ]
+            if invalid_values:
+                raise FidelityVerificationValidationError(
+                    f"RegionCombinedPolicyModelResult has invalid fidelity check values for: {object_id}",
+                    [object_id],
+                )
+            failed_axes = [
+                key
+                for key in FIDELITY_CHECK_KEYS
+                if str(checks.get(key)).strip().upper() == "N"
+            ]
+            if failed_axes:
+                issue_families = issue_families_by_object.get(object_id, set())
+                allowed_families = set().union(
+                    *(FIDELITY_AXIS_ISSUE_FAMILIES[axis] for axis in failed_axes)
+                )
+                if not issue_families:
+                    raise FidelityVerificationValidationError(
+                        "RegionCombinedPolicyModelResult has failed fidelity checks without object_issues for: "
+                        + object_id,
+                        [object_id],
+                    )
+                if not issue_families.intersection(allowed_families):
+                    raise FidelityVerificationValidationError(
+                        "RegionCombinedPolicyModelResult has failed fidelity checks with incompatible object issue family for: "
+                        + object_id,
+                        [object_id],
+                    )
+            elif any(term in normalized for term in FIDELITY_FAILURE_TERMS):
+                raise FidelityVerificationValidationError(
+                    "RegionCombinedPolicyModelResult has all-Y fidelity checks but failing reason for: "
+                    + object_id,
                     [object_id],
                 )
 
-        failure_terms = (
-            "mismatch",
-            "mismatches",
-            "differ",
-            "differs",
-            "different",
-            "does not match",
-            "not match",
-            "missing",
-            "wrong",
-            "fails",
-            "failed",
-            "uncertain",
-            "unclear",
-            "unlike",
-            "generic substitution",
-            "generic replacement",
-        )
         issue_object_ids = {str(issue.object_id).strip() for issue in proposed.review.object_issues}
-        inconsistent = [
-            object_id
-            for object_id in required_ids
-            if any(term in by_object[object_id][0].lower() for term in failure_terms)
-            and object_id not in issue_object_ids
-        ]
+        inconsistent = []
+        for object_id in required_ids:
+            verification = by_object[object_id][0]
+            reason = str(getattr(verification, "reason", "") or "")
+            failed_axes = [
+                key
+                for key in FIDELITY_CHECK_KEYS
+                if str((getattr(verification, "checks", None) or {}).get(key)).strip().upper() == "N"
+            ]
+            if not any(term in reason.lower() for term in FIDELITY_FAILURE_TERMS):
+                continue
+            if object_id in issue_object_ids:
+                continue
+            inconsistent.append(object_id)
         if inconsistent:
             raise FidelityVerificationValidationError(
                 "RegionCombinedPolicyModelResult has failing fidelity_verifications without object_issues for: "
                 + ", ".join(inconsistent),
                 inconsistent,
             )
+
+    @staticmethod
+    def _merge_fidelity_retry_result(
+        original: RegionCombinedPolicyModelResult,
+        retry_result: RegionCombinedPolicyModelResult,
+        target_object_ids: list[str],
+    ) -> RegionCombinedPolicyModelResult:
+        target_ids = {str(object_id).strip() for object_id in target_object_ids if str(object_id).strip()}
+        if not target_ids:
+            return original
+
+        retry_verifications = {
+            str(item.object_id).strip(): item
+            for item in retry_result.review.fidelity_verifications
+            if str(item.object_id).strip() in target_ids
+        }
+        merged_verifications = [
+            item
+            for item in original.review.fidelity_verifications
+            if str(item.object_id).strip() not in target_ids
+        ]
+        merged_verifications.extend(retry_verifications[object_id] for object_id in target_ids if object_id in retry_verifications)
+
+        retry_object_issues = [
+            item
+            for item in retry_result.review.object_issues
+            if str(item.object_id).strip() in target_ids
+        ]
+        merged_object_issues = [
+            item
+            for item in original.review.object_issues
+            if str(item.object_id).strip() not in target_ids
+        ]
+        merged_object_issues.extend(retry_object_issues)
+
+        merged_review = original.review.model_copy(
+            update={
+                "fidelity_verifications": merged_verifications,
+                "object_issues": merged_object_issues,
+            }
+        )
+        return original.model_copy(update={"review": merged_review})
 
     @staticmethod
     def _filter_payload_by_object_ids(payload: Any, object_ids: set[str]) -> Any:
@@ -330,7 +445,7 @@ class RegionPolicyEngine:
                     "system_prompt": retry_system_prompt,
                     "user_prompt": retry_user_prompt,
                 }
-                proposed, retry_raw_response = self._run_combined_policy(
+                retry_proposed, retry_raw_response = self._run_combined_policy(
                     crop_path=crop_path,
                     region=region,
                     review_context=retry_review_context,
@@ -340,7 +455,13 @@ class RegionPolicyEngine:
                     rendered_svg_path=rendered_svg_path,
                     svg_file_path=svg_file_path,
                 )
-                self._validate_fidelity_verifications(proposed, retry_required_checks)
+                self._validate_fidelity_verifications(retry_proposed, retry_required_checks)
+                proposed = self._merge_fidelity_retry_result(
+                    proposed,
+                    retry_proposed,
+                    fidelity_exc.object_ids,
+                )
+                self._validate_fidelity_verifications(proposed, required_fidelity_checks)
                 request_context["fidelity_verification_retry"]["used"] = True
         except Exception as exc:
             fail_policy_evaluation(

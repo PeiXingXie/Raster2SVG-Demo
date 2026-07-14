@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Download icon candidate E">
+  <rect x="4" y="4" width="24" height="24" rx="5" fill="#f8fafc" stroke="#b8cbd3"/>
+  <rect x="8.5" y="21" width="15" height="4.5" rx="2" fill="#d8e5ea"/>
+  <path d="M16 7.5v11" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="m11.1 14.1 4.9 4.9 4.9-4.9" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="23.2" cy="8.8" r="2.3" fill="#a9572a"/>
+</svg>

@@ -94,6 +94,7 @@ _OBJECT_FIDELITY_ISSUE_FAMILIES = {
     "content_accuracy",
     "shape_fidelity",
     "internal_structure",
+    "style_appearance",
 }
 
 

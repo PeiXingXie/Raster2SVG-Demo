@@ -13,14 +13,19 @@ import {
 } from "../utils.js";
 
 const traceViewportState = new WeakMap();
+const traceContainerViewportState = new WeakMap();
+const traceStableViewportState = new Map();
 const previewPreloadCache = new Map();
 const traceDeckExpansionState = new Map();
 const TRACE_DECK_COLLAPSED = "__collapsed__";
 let tracePendingFocusNodeId = null;
+let traceProgrammaticScrollToken = 0;
 const TRACE_MIN_ZOOM = 0.75;
 const TRACE_MAX_ZOOM = 1.8;
 const TRACE_ZOOM_STEP = 1.12;
-const TRACE_AUTO_FOLLOW_RESUME_PX = 32;
+const TRACE_ACTIVE_CENTER_RATIO = 0.5;
+const TRACE_MIN_BOTTOM_SPACER_PX = 160;
+const TRACE_BOTTOM_SPACER_EXTRA_PX = 72;
 
 const SIMPLE_TRACE_KIND_LABELS = {
   root: "Run Overview",
@@ -960,6 +965,139 @@ function buildOutputProgressSections(frame) {
   return wrapper;
 }
 
+function formatManualBox(box) {
+  if (!box || typeof box !== "object") {
+    return "";
+  }
+  const values = ["x", "y", "width", "height"].map((key) => {
+    const value = Number(box[key]);
+    return Number.isFinite(value) ? Math.round(value) : null;
+  });
+  if (values.some((value) => value == null)) {
+    return "";
+  }
+  return `x ${values[0]}, y ${values[1]}, w ${values[2]}, h ${values[3]}`;
+}
+
+function getManualAdjustmentTraceSummary(adjustment) {
+  const nodes = adjustment?.workflow_trace?.nodes || [];
+  const targetNode = nodes.find((node) => node?.target_id);
+  const workerNode = [...nodes].reverse().find((node) => node?.summary);
+  return {
+    targetLabel: targetNode?.target_id || "",
+    workflowSummary: workerNode?.summary || "",
+  };
+}
+
+function getManualAdjustmentDraftContext(snapshot, adjustment) {
+  const latestAdjustment = getLatestManualAdjustment(snapshot);
+  if (!latestAdjustment || latestAdjustment.adjustment_id !== adjustment?.adjustment_id) {
+    return {
+      targetLabel: "",
+      referenceLabel: "",
+      instruction: "",
+    };
+  }
+  const target = appState.manualConfirmedTarget || {};
+  const referenceMode = appState.manualReferenceMode || "default";
+  const referenceUploads = appState.manualReferenceUploads || [];
+  const instruction = elements.manualUserIntroduction?.value?.trim()
+    || elements.manualTargetDescription?.value?.trim()
+    || "";
+  const targetParts = [];
+  if (target.selectionScope) {
+    targetParts.push(target.selectionScope);
+  }
+  if (target.regionId) {
+    targetParts.push(`region ${target.regionId}`);
+  }
+  if (target.objectIds?.length) {
+    targetParts.push(`objects ${target.objectIds.join(", ")}`);
+  }
+  const boxLabel = formatManualBox(target.selectionBox);
+  if (boxLabel) {
+    targetParts.push(boxLabel);
+  }
+
+  let referenceLabel = "";
+  if (referenceMode === "none") {
+    referenceLabel = "No reference images; instruction text only.";
+  } else if (referenceMode === "add") {
+    referenceLabel = referenceUploads.length
+      ? `${referenceUploads.length} uploaded reference image(s).`
+      : "Add Image mode selected; no uploaded image is available in this view.";
+  } else if (referenceMode === "capture") {
+    const referenceBox = formatManualBox(appState.manualConfirmedReferenceSelection?.selectionBox);
+    referenceLabel = referenceBox
+      ? `Captured input reference crop (${referenceBox}).`
+      : "Capture Ref mode selected; no confirmed crop is available in this view.";
+  } else {
+    referenceLabel = "Use Default: target area's input image content.";
+  }
+
+  return {
+    targetLabel: targetParts.join(" | "),
+    referenceLabel,
+    instruction,
+  };
+}
+
+function renderManualAdjustmentSummary(snapshot, adjustment) {
+  elements.outputProgress.innerHTML = "";
+  elements.outputProgressSlider.innerHTML = "";
+  elements.outputProgress.className = "output-progress manual-adjustment-summary";
+  elements.outputProgressSlider.className = "output-progress output-progress-inline manual-adjustment-summary-inline";
+  elements.outputProgressDetails.className = "output-progress-details hidden";
+  elements.outputProgressDetails.textContent = "";
+
+  const traceSummary = getManualAdjustmentTraceSummary(adjustment);
+  const draftContext = getManualAdjustmentDraftContext(snapshot, adjustment);
+  const baseLabel = adjustment?.base_title || adjustment?.base_frame_id || "Pipeline output";
+  const targetLabel = draftContext.targetLabel || traceSummary.targetLabel || "Target details are not included in the current artifact snapshot.";
+  const referenceLabel = draftContext.referenceLabel || "Reference details are not included in the current artifact snapshot.";
+  const instruction = draftContext.instruction || "Instruction text is not included in the current artifact snapshot.";
+  const status = adjustment?.adjustment_error ? "Failed" : adjustment?.workflow_trace?.summary?.status || "Completed";
+
+  const inline = document.createElement("div");
+  inline.className = "manual-adjustment-summary-inline-card";
+  inline.textContent = "Manual adjustment selected. Main pipeline progress is hidden for this version.";
+  elements.outputProgressSlider.appendChild(inline);
+
+  const card = document.createElement("div");
+  card.className = "output-progress-frame manual-adjustment-summary-card";
+  card.innerHTML = `
+    <div class="structure-title-row">
+      <div class="structure-title">${escapeHtml(adjustment?.title || "Manual adjustment")}</div>
+      <div class="structure-meta">${escapeHtml(status)}</div>
+    </div>
+    <div class="output-progress-meta">Base: ${escapeHtml(baseLabel)}</div>
+    <div class="output-progress-sections">
+      <div class="output-progress-section">
+        <div class="output-progress-section-title">Target Area</div>
+        <div class="output-progress-empty">${escapeHtml(targetLabel)}</div>
+      </div>
+      <div class="output-progress-section">
+        <div class="output-progress-section-title">Reference Images</div>
+        <div class="output-progress-empty">${escapeHtml(referenceLabel)}</div>
+      </div>
+      <div class="output-progress-section">
+        <div class="output-progress-section-title">Instruction</div>
+        <div class="output-progress-empty">${escapeHtml(instruction)}</div>
+      </div>
+    </div>
+  `;
+  if (traceSummary.workflowSummary) {
+    const workflowSection = document.createElement("div");
+    workflowSection.className = "output-progress-section";
+    workflowSection.innerHTML = `
+      <div class="output-progress-section-title">Adjustment Trace</div>
+      <div class="output-progress-empty">${escapeHtml(traceSummary.workflowSummary)}</div>
+    `;
+    card.querySelector(".output-progress-sections")?.appendChild(workflowSection);
+  }
+  elements.outputProgress.appendChild(card);
+}
+
 function computeNodeElapsed(node) {
   if (typeof node?.duration_ms === "number") {
     return node.duration_ms;
@@ -1264,6 +1402,7 @@ function setTraceDeckExpandedNode(branch, nodeId, onNodeSelect) {
   requestAnimationFrame(() => {
     const viewport = branch.closest(".workflow-trace-viewport");
     if (viewport instanceof HTMLElement) {
+      setTraceManualControl(viewport);
       refreshWorkflowTraceLayout();
       if (!collapseBranch) {
         const didFocus = scrollTraceViewportToNode(viewport, nodeId);
@@ -1471,6 +1610,126 @@ function createTraceEventFeed(nodes, activeNodeId) {
   return feed;
 }
 
+export function renderManualRecentActivity(container, snapshot) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  const trace = snapshot?.workflow_trace || snapshot?.manual_workflow_trace || null;
+  const nodes = Array.isArray(trace?.nodes) ? trace.nodes : [];
+  if (!nodes.length) {
+    container.className = "manual-recent-activity";
+    container.replaceChildren(createTraceEventFeed([], null));
+    return;
+  }
+  const summary = summarizeTrace(trace);
+  const visibleNodes = filterVisibleTraceNodes(nodes, summary.active_node_id);
+  container.className = "manual-recent-activity";
+  container.replaceChildren(createTraceEventFeed(visibleNodes, summary.active_node_id));
+}
+
+function getTraceViewportVisibleRect(viewport) {
+  if (!(viewport instanceof HTMLElement)) {
+    return { top: 0, bottom: 1, height: 1 };
+  }
+  const panel = viewport.closest(".workspace-sidebar-panel");
+  const viewportRect = viewport.getBoundingClientRect();
+  if (!(panel instanceof HTMLElement)) {
+    const height = Math.max(1, viewportRect.height);
+    return { top: viewportRect.top, bottom: viewportRect.top + height, height };
+  }
+  const panelRect = panel.getBoundingClientRect();
+  const headerRect = panel.querySelector(":scope > .workspace-panel-header")?.getBoundingClientRect();
+  const top = Math.max(
+    panelRect.top,
+    viewportRect.top,
+    headerRect ? headerRect.bottom + 8 : panelRect.top,
+  );
+  const bottom = Math.max(top + 1, Math.min(panelRect.bottom - 12, viewportRect.bottom || panelRect.bottom));
+  return {
+    top,
+    bottom,
+    height: Math.max(1, bottom - top),
+  };
+}
+
+function getTraceStableStateKey(container, runSignature = null) {
+  if (!(container instanceof HTMLElement)) {
+    return null;
+  }
+  const containerId = container.id || container.closest("[id]")?.id || "trace";
+  const signature = runSignature || container.dataset.traceRunSignature || "pending";
+  return `${containerId}:${signature}`;
+}
+
+function getTraceStableState(container, runSignature = null) {
+  const key = getTraceStableStateKey(container, runSignature);
+  return key ? traceStableViewportState.get(key) : null;
+}
+
+function setTraceStableState(container, state, runSignature = null) {
+  const key = getTraceStableStateKey(container, runSignature);
+  if (!key || !state) {
+    return;
+  }
+  traceStableViewportState.set(key, {
+    ...state,
+    controls: null,
+    dragPointerId: null,
+  });
+}
+
+function persistTraceViewportState(viewport, state) {
+  if (!(viewport instanceof HTMLElement) || !state) {
+    return;
+  }
+  const panel = getTraceScrollPanel(viewport);
+  state.scrollLeft = viewport.scrollLeft;
+  if (panel) {
+    state.panelScrollTop = panel.scrollTop;
+  }
+  const container = getTraceContainerFromViewport(viewport);
+  if (container) {
+    const nextState = {
+      ...state,
+      controls: null,
+      scrollLeft: viewport.scrollLeft,
+      panelScrollTop: panel ? panel.scrollTop : state.panelScrollTop,
+    };
+    traceContainerViewportState.set(container, nextState);
+    setTraceStableState(container, nextState);
+  }
+}
+
+function markTraceProgrammaticScroll(viewport) {
+  const container = getTraceContainerFromViewport(viewport);
+  if (!container) {
+    return;
+  }
+  const token = String(++traceProgrammaticScrollToken);
+  container.dataset.traceProgrammaticScrollToken = token;
+  const panel = getTraceScrollPanel(viewport);
+  if (panel) {
+    panel.dataset.traceProgrammaticScrollToken = token;
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (container.dataset.traceProgrammaticScrollToken === token) {
+        delete container.dataset.traceProgrammaticScrollToken;
+      }
+      if (panel?.dataset.traceProgrammaticScrollToken === token) {
+        delete panel.dataset.traceProgrammaticScrollToken;
+      }
+    });
+  });
+}
+
+function isTraceProgrammaticScroll(viewport) {
+  return Boolean(
+    getTraceContainerFromViewport(viewport)?.dataset.traceProgrammaticScrollToken
+    || getTraceScrollPanel(viewport)?.dataset.traceProgrammaticScrollToken
+  );
+}
+
 function scrollTraceViewportToElement(viewport, target) {
   if (!(viewport instanceof HTMLElement) || !(target instanceof HTMLElement)) {
     return;
@@ -1478,15 +1737,21 @@ function scrollTraceViewportToElement(viewport, target) {
   const state = traceViewportState.get(viewport);
   const scale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, state?.zoomMultiplier || 1));
   const targetLeft = Math.max(0, target.offsetLeft * scale - (viewport.clientWidth - target.offsetWidth * scale) / 2);
+  markTraceProgrammaticScroll(viewport);
   viewport.scrollLeft = targetLeft;
   const panel = viewport.closest(".workspace-sidebar-panel");
   if (panel instanceof HTMLElement) {
-    const desiredPanelTop = Math.max(96, panel.clientHeight * 0.28);
-    panel.scrollTop = Math.max(0, viewport.offsetTop + target.offsetTop * scale - desiredPanelTop);
+    const targetRect = target.getBoundingClientRect();
+    const visibleRect = getTraceViewportVisibleRect(viewport);
+    const desiredCenter = visibleRect.top + visibleRect.height * TRACE_ACTIVE_CENTER_RATIO;
+    const currentCenter = targetRect.top + targetRect.height / 2;
+    const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    panel.scrollTop = Math.max(0, Math.min(maxScrollTop, panel.scrollTop + currentCenter - desiredCenter));
   } else {
     const targetTop = Math.max(0, target.offsetTop * scale - Math.max(20, viewport.clientHeight * 0.24));
     viewport.scrollTop = targetTop;
   }
+  persistTraceViewportState(viewport, state);
 }
 
 function getTraceContainerFromViewport(viewport) {
@@ -1503,41 +1768,24 @@ function getTraceRunSignature(nodes = []) {
     || "";
 }
 
-function pauseTraceAutoFollow(viewport) {
+function setTraceManualControl(viewport) {
   const container = getTraceContainerFromViewport(viewport);
   if (container) {
-    container.dataset.traceAutoFollow = "paused";
-  }
-}
-
-function resumeTraceAutoFollow(viewport) {
-  const container = getTraceContainerFromViewport(viewport);
-  if (container) {
-    container.dataset.traceAutoFollow = "active";
+    container.dataset.traceAutoFollow = "manual";
+    const state = traceViewportState.get(viewport) || {};
+    state.traceAutoFollow = "manual";
+    traceViewportState.set(viewport, state);
+    persistTraceViewportState(viewport, state);
   }
 }
 
 function shouldTraceAutoFollow(viewport) {
-  return getTraceContainerFromViewport(viewport)?.dataset.traceAutoFollow !== "paused";
+  return getTraceContainerFromViewport(viewport)?.dataset.traceAutoFollow === "active";
 }
 
 function getTraceScrollPanel(viewport) {
   const panel = viewport?.closest?.(".workspace-sidebar-panel");
   return panel instanceof HTMLElement ? panel : null;
-}
-
-function isTraceScrollPanelNearBottom(panel) {
-  if (!(panel instanceof HTMLElement)) {
-    return false;
-  }
-  return panel.scrollTop + panel.clientHeight >= panel.scrollHeight - TRACE_AUTO_FOLLOW_RESUME_PX;
-}
-
-function resumeTraceAutoFollowIfNearBottom(viewport) {
-  const panel = getTraceScrollPanel(viewport);
-  if (isTraceScrollPanelNearBottom(panel)) {
-    resumeTraceAutoFollow(viewport);
-  }
 }
 
 function scrollTraceViewportToNode(viewport, nodeId) {
@@ -1575,22 +1823,41 @@ function scrollTraceViewportToActive(viewport, options = {}) {
 }
 
 export function renderTraceInto(container, trace, emptyText, onNodeSelect = () => {}) {
-  container.innerHTML = "";
   const visibleNodes = filterTraceNodes(trace?.nodes || []);
+  const summary = trace?.summary || {};
+  const runSignature = getTraceRunSignature(visibleNodes);
+  const previousViewport = container.querySelector(".workflow-trace-viewport");
+  if (previousViewport instanceof HTMLElement) {
+    const previousState = traceViewportState.get(previousViewport);
+    const previousPanel = getTraceScrollPanel(previousViewport);
+    const nextState = {
+      ...(previousState || {}),
+      dragPointerId: null,
+      controls: null,
+      scrollLeft: previousViewport.scrollLeft,
+      panelScrollTop: previousPanel ? previousPanel.scrollTop : previousState?.panelScrollTop,
+      traceAutoFollow: container.dataset.traceAutoFollow || previousState?.traceAutoFollow || "active",
+    };
+    traceContainerViewportState.set(container, nextState);
+    setTraceStableState(container, nextState, runSignature || container.dataset.traceRunSignature);
+    markTraceProgrammaticScroll(previousViewport);
+  }
+  container.innerHTML = "";
   if (!visibleNodes.length) {
     container.className = "workflow-trace empty-state";
     container.textContent = emptyText;
     return;
   }
 
-  const summary = trace.summary || {};
-  const runSignature = getTraceRunSignature(visibleNodes);
+  const stableState = getTraceStableState(container, runSignature);
   if (
     runSignature
     && container.dataset.traceRunSignature
     && container.dataset.traceRunSignature !== runSignature
   ) {
     container.dataset.traceAutoFollow = "active";
+  } else if (stableState?.traceAutoFollow) {
+    container.dataset.traceAutoFollow = stableState.traceAutoFollow;
   }
   if (runSignature) {
     container.dataset.traceRunSignature = runSignature;
@@ -1773,9 +2040,11 @@ export function refreshWorkflowTraceLayout() {
       continue;
     }
     const contentWidth = body.scrollWidth;
-    const contentHeight = body.scrollHeight;
+    const currentPaddingBottom = Number.parseFloat(window.getComputedStyle(body).paddingBottom || "0") || 0;
+    const contentHeightWithoutBottomSpacer = Math.max(0, body.scrollHeight - currentPaddingBottom);
     if (!contentWidth) {
       body.style.removeProperty("--trace-scale");
+      body.style.removeProperty("--trace-bottom-spacer");
       canvas.style.removeProperty("width");
       canvas.style.removeProperty("height");
       if (connectorLayer instanceof SVGSVGElement) {
@@ -1793,9 +2062,29 @@ export function refreshWorkflowTraceLayout() {
     const currentScale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, state.zoomMultiplier || 1));
     state.zoomMultiplier = currentScale;
     traceViewportState.set(viewport, state);
+    const visibleRect = getTraceViewportVisibleRect(viewport);
+    const dynamicBottomPadding = Math.ceil(
+      Math.max(TRACE_MIN_BOTTOM_SPACER_PX, visibleRect.height * TRACE_ACTIVE_CENTER_RATIO + TRACE_BOTTOM_SPACER_EXTRA_PX) / currentScale,
+    );
+    body.style.setProperty("--trace-bottom-spacer", `${dynamicBottomPadding}px`);
     body.style.setProperty("--trace-scale", String(currentScale));
     canvas.style.width = `${Math.ceil(contentWidth * currentScale)}px`;
-    canvas.style.height = `${Math.ceil(contentHeight * currentScale)}px`;
+    canvas.style.height = `${Math.ceil((contentHeightWithoutBottomSpacer + dynamicBottomPadding) * currentScale)}px`;
+    if (Number.isFinite(state.pendingScrollLeft)) {
+      markTraceProgrammaticScroll(viewport);
+      viewport.scrollLeft = Math.max(0, state.pendingScrollLeft);
+      delete state.pendingScrollLeft;
+    }
+    if (Number.isFinite(state.pendingPanelScrollTop)) {
+      const panel = getTraceScrollPanel(viewport);
+      if (panel) {
+        markTraceProgrammaticScroll(viewport);
+        const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+        panel.scrollTop = Math.max(0, Math.min(maxScrollTop, state.pendingPanelScrollTop));
+      }
+      delete state.pendingPanelScrollTop;
+    }
+    persistTraceViewportState(viewport, state);
     updateTraceControlState(viewport);
     drawTraceConnectors(viewport, canvas, body, connectorLayer);
   }
@@ -1885,7 +2174,10 @@ function updateTraceControlState(viewport) {
 }
 
 function initializeTraceViewport(viewport, canvas, body, controls) {
-  const previous = traceViewportState.get(viewport);
+  const container = getTraceContainerFromViewport(viewport);
+  const previous = traceViewportState.get(viewport)
+    || (container ? traceContainerViewportState.get(container) : null)
+    || (container ? getTraceStableState(container) : null);
   const state = previous || {
     zoomMultiplier: 1,
     dragPointerId: null,
@@ -1894,7 +2186,25 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     controls,
   };
   state.controls = controls;
+  state.dragPointerId = null;
+  state.traceAutoFollow = container?.dataset.traceAutoFollow || state.traceAutoFollow || "active";
   traceViewportState.set(viewport, state);
+  if (container) {
+    const nextState = {
+      ...state,
+      controls: null,
+      scrollLeft: state.scrollLeft ?? 0,
+      panelScrollTop: state.panelScrollTop ?? 0,
+    };
+    traceContainerViewportState.set(container, nextState);
+    setTraceStableState(container, nextState);
+  }
+  if (Number.isFinite(state.scrollLeft)) {
+    state.pendingScrollLeft = state.scrollLeft;
+  }
+  if (Number.isFinite(state.panelScrollTop)) {
+    state.pendingPanelScrollTop = state.panelScrollTop;
+  }
 
   if (viewport.dataset.traceViewportInitialized === "true") {
     return;
@@ -1909,6 +2219,7 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
       return;
     }
     event.preventDefault();
+    setTraceManualControl(viewport);
     if (action === "in") {
       liveState.zoomMultiplier = Math.min(TRACE_MAX_ZOOM, (liveState.zoomMultiplier || 1) * TRACE_ZOOM_STEP);
     } else if (action === "out") {
@@ -1917,12 +2228,17 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
       liveState.zoomMultiplier = 1;
       viewport.scrollLeft = 0;
     }
+    persistTraceViewportState(viewport, liveState);
     refreshWorkflowTraceLayout();
   });
 
   viewport.addEventListener("wheel", () => {
-    pauseTraceAutoFollow(viewport);
-    window.setTimeout(() => resumeTraceAutoFollowIfNearBottom(viewport), 0);
+    setTraceManualControl(viewport);
+  }, { passive: true });
+  viewport.addEventListener("scroll", () => {
+    if (!isTraceProgrammaticScroll(viewport)) {
+      setTraceManualControl(viewport);
+    }
   }, { passive: true });
 
   const panel = getTraceScrollPanel(viewport);
@@ -1931,14 +2247,13 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     panel.addEventListener("wheel", () => {
       const liveViewport = panel.querySelector(".workflow-trace-viewport");
       if (liveViewport instanceof HTMLElement) {
-        pauseTraceAutoFollow(liveViewport);
-        window.setTimeout(() => resumeTraceAutoFollowIfNearBottom(liveViewport), 0);
+        setTraceManualControl(liveViewport);
       }
     }, { passive: true });
     panel.addEventListener("scroll", () => {
       const liveViewport = panel.querySelector(".workflow-trace-viewport");
-      if (liveViewport instanceof HTMLElement) {
-        resumeTraceAutoFollowIfNearBottom(liveViewport);
+      if (liveViewport instanceof HTMLElement && !isTraceProgrammaticScroll(liveViewport)) {
+        setTraceManualControl(liveViewport);
       }
     }, { passive: true });
   }
@@ -1954,7 +2269,7 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     ) {
       return;
     }
-    pauseTraceAutoFollow(viewport);
+    setTraceManualControl(viewport);
     liveState.dragPointerId = event.pointerId;
     liveState.dragStartX = event.clientX;
     liveState.dragScrollLeft = viewport.scrollLeft;
@@ -1969,6 +2284,7 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     }
     event.preventDefault();
     viewport.scrollLeft = liveState.dragScrollLeft - (event.clientX - liveState.dragStartX);
+    liveState.scrollLeft = viewport.scrollLeft;
   });
 
   const stopDrag = (event) => {
@@ -1977,6 +2293,8 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
       return;
     }
     liveState.dragPointerId = null;
+    liveState.scrollLeft = viewport.scrollLeft;
+    persistTraceViewportState(viewport, liveState);
     viewport.classList.remove("is-dragging");
     viewport.releasePointerCapture?.(event.pointerId);
   };
@@ -2215,9 +2533,14 @@ export function renderArtifactSummary(
 
     renderArtifactStructure(hasRegionOverlayData ? snapshot : { ...snapshot, regions: [] }, selectedOverlay, onSelectOverlay);
     renderWorkflowTrace(snapshot, onTraceNodeSelect);
+    const activeAdjustment = (snapshot.manual_adjustments || []).find(
+      (item) => item.adjustment_id === selectedManualAdjustmentId
+    ) || null;
     renderOutputVersionOptions(snapshot, selectedManualAdjustmentId, onManualAdjustmentChange);
     preloadPreviewUrls(collectOutputPreviewUrls(snapshot));
-    if (hasOutputFrames) {
+    if (activeAdjustment) {
+      renderManualAdjustmentSummary(snapshot, activeAdjustment);
+    } else if (hasOutputFrames) {
       renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrameChange);
     } else {
       elements.outputProgress.className = "output-progress empty-state";
@@ -2415,7 +2738,11 @@ export function renderArtifactSummary(
 
   renderArtifactStructure(snapshot, selectedOverlay, onSelectOverlay);
   renderWorkflowTrace(snapshot, onTraceNodeSelect);
-  renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrameChange);
+  if (activeAdjustment) {
+    renderManualAdjustmentSummary(snapshot, activeAdjustment);
+  } else {
+    renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrameChange);
+  }
   renderState.artifactSig = signature;
 }
 

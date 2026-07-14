@@ -415,8 +415,6 @@ body.desktop-body[data-desktop-page="workspace"] .desktop-inspector {
 .desktop-inspector .artifact-note-grid,
 .desktop-inspector .manual-workflow-status,
 .desktop-inspector .manual-main-grid,
-.desktop-inspector .manual-reference-settings,
-.desktop-inspector .manual-reference-actions,
 .desktop-inspector .field-grid.four-up,
 .desktop-inspector .field-grid.two-up,
 .desktop-inspector .advanced-grid {
@@ -462,7 +460,6 @@ body.desktop-body[data-desktop-page="workspace"] .desktop-inspector {
 
 .desktop-inspector .manual-mode-group button,
 .desktop-inspector .manual-action-group button,
-.desktop-inspector .manual-reference-actions button,
 .desktop-inspector .manual-reference-upload-actions button {
   width: 100%;
 }
@@ -2682,9 +2679,9 @@ body.desktop-body .workspace-context-card {
 
 body.desktop-body .workspace-context-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
-  align-items: stretch;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 14px;
   min-width: 0;
   height: 82px;
   margin: 0 0 10px;
@@ -2849,23 +2846,27 @@ body.desktop-body .compare-stage-title-group {
 body.desktop-body .compare-download-button {
   display: grid;
   place-items: center;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 12px;
+  width: 48px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0;
   border: 1px solid rgba(47, 100, 117, 0.22);
   border-radius: 8px;
   background: rgba(49, 95, 114, 0.1);
   color: var(--desktop-primary-strong);
-  font-size: 12px;
-  font-weight: 700;
   text-decoration: none;
   box-sizing: border-box;
+  justify-self: center;
 }
 
 body.desktop-body .workspace-download-button {
-  height: 100%;
-  min-height: 0;
-  align-self: stretch;
+  align-self: center;
+}
+
+body.desktop-body .download-button-icon {
+  display: block;
+  width: 32px;
+  height: 32px;
 }
 
 body.desktop-body .compare-download-button.is-disabled {
@@ -3328,7 +3329,7 @@ body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .wor
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-body {
-  padding-bottom: 160px;
+  padding-bottom: var(--trace-bottom-spacer, 160px);
 }
 
 body.desktop-body .workspace-sidebar [data-workspace-sidebar-panel="trace"] .workflow-trace-deck-item + .workflow-trace-deck-item {
@@ -3879,8 +3880,6 @@ body.desktop-body .desktop-inspector .manual-adjust-card {
 
 body.desktop-body .manual-workflow-status,
 body.desktop-body .manual-main-grid,
-body.desktop-body .manual-reference-settings,
-body.desktop-body .manual-reference-actions,
 body.desktop-body .manual-reference-preview {
   grid-template-columns: 1fr;
 }
@@ -3895,19 +3894,163 @@ body.desktop-body .manual-submit-card {
   align-items: stretch;
 }
 
+body.desktop-body .manual-recent-activity {
+  margin-top: -2px;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-feed {
+  margin: 0;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-list {
+  max-height: 88px;
+}
+
 body.desktop-body .manual-mode-group button,
 body.desktop-body .manual-action-group button,
-body.desktop-body .manual-reference-actions button,
 body.desktop-body .manual-reference-upload-actions button {
   width: 100%;
+}
+
+body.desktop-body .manual-reference-state-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+body.desktop-body .manual-reference-state-btn {
+  min-height: 40px;
+  padding: 6px 8px;
+  border-color: var(--desktop-line);
+  background: #fff;
+  color: var(--desktop-primary);
+  border-radius: 8px;
+}
+
+body.desktop-body .manual-reference-state-btn.is-active {
+  border-color: rgba(47, 100, 117, 0.36);
+  background: #eef7f9;
+}
+
+body.desktop-body .manual-reference-state-btn.is-upload-active {
+  border-color: rgba(159, 75, 36, 0.28);
+  background: #fff8f4;
+}
+
+body.desktop-body .manual-reference-paths-panel[open] {
+  border-color: var(--desktop-line);
+  background: #fff;
+}
+
+body.desktop-body[data-ui-mode="simple"] .manual-reference-paths-field {
+  display: none;
+}
+
+body.desktop-body .manual-reference-pastezone {
+  background: #f8fafc;
+}
+
+body.desktop-body .manual-reference-default-copy,
+body.desktop-body .manual-reference-no-ref-copy {
+  border-left-color: rgba(47, 100, 117, 0.36);
+  background: #f6fafb;
+}
+
+body.desktop-body .manual-target-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+body.desktop-body .manual-target-grid .manual-toolbar-block {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 6px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--desktop-line);
+  border-radius: 8px;
+}
+
+body.desktop-body .manual-target-grid .manual-mode-group,
+body.desktop-body .manual-target-grid .manual-action-group {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-content: start;
+  gap: 6px;
+}
+
+body.desktop-body .manual-target-grid button {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+body.desktop-body .manual-pick-target {
+  background: #f6fafb;
+}
+
+body.desktop-body .manual-set-target {
+  background: #f1faf5;
+}
+
+body.desktop-body .manual-target-confirmed-preview {
+  border-color: var(--desktop-line);
+  background: #fff;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-preview-grid {
+  gap: 8px;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb {
+  border-color: var(--desktop-line);
+  border-radius: 8px;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--output {
+  border-color: rgba(47, 100, 117, 0.28);
+  background: #f6fafb;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--reference {
+  border-color: rgba(159, 75, 36, 0.24);
+  background: #fff8f3;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb-stage {
+  min-height: 84px;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--output .manual-selection-thumb-stage {
+  background: #eef6f8;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--reference .manual-selection-thumb-stage {
+  background: #fff4eb;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-reference-thumb-footer {
+  padding: 6px 8px;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--output .manual-reference-thumb-footer {
+  background: #eef6f8;
+}
+
+body.desktop-body .manual-target-confirmed-preview .manual-selection-thumb--reference .manual-reference-thumb-footer {
+  background: #fff4eb;
+}
+
+body.desktop-body .manual-sidebar-column {
+  order: -1;
 }
 
 body.desktop-body .manual-output-section {
   display: grid;
 }
 
-body.desktop-body .manual-trace-panel,
-body.desktop-body .manual-reference-paths-panel {
+body.desktop-body .manual-trace-panel {
   display: none;
 }
 

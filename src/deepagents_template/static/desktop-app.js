@@ -794,8 +794,14 @@ function setupDesktopImageLightbox() {
     if (!src) {
       return;
     }
+    image.remove();
+    image.style.removeProperty("width");
+    image.style.removeProperty("height");
+    image.style.removeProperty("left");
+    image.style.removeProperty("top");
     image.src = src;
     image.alt = button.dataset.previewAlt || "Expanded preview";
+    document.getElementById("image-lightbox-stage")?.replaceChildren(image);
     if (caption) {
       caption.textContent = button.dataset.previewCaption || button.dataset.previewAlt || "";
     }
@@ -820,13 +826,6 @@ function setupDesktopImageLightbox() {
 
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    const previewButton = target?.closest(".run-chip-preview-zoom");
-    if (previewButton instanceof HTMLButtonElement) {
-      event.preventDefault();
-      event.stopPropagation();
-      openLightbox(previewButton);
-      return;
-    }
     if (event.target === backdrop || event.target === closeButton) {
       event.preventDefault();
       closeLightbox();
@@ -849,7 +848,7 @@ setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=run-start-state-boundary-1");
+    const { initApp } = await import("./js/main.js?v=refine-activity-feed-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);

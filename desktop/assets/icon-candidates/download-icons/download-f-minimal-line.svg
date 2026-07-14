@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Download icon candidate F">
+  <path d="M16 6.5v13" fill="none" stroke="#234c5d" stroke-width="2.7" stroke-linecap="round"/>
+  <path d="m10.4 14.4 5.6 5.6 5.6-5.6" fill="none" stroke="#234c5d" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8 24.5h16" fill="none" stroke="#a9572a" stroke-width="2.7" stroke-linecap="round"/>
+  <path d="M7 20.8v2.5c0 1.5 1.2 2.7 2.7 2.7h12.6c1.5 0 2.7-1.2 2.7-2.7v-2.5" fill="none" stroke="#b8cbd3" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

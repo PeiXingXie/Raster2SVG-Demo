@@ -50,7 +50,7 @@ SYMBOLIC_FIDELITY_TERMS = (
 
 GENERIC_ICON_FIDELITY_GOALS = (
     "Preserve visible symbolic form beyond recognizability.",
-    "Preserve contours, internal marks, and part relationships.",
+    "Preserve contours, internal marks, and owned-part relationships.",
     "Avoid generic same-category replacement.",
 )
 
@@ -59,6 +59,33 @@ GENERIC_OWNED_SYMBOL_FIDELITY_GOALS = (
     "Preserve symbol contours, internal marks, and local style.",
     "Avoid generic replacement of owned symbols or badges.",
 )
+
+GENERIC_LOCAL_FIDELITY_GOALS_BY_TYPE = {
+    "background": (
+        "Preserve local fill, extent, and layering role.",
+        "Preserve local visual style inside the object bbox.",
+    ),
+    "container": (
+        "Preserve the container's own contour, border, and fill.",
+        "Preserve local decorations or owned parts inside the container.",
+    ),
+    "connector": (
+        "Preserve connector endpoints, direction, and local stroke style.",
+        "Preserve local connector structure inside the object bbox.",
+    ),
+    "diagram": (
+        "Preserve local diagram marks, labels, and internal structure.",
+        "Preserve local visual encoding inside the object bbox.",
+    ),
+    "fig": (
+        "Preserve the local visible placeholder shape and dominant appearance.",
+        "Preserve local crop or block structure inside the object bbox.",
+    ),
+    "text": (
+        "Preserve text content, readability, and local typography.",
+        "Preserve local text layout inside the object bbox.",
+    ),
+}
 
 REPLACEMENT_ISSUE_REFS_FORMAT_RULE = (
     "prior_issue_assessment[].replacement_issue_refs must be a JSON array of objects with issue_id and label fields. "
@@ -80,6 +107,7 @@ COMMON_SCOPE_BOUNDARY_RULES = textwrap.dedent(
     - Region/global issues are defects that require moving, resizing, aligning, spacing, layering, or merging multiple objects or the whole region.
     - If a relative placement problem is between elements owned by the same recognized object, treat it as object-local.
     - If a relative placement, spacing, alignment, scale, overlap, or relationship problem is between two recognized objects, treat it as region/global.
+    - Object-local checks must be decidable from that object's own bbox or owned SVG group; sibling-object spacing, scale balance, alignment, and region padding are region/global.
     - If the visual cause belongs to a neighboring object, do not assign the issue to the current object.
     """
 ).strip()
@@ -123,6 +151,7 @@ REGION_ISSUE_TAXONOMY_RULES = textwrap.dedent(
     - content_accuracy: object content, text, data value, semantic identity, or required owned part is wrong, missing, extra, unreadable, or misleading.
     - shape_fidelity: outer silhouette, contour, geometry, proportions, or recognizable shape likeness differs from the raster.
     - internal_structure: owned sub-elements, internal strokes, z-order, grouping, relative placement, or internal layout inside the object is wrong.
+    - Do not use object_issues for sibling-object spacing, cross-object scale balance, region padding, or content-stack alignment; use layout_relation.
     - style_appearance: color, fill, stroke, typography, opacity, visual weight, or object-local styling differs while content and structure remain intact.
     - For object_issues, choose containment_boundary first for clipping or out-of-bounds defects, then content_accuracy, internal_structure, shape_fidelity, and style_appearance.
     """
@@ -284,10 +313,6 @@ def object_has_symbolic_fidelity_content(obj: dict) -> bool:
     if str(obj.get("object_type") or "").strip().lower() == "icon":
         return True
     text_parts: list[str] = []
-    for key in ("object_id", "description"):
-        value = obj.get(key)
-        if value is not None:
-            text_parts.append(str(value))
     for key in ("included_elements", "generation_focus"):
         values = obj.get(key) or []
         if isinstance(values, list):
@@ -322,7 +347,13 @@ def build_required_fidelity_checks(object_index: dict) -> list[dict]:
             ][:5]
         if not (verify_required or object_has_symbolic_fidelity_content(obj)):
             continue
-        fallback_goals = list(GENERIC_ICON_FIDELITY_GOALS if object_type == "icon" else GENERIC_OWNED_SYMBOL_FIDELITY_GOALS)
+        has_symbolic_content = object_has_symbolic_fidelity_content(obj)
+        if object_type == "icon":
+            fallback_goals = list(GENERIC_ICON_FIDELITY_GOALS)
+        elif has_symbolic_content:
+            fallback_goals = list(GENERIC_OWNED_SYMBOL_FIDELITY_GOALS)
+        else:
+            fallback_goals = list(GENERIC_LOCAL_FIDELITY_GOALS_BY_TYPE.get(object_type, ()))
         for fallback_goal in fallback_goals:
             if len(goals) >= 5:
                 break
@@ -418,31 +449,44 @@ def build_region_combined_policy_prompts(
         - Required object fidelity checks are listed separately in the user prompt.
         - Before writing passed_items, inspect required_fidelity_checks and look for object-local visual-form mismatches.
         - For every object in required_fidelity_checks, silently compare the rendered visual appearance against its fidelity_goals before deciding acceptance.
-        - For every object in required_fidelity_checks, output exactly one review.fidelity_verifications item with object_id and result.
-        - Each fidelity_verifications result must be one concrete visual judgment against the raster, focused on contour, structure, internal marks, part relationships, local style, or visual weight.
-        - Each fidelity_verifications result must stay under 18 words.
-        - Do not write generic verification results such as "looks correct", "recognizable", "same category", "semantically faithful", "ok", or "pass".
-        - Do not output a separate per-goal checklist; fidelity_verifications is one line per checked object, and object_issues contains material failures.
+        - For every object in required_fidelity_checks, output exactly one review.fidelity_verifications item with object_id, checks, and reason.
+        - checks must contain exactly these keys with "Y" or "N" values: vf, is, op, ls, si.
+        - fidelity_verifications checks are object-local diagnostic axes; review.object_issues issue_family is the repair taxonomy for routing.
+        - Use checks to state where the object-local visual evidence fails; use object_issues to describe the material repairable defect.
+        - Object fidelity verification is object-local: judge only the checked object's bbox or owned SVG group.
+        - vf: visible-form fidelity. Check the object's outer contour, silhouette, major shape, proportions, and distinctive visible outline against the raster. Use "N" when the object keeps the same broad identity but its source-visible outer form is materially wrong, missing, substituted, distorted, or proportionally different.
+        - is: internal-structure fidelity. Check source-visible internal marks, strokes, subparts, repeated motifs, connectivity, grouping, z-order, internal layout, and count/placement of meaningful internal elements. Use "N" when those visible internal details are missing, materially altered, wrongly counted, wrongly connected/grouped, misplaced, or visually substituted, even if the object remains semantically recognizable.
+        - op: owned-part relationship fidelity. Check only relationships among parts owned by this object, including relative position, overlap, containment, attachment, and local z-order. Use "N" when owned parts are arranged differently enough to change the object's local structure; do not use op for sibling-object spacing, region padding, or layout among separately recognized objects.
+        - ls: local-style fidelity. Check object-local stroke/fill language, color treatment, opacity, visual weight, texture, and pictogram style against the raster. Use "N" when local appearance materially changes the object's visual language while its form and structure may still be recognizable.
+        - si: structural-integrity fidelity. Check whether the object remains visually coherent and usable as one intended object. Use "N" when it appears broken, collapsed, disconnected, malformed, clipped, self-overlapping in a confusing way, or structurally nonsensical.
+        - Sibling-object spacing, cross-object scale balance, content-stack alignment, and region padding are not object fidelity failures; report those in review.global_repairs with issue_family="layout_relation".
+        - Container checks cover the container's own contour, border, fill, local decorations, and owned parts only; they do not judge the layout among separate child/sibling objects.
+        - Text checks cover local text content, readability, typography, and owned marks only; they do not judge spacing relative to separate objects.
+        - reason must be concise visual evidence, preferably separated by semicolons when noting multiple points.
+        - Each fidelity_verifications reason must stay under 32 words.
+        - verification reason must cite concrete source-visible evidence from the checked axis; a reason that only states semantic identity, broad recognizability, or overall acceptability is insufficient.
+        - Do not use reason to override checks.
+        - Do not output a separate per-goal checklist; fidelity_verifications is one compact axis judgment per checked object, and object_issues contains material failures.
         - A generic pass such as "recognizable", "semantically faithful", "same category", or "looks correct" is insufficient for verify_required objects.
         - Do not use passed_items to merely restate fidelity_goals. If uncertain, prefer one concise object_issue over a generic pass.
         - If a required fidelity object passes, passed_items must mention concrete visible agreement in the rendered preview, not just the requested goal text.
         - If any fidelity goal materially fails, report it in review.object_issues on the owning object_id.
-        - If a fidelity_verifications result describes a mismatch, missing detail, wrong form, generic replacement, or uncertainty, also add a matching review.object_issues item for the same object_id.
+        - If any fidelity_verifications check is "N", also add a matching review.object_issues item for the same object_id.
+        - If a fidelity_verifications reason describes a mismatch, missing detail, wrong form, generic replacement, or uncertainty, also add a matching review.object_issues item for the same object_id.
         - For required fidelity objects, report medium object_issues for visible visual-form mismatch even when semantic identity is preserved.
         - Do not require wrong identity before reporting shape_fidelity, internal_structure, or style_appearance on verify_required objects.
         - For every recognized object with object_type="icon", explicitly verify icon fidelity before deciding acceptance.
-        - For icon or symbolic objects, prioritize semantic recognizability, silhouette/contour agreement, distinctive parts, coherent internal structure/topology, internal strokes/marks, part proportions/overlap, z-order, and local pictogram style.
+        - For icon or symbolic objects, prioritize semantic recognizability, silhouette/contour agreement, distinctive parts, coherent internal structure/topology, internal strokes/marks, owned-part proportions/overlap, z-order, and local pictogram style.
         - Treat outline weight as secondary unless it changes the object identity, local style, or visual weight.
-        - Do not require pixel-perfect tracing: accept simplified icons when they preserve semantics, recognizable silhouette/contour, key distinctive parts, coherent internal structure, part relationships, and local pictogram style.
         - When an icon materially fails fidelity, report it in review.object_issues with issue_family="content_accuracy" for wrong/generic semantics or missing identity, "shape_fidelity" for wrong silhouette/contour/proportion, or "internal_structure" for missing distinctive parts/internal strokes/z-order/internal layout.
         - When an icon looks unlike the raster reference, report that fidelity gap explicitly instead of reframing it only as scale or placement drift.
-        - Do not accept an icon only because it is semantically recognizable; check silhouette/contour, distinctive parts, internal structure, internal strokes/marks, and part relationships.
+        - Do not accept an icon only because it is semantically recognizable; check silhouette/contour, distinctive parts, internal structure, internal strokes/marks, and owned-part relationships.
         - For verify_required objects, use content_accuracy for missing/wrong required visible detail, shape_fidelity for failed silhouette/contour goals, internal_structure for failed internal marks/strokes/topology/z-order/relative layout goals, and style_appearance for failed color/stroke/visual-weight goals.
         - For verify_required objects, medium severity means the object has the same broad semantics but a visible fidelity goal fails; high severity means generic substitution, missing key goal, wrong identity, or broken internal structure.
         - Layout/style tolerance does not suppress required symbol/icon fidelity checks.
         - For verify_required icons, visible contour, internal-structure, or local-style mismatch is not minor polish when it changes the symbol's visual identity.
-        - Example fidelity verification: {{"object_id": "cloud_code_icon", "result": "Cloud contour, badge placement, and bracket marks match the raster icon."}}
-        - Example fidelity verification: {{"object_id": "brain_network_icon", "result": "Brain folds and network node pattern differ from the raster symbol."}}
+        - Example fidelity verification: {{"object_id": "cloud_code_icon", "checks": {{"vf": "Y", "is": "Y", "op": "Y", "ls": "Y", "si": "Y"}}, "reason": "Cloud contour matches; window placement and code marks match the raster icon."}}
+        - Example fidelity verification: {{"object_id": "calendar_icon", "checks": {{"vf": "Y", "is": "N", "op": "Y", "ls": "Y", "si": "Y"}}, "reason": "Outer calendar shape is close; date grid rows are missing and top rings are simplified."}}
         - Example object issue: {{"object_id": "icon_1", "issue_family": "internal_structure", "criterion": "Preserve symbol internal structure.", "reason": "Internal marks or topology differ from the raster symbol.", "severity": "medium"}}
         - Example object issue: {{"object_id": "icon_2", "issue_family": "shape_fidelity", "criterion": "Preserve symbol visible form.", "reason": "Outer contour or part proportions differ from the raster symbol.", "severity": "medium"}}
         - Example object issue: {{"object_id": "icon_3", "issue_family": "style_appearance", "criterion": "Preserve symbol local style.", "reason": "Local pictogram style looks like a different symbol system.", "severity": "medium"}}
@@ -534,7 +578,7 @@ def build_region_combined_policy_prompts(
                       "Rounded card border reads clearly.",
                       "Title and description hierarchy preserved."
                     ],
-                    "fidelity_verifications": [{{"object_id": "cloud_code_icon", "result": "Cloud contour and code badge match the raster icon."}}],
+                    "fidelity_verifications": [{{"object_id": "cloud_code_icon", "checks": {{"vf": "Y", "is": "Y", "op": "Y", "ls": "Y", "si": "Y"}}, "reason": "Cloud contour and code badge match the raster icon."}}],
                     "global_repairs": [{{"issue_family": "layout_relation", "criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}],
                     "object_issues": [{{"object_id": "obj1", "issue_family": "shape_fidelity", "criterion": "brief criterion", "reason": "brief reason", "severity": "medium"}}]
                   }},
@@ -744,7 +788,7 @@ def build_fusion_combined_policy_prompts(
         Return JSON only.
 
         Rules:
-        - route is always fusion_repair.
+        - Do not output repair_plan.route; the backend inserts the fixed fusion_repair route.
         - acceptance_tendency must be accept or reject.
         - stop_tendency must be continue or stop.
         - review issue descriptions must stay under 24 words; all rationales should stay under 20 words.
@@ -769,7 +813,6 @@ def build_fusion_combined_policy_prompts(
             required_fields=("review", "repair_plan", "termination"),
             array_fields=history_array_fields(has_history, "review.known_limitations"),
             closed_value_fields={
-                "repair_plan.route": ("fusion_repair",),
                 "termination.acceptance_tendency": ("accept", "reject"),
                 "termination.stop_tendency": ("continue", "stop"),
                 "repair_plan.strategy_confidence": ("low", "medium", "high"),
@@ -807,7 +850,6 @@ def build_fusion_combined_policy_prompts(
                   {history_shape}
                   "review": {final_review_result_json_example()},
                   "repair_plan": {{
-                    "route": "fusion_repair",
                     "route_rationale": "brief reason",
                     "strategy_enabled": {str(strategy_enabled).lower()},
                     "strategy_label": null,

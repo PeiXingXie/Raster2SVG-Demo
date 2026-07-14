@@ -78,10 +78,19 @@ def _collect_artifact_hints(run: ExecutionRun | None, artifact_dir: str | None) 
     payload = event.payload if event is not None and isinstance(event.payload, dict) else {}
     request_path = _safe_text(payload.get("request_path"))
     raw_response_path = _safe_text(payload.get("raw_response_path"))
+    error_path = _safe_text(payload.get("error_path"))
     if request_path:
         hints.append(FailureArtifactHint(label="Failed request payload", relative_path=request_path.replace("/", "\\"), kind="request"))
     if raw_response_path:
         hints.append(FailureArtifactHint(label="Failed raw response", relative_path=raw_response_path.replace("/", "\\"), kind="response"))
+    if error_path:
+        relative_error_path = error_path
+        if artifact_dir:
+            try:
+                relative_error_path = str(Path(error_path).resolve().relative_to(Path(artifact_dir).resolve()))
+            except (OSError, ValueError):
+                relative_error_path = error_path
+        hints.append(FailureArtifactHint(label="Render error log", relative_path=relative_error_path.replace("/", "\\"), kind="render-error"))
     return hints
 
 

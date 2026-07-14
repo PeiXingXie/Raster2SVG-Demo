@@ -6,7 +6,7 @@ from pathlib import Path
 
 from deepagents_template.debug_review import DebugFinalReviewWorkerAgent
 from deepagents_template.schemas import FinalReviewResult, IntegratedSvgRepairResult
-from deepagents_template.utils.svg_rendering import write_svg_review_artifacts
+from deepagents_template.utils.svg_rendering import SvgPreviewRenderError, write_svg_review_artifacts
 
 
 class IntegrateProcessNodeMixin:
@@ -69,7 +69,7 @@ class IntegrateProcessNodeMixin:
         svg_file_name = "merged-final-review.svg"
         svg_path = review_dir / svg_file_name
         png_path = review_dir / "merged-final-review.png"
-        _, rendered_svg_path = write_svg_review_artifacts(
+        _, rendered_svg_path, render_result = write_svg_review_artifacts(
             svg_text=merged_svg,
             svg_path=svg_path,
             png_path=png_path,
@@ -77,6 +77,30 @@ class IntegrateProcessNodeMixin:
         self._record_written_file(svg_path, kind="svg")
         if rendered_svg_path is not None:
             self._record_written_file(rendered_svg_path, kind="png")
+        else:
+            error_path = png_path.with_suffix(".render_error.txt")
+            error_path.write_text(
+                "\n".join(
+                    [
+                        "scope: legacy-full-svg",
+                        f"svg_path: {svg_path}",
+                        f"png_path: {png_path}",
+                        f"renderer: {render_result.renderer or '-'}",
+                        f"error: {render_result.error or '-'}",
+                        "stderr:",
+                        render_result.stderr or "-",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self._record_written_file(error_path, kind="txt")
+            raise SvgPreviewRenderError(
+                scope="legacy-full-svg",
+                svg_path=svg_path,
+                png_path=png_path,
+                error_path=error_path,
+                render_result=render_result,
+            )
         return DebugFinalReviewWorkerAgent(self).run(
             copied_input_path=copied_input_path,
             checklist=checklist,

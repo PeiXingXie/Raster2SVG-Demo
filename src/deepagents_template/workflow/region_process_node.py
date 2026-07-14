@@ -10,7 +10,7 @@ from deepagents_template.debug_review import DebugRegionReviewWorkerAgent
 from deepagents_template.geometry import build_region_context, recognition_bboxes_to_global_if_local
 from deepagents_template.schemas import RegionRecognitionResult, RegionRepairResult, RegionReviewResult, RegionSvgGenerationResult
 from deepagents_template.svg_utils import extract_group_template
-from deepagents_template.utils.svg_rendering import wrap_svg_fragment, write_svg_review_artifacts
+from deepagents_template.utils.svg_rendering import SvgPreviewRenderError, wrap_svg_fragment, write_svg_review_artifacts
 from deepagents_template.utils.svg_runtime import finalize_region_svg
 from deepagents_template.utils.tasks import create_region_task
 
@@ -472,7 +472,7 @@ class RegionProcessNodeMixin:
                 max(int(bbox.get("height", 1)), 1),
             ),
         )
-        _, rendered_svg_path = write_svg_review_artifacts(
+        _, rendered_svg_path, render_result = write_svg_review_artifacts(
             svg_text=wrapped_svg,
             svg_path=svg_path,
             png_path=png_path,
@@ -480,6 +480,30 @@ class RegionProcessNodeMixin:
         self._record_written_file(svg_path, kind="svg")
         if rendered_svg_path is not None:
             self._record_written_file(rendered_svg_path, kind="png")
+        else:
+            error_path = png_path.with_suffix(".render_error.txt")
+            error_path.write_text(
+                "\n".join(
+                    [
+                        f"scope: legacy-region:{region.get('region_id', '')}",
+                        f"svg_path: {svg_path}",
+                        f"png_path: {png_path}",
+                        f"renderer: {render_result.renderer or '-'}",
+                        f"error: {render_result.error or '-'}",
+                        "stderr:",
+                        render_result.stderr or "-",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self._record_written_file(error_path, kind="txt")
+            raise SvgPreviewRenderError(
+                scope=f"legacy-region:{region.get('region_id', '')}",
+                svg_path=svg_path,
+                png_path=png_path,
+                error_path=error_path,
+                render_result=render_result,
+            )
         return DebugRegionReviewWorkerAgent(self).run(
             crop_path=crop_path,
             region=region,

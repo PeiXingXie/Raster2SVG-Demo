@@ -1,5 +1,5 @@
 import { fetchJson } from "./api-client.js";
-import { elements } from "./dom.js?v=desktop-history-jump-1";
+import { elements } from "./dom.js?v=refine-activity-feed-1";
 import {
   applyFrontendDefaults,
   applyRuntimeOverrides,
@@ -24,11 +24,12 @@ import {
   getLatestManualAdjustment,
   refreshWorkflowTraceLayout,
   renderArtifactFiles,
+  renderManualRecentActivity,
   renderManualWorkflowTrace,
   renderArtifactSummary,
   renderWorkspaceArtifactLoadingState,
   updateWorkflowTraceTimers,
-} from "./renderers/artifacts.js?v=run-start-state-boundary-1";
+} from "./renderers/artifacts.js?v=refine-activity-feed-1";
 import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=run-start-state-boundary-1";
 import { arrayBufferToBase64, formatElapsedDuration, scrollIntoContainerView, stableStringify } from "./utils.js";
 
@@ -212,15 +213,111 @@ function applyFriendlySettingsLabels() {
   applySettingsLabelMappings(document);
 }
 
-function openImageLightbox({ src, alt = "", caption = "" }) {
-  if (!elements.imageLightbox || !elements.imageLightboxImage) {
+const imageLightboxState = {
+  scale: 1,
+  translateX: 0,
+  translateY: 0,
+  isDragging: false,
+  dragStartX: 0,
+  dragStartY: 0,
+  dragOriginX: 0,
+  dragOriginY: 0,
+  surface: null,
+};
+
+function updateImageLightboxTransform() {
+  if (!imageLightboxState.surface) {
+    return;
+  }
+  imageLightboxState.surface.style.transform =
+    `translate(${imageLightboxState.translateX}px, ${imageLightboxState.translateY}px) scale(${imageLightboxState.scale})`;
+  if (elements.imageLightboxZoomReset) {
+    elements.imageLightboxZoomReset.textContent = `${Math.round(imageLightboxState.scale * 100)}%`;
+  }
+}
+
+function resetImageLightboxZoom() {
+  imageLightboxState.scale = 1;
+  imageLightboxState.translateX = 0;
+  imageLightboxState.translateY = 0;
+  updateImageLightboxTransform();
+}
+
+function setImageLightboxScale(nextScale, anchor = null) {
+  const previousScale = imageLightboxState.scale;
+  const scale = Math.min(6, Math.max(0.25, nextScale));
+  if (Math.abs(scale - previousScale) < 0.001) {
+    return;
+  }
+  if (anchor && elements.imageLightboxStage) {
+    const rect = elements.imageLightboxStage.getBoundingClientRect();
+    const offsetX = anchor.clientX - rect.left - rect.width / 2 - imageLightboxState.translateX;
+    const offsetY = anchor.clientY - rect.top - rect.height / 2 - imageLightboxState.translateY;
+    const ratio = scale / previousScale;
+    imageLightboxState.translateX -= offsetX * (ratio - 1);
+    imageLightboxState.translateY -= offsetY * (ratio - 1);
+  }
+  imageLightboxState.scale = scale;
+  if (scale <= 1) {
+    imageLightboxState.translateX = 0;
+    imageLightboxState.translateY = 0;
+  }
+  updateImageLightboxTransform();
+}
+
+function prepareImageLightboxSurface({ src, alt = "", crop = null }) {
+  if (!elements.imageLightboxStage || !elements.imageLightboxImage) {
+    return null;
+  }
+  const surface = document.createElement("div");
+  surface.className = "image-lightbox-zoom-surface";
+  elements.imageLightboxImage.remove();
+  elements.imageLightboxImage.src = src;
+  elements.imageLightboxImage.alt = alt || "Expanded preview";
+  if (crop) {
+    const frame = document.createElement("div");
+    frame.className = "image-lightbox-crop-frame";
+    const cropWidth = Math.max(crop.width, 1);
+    const cropHeight = Math.max(crop.height, 1);
+    const cropRatio = cropWidth / cropHeight;
+    const maxFrameWidth = Math.max(260, Math.min(920, window.innerWidth - 140));
+    const maxFrameHeight = Math.max(180, window.innerHeight - 220);
+    let frameWidth = Math.min(maxFrameWidth, maxFrameHeight * cropRatio);
+    let frameHeight = frameWidth / cropRatio;
+    if (frameHeight > maxFrameHeight) {
+      frameHeight = maxFrameHeight;
+      frameWidth = frameHeight * cropRatio;
+    }
+    const cropScale = frameWidth / cropWidth;
+    frame.style.width = `${Math.round(frameWidth)}px`;
+    frame.style.height = `${Math.round(frameHeight)}px`;
+    elements.imageLightboxImage.style.width = `${Math.max(crop.canvasWidth, 1) * cropScale}px`;
+    elements.imageLightboxImage.style.height = `${Math.max(crop.canvasHeight, 1) * cropScale}px`;
+    elements.imageLightboxImage.style.left = `${-crop.x * cropScale}px`;
+    elements.imageLightboxImage.style.top = `${-crop.y * cropScale}px`;
+    frame.appendChild(elements.imageLightboxImage);
+    surface.appendChild(frame);
+  } else {
+    elements.imageLightboxImage.style.removeProperty("width");
+    elements.imageLightboxImage.style.removeProperty("height");
+    elements.imageLightboxImage.style.removeProperty("left");
+    elements.imageLightboxImage.style.removeProperty("top");
+    surface.appendChild(elements.imageLightboxImage);
+  }
+  elements.imageLightboxStage.replaceChildren(surface);
+  imageLightboxState.surface = surface;
+  resetImageLightboxZoom();
+  return surface;
+}
+
+function openImageLightbox({ src, alt = "", caption = "", crop = null }) {
+  if (!elements.imageLightbox || !elements.imageLightboxImage || !elements.imageLightboxStage) {
     return;
   }
   if (!src) {
     return;
   }
-  elements.imageLightboxImage.src = src;
-  elements.imageLightboxImage.alt = alt || "Expanded preview";
+  prepareImageLightboxSurface({ src, alt, crop });
   if (elements.imageLightboxCaption) {
     elements.imageLightboxCaption.textContent = caption || alt || "";
   }
@@ -237,6 +334,13 @@ function closeImageLightbox() {
   elements.imageLightbox.setAttribute("aria-hidden", "true");
   elements.imageLightboxImage.removeAttribute("src");
   elements.imageLightboxImage.alt = "Expanded preview";
+  elements.imageLightboxImage.style.removeProperty("width");
+  elements.imageLightboxImage.style.removeProperty("height");
+  elements.imageLightboxImage.style.removeProperty("left");
+  elements.imageLightboxImage.style.removeProperty("top");
+  elements.imageLightboxStage?.replaceChildren(elements.imageLightboxImage);
+  imageLightboxState.surface = null;
+  imageLightboxState.isDragging = false;
   if (elements.imageLightboxCaption) {
     elements.imageLightboxCaption.textContent = "";
   }
@@ -255,6 +359,17 @@ function confirmDesktopAction({
     confirmLabel,
     cancelLabel,
     mode: "confirm",
+  });
+}
+
+function showDesktopErrorDialog({ title = "Run Failed", message = "" } = {}) {
+  showDesktopToast(title);
+  return openDesktopActionDialog({
+    title,
+    message,
+    confirmLabel: "OK",
+    cancelLabel: "Dismiss",
+    mode: "notice",
   });
 }
 
@@ -290,13 +405,19 @@ function openDesktopActionDialog({
     if (mode === "prompt") {
       return Promise.resolve(window.prompt(message || title, inputValue));
     }
+    if (mode === "notice") {
+      window.alert(message || title);
+      return Promise.resolve(true);
+    }
     return Promise.resolve(window.confirm(message || title));
   }
   const isPrompt = mode === "prompt";
+  const isNotice = mode === "notice";
   elements.desktopConfirmTitle.textContent = title;
   elements.desktopConfirmMessage.textContent = message;
   elements.desktopConfirmOk.textContent = confirmLabel;
   elements.desktopConfirmCancel.textContent = cancelLabel;
+  elements.desktopConfirmCancel.classList.toggle("hidden", isNotice);
   elements.desktopConfirmOk.classList.toggle("danger-primary-btn", !isPrompt);
   if (elements.desktopConfirmInputWrap && elements.desktopConfirmInput) {
     elements.desktopConfirmInputWrap.classList.toggle("hidden", !isPrompt);
@@ -317,6 +438,7 @@ function openDesktopActionDialog({
       elements.desktopConfirmModal.removeEventListener("click", handleClick);
       document.removeEventListener("keydown", handleKeydown);
       elements.desktopConfirmOk.classList.add("danger-primary-btn");
+      elements.desktopConfirmCancel.classList.remove("hidden");
       if (elements.desktopConfirmInputWrap && elements.desktopConfirmInput) {
         elements.desktopConfirmInputWrap.classList.add("hidden");
         elements.desktopConfirmInput.value = "";
@@ -327,7 +449,7 @@ function openDesktopActionDialog({
       const action = event.target instanceof Element ? event.target.closest("[data-confirm-action]")?.getAttribute("data-confirm-action") : null;
       if (action === "confirm") {
         cleanup(isPrompt ? elements.desktopConfirmInput?.value ?? "" : true);
-      } else if (action === "cancel") {
+      } else if (action === "cancel" && !isNotice) {
         cleanup(isPrompt ? null : false);
       }
     };
@@ -504,12 +626,8 @@ function deriveJourneyState() {
   const hasManualResult = Boolean(getLatestManualAdjustment(artifactSnapshot));
   const runActive = Boolean(selectedRun && ["queued", "running", "needs_approval", "paused"].includes(selectedRun.status));
   const promptReady = Boolean(getMessageEffectiveValue().trim());
-  const hasSelection = Boolean(
-    appState.manualConfirmedTarget?.selectionBox
-    || appState.manualSelectionBox
-    || appState.selectedOverlay?.regionId
-  );
-  const manualGoal = elements.manualUserIntroduction?.value?.trim() || elements.manualTargetDescription?.value?.trim() || "";
+  const hasSelection = hasManualRefineTarget();
+  const manualGoal = getManualGoalText();
   const runStatus = selectedRun?.status || null;
   const currentStage = artifactSnapshot?.current_stage || selectedRun?.current_stage || null;
 
@@ -931,15 +1049,31 @@ function isMainFlowComplete(snapshot = appState.latestArtifactSnapshot) {
   return !["queued", "running"].includes(runStatus);
 }
 
-function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
-  const hasOutput = hasUsableArtifactOutput(snapshot);
-  const mainFlowDone = isMainFlowComplete(snapshot);
-  const hasTarget = Boolean(
+function getManualGoalText() {
+  return elements.manualUserIntroduction?.value?.trim()
+    || elements.manualTargetDescription?.value?.trim()
+    || "";
+}
+
+function hasManualRefineTarget() {
+  return Boolean(
     appState.manualConfirmedTarget?.selectionBox
     || appState.manualSelectionBox
     || appState.selectedOverlay?.regionId
+    || appState.selectedOverlay?.objectId
   );
-  const hasGoal = Boolean((elements.manualUserIntroduction?.value || "").trim() || (elements.manualTargetDescription?.value || "").trim());
+}
+
+function refreshManualRefineReadiness(snapshot = appState.latestArtifactSnapshot) {
+  renderManualAdjustmentPanel(snapshot);
+  updateGuideContent();
+}
+
+function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
+  const hasOutput = hasUsableArtifactOutput(snapshot);
+  const mainFlowDone = isMainFlowComplete(snapshot);
+  const hasTarget = hasManualRefineTarget();
+  const hasGoal = Boolean(getManualGoalText());
   const hasManualResult = Boolean(getLatestManualAdjustment(snapshot));
   const canOpenRefine = Boolean(mainFlowDone && hasOutput);
   const readyToApply = Boolean(canOpenRefine && hasTarget && hasGoal);
@@ -958,7 +1092,7 @@ function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
     canSelectTarget: canOpenRefine,
     canApply: readyToApply,
     readyToApply,
-    label: canOpenRefine ? "Ready" : "Locked",
+    label: !canOpenRefine ? "Locked" : readyToApply ? "Ready" : "Available",
     title,
   };
 }
@@ -1168,21 +1302,14 @@ function updateManualSimpleModeVisibility(snapshot) {
   elements.manualWorkflowBar?.classList.toggle("manual-section-collapsed", collapseWorkflow);
   elements.manualEditCore?.classList.toggle("manual-section-collapsed", collapseEditCore);
 
-  if (elements.manualReferencePanel && !elements.manualReferencePanel.matches("[open]")) {
-    elements.manualReferencePanel.classList.toggle("auto-collapsed", true);
-  } else {
-    elements.manualReferencePanel?.classList.remove("auto-collapsed");
-  }
-
   if (elements.manualReferencePanel && !elements.manualReferencePanel.dataset.userToggled) {
-    elements.manualReferencePanel.open = Boolean(
-      canOpenRefine
-      && hasTarget
-      && !hasGoal
-      && elements.manualUseReferenceImages?.checked
-    );
-    elements.manualReferencePanel.classList.toggle("auto-collapsed", !elements.manualReferencePanel.open);
+    const nextOpen = Boolean(appState.manualReferenceAutoOpenedForTarget);
+    if (elements.manualReferencePanel.open !== nextOpen) {
+      elements.manualReferencePanel.dataset.programmaticToggle = "true";
+      elements.manualReferencePanel.open = nextOpen;
+    }
   }
+  elements.manualReferencePanel?.classList.toggle("auto-collapsed", !elements.manualReferencePanel.open);
 
   if (elements.manualTracePanel && !elements.manualTracePanel.dataset.userToggled && !getLatestManualAdjustment(snapshot)) {
     elements.manualTracePanel.open = false;
@@ -1737,6 +1864,13 @@ function confirmManualSelection(snapshot) {
     selectionScope: resolved.selectionScope,
     selectionKind: appState.manualSelectionShape?.kind || getNormalizedSelectionKind(),
   };
+  if (!appState.manualReferenceAutoOpenedForTarget && elements.manualReferencePanel) {
+    appState.manualReferenceAutoOpenedForTarget = true;
+    setManualReferenceMode("default", { render: false });
+    elements.manualReferencePanel.dataset.programmaticToggle = "true";
+    elements.manualReferencePanel.open = true;
+    elements.manualReferencePanel.classList.remove("auto-collapsed");
+  }
 }
 
 function confirmManualReferenceSelection(snapshot) {
@@ -1757,6 +1891,8 @@ function confirmManualReferenceSelection(snapshot) {
     appState.manualConfirmedReferenceSelection = null;
   }
   appState.manualCustomReferenceConfirmed = true;
+  appState.manualReferenceMode = "capture";
+  elements.manualUseReferenceImages.checked = true;
   elements.manualIncludeDefaultCrop.checked = false;
 }
 
@@ -1769,6 +1905,83 @@ function getManualReferencePaths() {
     : [];
   const uploadedPaths = appState.manualReferenceUploads.map((item) => item.image_path);
   return [...uploadedPaths, ...inlinePaths];
+}
+
+function getManualReferenceMode() {
+  return appState.manualReferenceMode || (
+    !elements.manualUseReferenceImages.checked
+      ? "none"
+      : elements.manualIncludeDefaultCrop.checked
+        ? "default"
+        : "add"
+  );
+}
+
+function getManualReferenceContainer() {
+  return elements.manualReferencePanel?.querySelector(".manual-reference-upload") || null;
+}
+
+function updateManualReferenceModeControls() {
+  const mode = getManualReferenceMode();
+  const uploadPanelOpen = Boolean(elements.manualReferenceUploadPanel?.open);
+  const uploadCount = appState.manualReferenceUploads.length;
+  const container = getManualReferenceContainer();
+  if (container) {
+    container.dataset.referenceMode = mode;
+  }
+  elements.manualReferenceUseDefault?.classList.toggle("is-active", mode === "default");
+  elements.manualReferenceCaptureRef?.classList.toggle("is-active", mode === "capture");
+  elements.manualReferenceAddImage?.classList.toggle("is-active", mode === "add");
+  elements.manualReferenceAddImage?.classList.toggle("is-upload-active", uploadPanelOpen);
+  elements.manualReferenceNoRef?.classList.toggle("is-active", mode === "none");
+  elements.manualReferenceAddImage?.setAttribute("aria-expanded", uploadPanelOpen ? "true" : "false");
+  if (elements.manualUploadStatus) {
+    elements.manualUploadStatus.textContent = uploadCount
+      ? `${uploadCount} image${uploadCount === 1 ? "" : "s"}`
+      : uploadPanelOpen
+        ? "Ready"
+        : "No images";
+  }
+}
+
+function setManualReferenceMode(mode, { openUpload = false, render = true } = {}) {
+  appState.manualReferenceMode = mode;
+  if (mode === "none") {
+    elements.manualUseReferenceImages.checked = false;
+    elements.manualIncludeDefaultCrop.checked = false;
+    appState.manualCustomReferenceConfirmed = false;
+    appState.manualConfirmedReferenceSelection = null;
+    if (elements.manualReferenceUploadPanel) {
+      elements.manualReferenceUploadPanel.open = false;
+    }
+  } else if (mode === "add") {
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = false;
+    appState.manualCustomReferenceConfirmed = appState.manualReferenceUploads.length > 0;
+    appState.manualConfirmedReferenceSelection = null;
+    if (elements.manualReferenceUploadPanel) {
+      elements.manualReferenceUploadPanel.open = true;
+    }
+  } else if (mode === "capture") {
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = !appState.manualConfirmedReferenceSelection?.selectionBox;
+    appState.manualCustomReferenceConfirmed = Boolean(appState.manualConfirmedReferenceSelection?.selectionBox);
+    if (elements.manualReferenceUploadPanel) {
+      elements.manualReferenceUploadPanel.open = false;
+    }
+  } else {
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = true;
+    appState.manualCustomReferenceConfirmed = false;
+    appState.manualConfirmedReferenceSelection = null;
+    if (elements.manualReferenceUploadPanel) {
+      elements.manualReferenceUploadPanel.open = false;
+    }
+  }
+  updateManualReferenceModeControls();
+  if (render) {
+    renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+  }
 }
 
 function releaseManualReferenceUploads() {
@@ -1788,7 +2001,7 @@ function resetManualReferenceSurface() {
   elements.manualReferencePreviewImage.classList.add("hidden");
   elements.manualReferencePreviewEmpty.classList.remove("hidden");
   elements.manualReferencePreviewMeta.textContent =
-    "Focus here, then paste an image. You can also choose a file or capture from Input.";
+    "Focus here, then paste an image. You can also choose a local image file.";
   elements.manualReferencePastezone.classList.add("upload-preview-empty-state");
 }
 
@@ -1827,7 +2040,7 @@ function renderManualReferenceSurface(snapshot) {
     return;
   }
   if (inlinePathCount) {
-    elements.manualReferencePreviewMeta.textContent = `${inlinePathCount} reference path(s) added. Confirm Ref Area to replace the default crop.`;
+    elements.manualReferencePreviewMeta.textContent = `${inlinePathCount} reference path(s) added. Confirm Area to replace the default crop.`;
     return;
   }
   if (!snapshot?.previews?.input_image_url) {
@@ -1838,12 +2051,10 @@ function renderManualReferenceSurface(snapshot) {
 function renderManualReferenceUploads() {
   elements.manualReferencePreview.innerHTML = "";
   renderManualReferenceSurface(appState.latestArtifactSnapshot);
-  if (!appState.manualReferenceUploads.length) {
-    elements.manualReferencePreview.className = "manual-reference-preview empty-state";
-    elements.manualReferencePreview.textContent = "Reference previews appear here.";
-    if (!appState.manualCustomReferenceConfirmed) {
-      elements.manualUploadStatus.textContent = "No reference images uploaded.";
-    }
+  if (getManualReferenceMode() !== "add" || !appState.manualReferenceUploads.length) {
+    elements.manualReferencePreview.className = "hidden";
+    elements.manualReferencePreview.textContent = "";
+    updateManualReferenceModeControls();
     return;
   }
 
@@ -1886,30 +2097,38 @@ function renderManualReferenceUploads() {
   elements.manualUploadStatus.textContent = appState.manualCustomReferenceConfirmed
     ? `${appState.manualReferenceUploads.length} reference image(s) confirmed.`
     : `${appState.manualReferenceUploads.length} reference image(s) uploaded. Confirm to replace the default crop.`;
+  updateManualReferenceModeControls();
 }
 
 function renderConfirmedTargetCard(activeFrame) {
   const target = appState.manualConfirmedTarget;
   if (!target) {
-    elements.manualConfirmedTarget.className = "manual-confirmed-target empty-state";
+    elements.manualConfirmedTarget.className = "hidden";
     elements.manualConfirmedTarget.textContent = "Set a target to pin the region, bbox, and base frame.";
     return;
   }
-  const customReferencePaths = getManualReferencePaths();
-  const confirmedCustomReference = appState.manualCustomReferenceConfirmed
-    && (customReferencePaths.length > 0 || appState.manualConfirmedReferenceSelection?.selectionBox);
-  const referenceSourceLabel = confirmedCustomReference
-    ? appState.manualReferenceUploads.length
-      ? `custom uploads (${appState.manualReferenceUploads.length})`
-      : appState.manualConfirmedReferenceSelection?.selectionBox
-        ? "confirmed input crop"
-        : `${customReferencePaths.length} custom path(s)`
-    : elements.manualUseReferenceImages.checked && elements.manualIncludeDefaultCrop.checked
-      ? "default crop"
-      : "none";
-  elements.manualConfirmedTarget.className = "manual-confirmed-target";
+  const referenceMode = getManualReferenceMode();
+  const addImagePaths = getManualReferencePaths();
+  const hasCapturedReference = Boolean(appState.manualConfirmedReferenceSelection?.selectionBox);
+  const referenceSourceLabel = referenceMode === "none"
+    ? "none"
+    : referenceMode === "add"
+      ? addImagePaths.length
+        ? `custom uploads (${addImagePaths.length})`
+        : "custom upload pending"
+      : referenceMode === "capture"
+        ? hasCapturedReference
+          ? "confirmed input crop"
+          : "input crop pending"
+        : "default crop";
+  const isDesktop = document.body.classList.contains("desktop-body");
   const isSimpleMode = document.body?.dataset?.uiMode === "simple";
-  if (isSimpleMode) {
+  elements.manualConfirmedTarget.className = isDesktop
+    ? "manual-confirmed-target manual-target-confirmed-preview"
+    : "manual-confirmed-target";
+  if (isDesktop) {
+    elements.manualConfirmedTarget.replaceChildren();
+  } else if (isSimpleMode) {
     elements.manualConfirmedTarget.innerHTML = `
       <div class="manual-confirmed-pill-row">
         <span class="workflow-trace-chip">${target.baseFrameTitle || activeFrame?.title || "base frame pending"}</span>
@@ -1936,18 +2155,34 @@ function renderConfirmedTargetCard(activeFrame) {
   const previewGrid = document.createElement("div");
   previewGrid.className = "manual-selection-preview-grid";
 
-  const appendFocusPreview = (label, imageUrl) => {
+  const appendFocusPreview = (label, imageUrl, kind = "reference") => {
     if (!target.selectionBox || !imageUrl || !canvasWidth || !canvasHeight) {
       return;
     }
     const { x, y, width, height } = target.selectionBox;
     const thumb = document.createElement("div");
-    thumb.className = "manual-selection-thumb";
+    thumb.className = `manual-selection-thumb manual-selection-thumb--${kind}`;
+    thumb.dataset.previewKind = kind;
     thumb.innerHTML = `
       <div class="manual-selection-thumb-stage"></div>
       <div class="manual-reference-thumb-footer">
         <div class="manual-reference-caption">${label}</div>
-        <button class="image-zoom-button" type="button" data-zoom-src="${imageUrl}" data-zoom-alt="${label}" data-zoom-caption="${label}">Zoom</button>
+        <button
+          class="image-zoom-button"
+          type="button"
+          data-zoom-src="${imageUrl}"
+          data-zoom-alt="${label}"
+          data-zoom-caption="${label}"
+          data-zoom-crop="true"
+          data-zoom-crop-x="${x}"
+          data-zoom-crop-y="${y}"
+          data-zoom-crop-width="${width}"
+          data-zoom-crop-height="${height}"
+          data-zoom-canvas-width="${canvasWidth}"
+          data-zoom-canvas-height="${canvasHeight}"
+        >
+          Zoom
+        </button>
       </div>
     `;
     const stage = thumb.querySelector(".manual-selection-thumb-stage");
@@ -1965,15 +2200,17 @@ function renderConfirmedTargetCard(activeFrame) {
 
   appendFocusPreview(
     "Selected output area",
-    activeFrame?.preview_url || snapshot?.previews?.output_svg_url || snapshot?.previews?.output_png_url || null
+    activeFrame?.preview_url || snapshot?.previews?.output_svg_url || snapshot?.previews?.output_png_url || null,
+    "output"
   );
-  if (confirmedCustomReference && appState.manualReferenceUploads.length) {
+  if (referenceMode === "add" && appState.manualReferenceUploads.length) {
     for (const upload of appState.manualReferenceUploads.slice(0, 3)) {
       if (!upload.previewObjectUrl) {
         continue;
       }
       const thumb = document.createElement("div");
-      thumb.className = "manual-selection-thumb";
+      thumb.className = "manual-selection-thumb manual-selection-thumb--reference";
+      thumb.dataset.previewKind = "reference";
       thumb.innerHTML = `
         <div class="manual-selection-thumb-stage"><img src="${upload.previewObjectUrl}" alt="${upload.filename || "Reference image"}" /></div>
         <div class="manual-reference-thumb-footer">
@@ -1991,17 +2228,22 @@ function renderConfirmedTargetCard(activeFrame) {
       `;
       previewGrid.appendChild(thumb);
     }
-  } else if (confirmedCustomReference && appState.manualConfirmedReferenceSelection?.selectionBox) {
-    appendFocusPreview("Confirmed reference crop", snapshot?.previews?.input_image_url || null);
-  } else if (elements.manualUseReferenceImages.checked && elements.manualIncludeDefaultCrop.checked) {
-    appendFocusPreview("Default source crop", snapshot?.previews?.input_image_url || null);
+  } else if (referenceMode === "capture" && hasCapturedReference) {
+    appendFocusPreview("Confirmed reference crop", snapshot?.previews?.input_image_url || null, "reference");
+  } else if (referenceMode === "default" || (referenceMode === "capture" && !hasCapturedReference)) {
+    appendFocusPreview("Default source crop", snapshot?.previews?.input_image_url || null, "reference");
   }
   if (previewGrid.childElementCount > 0) {
     elements.manualConfirmedTarget.appendChild(previewGrid);
+  } else if (isDesktop) {
+    elements.manualConfirmedTarget.className = "hidden";
   }
 }
 
 function renderConfirmedReferenceSelection(snapshot) {
+  if (getManualReferenceMode() !== "capture") {
+    return;
+  }
   const referenceSelection = appState.manualConfirmedReferenceSelection;
   const draftSelection = appState.manualReferenceSelectionShape;
   const activeSelection = referenceSelection || draftSelection;
@@ -2009,7 +2251,7 @@ function renderConfirmedReferenceSelection(snapshot) {
   if (!activeSelection?.bbox) {
     elements.manualReferenceSelectionSummary.textContent = appState.manualCustomReferenceConfirmed && customPathCount
       ? `Confirmed ${customPathCount} custom reference path(s). Default crop will be replaced.`
-      : "You can draw a reference area directly on the Input image.";
+      : "Draw a reference area on Input, then confirm it as the reference crop.";
     return;
   }
   const bbox = activeSelection.bbox;
@@ -2039,6 +2281,13 @@ function renderConfirmedReferenceSelection(snapshot) {
         data-zoom-src="${previewUrl}"
         data-zoom-alt="Reference area preview"
         data-zoom-caption="${referenceSelection ? "Drawn input reference area" : "Draft input reference area"}"
+        data-zoom-crop="true"
+        data-zoom-crop-x="${bbox.x}"
+        data-zoom-crop-y="${bbox.y}"
+        data-zoom-crop-width="${bbox.width}"
+        data-zoom-crop-height="${bbox.height}"
+        data-zoom-canvas-width="${canvasWidth}"
+        data-zoom-canvas-height="${canvasHeight}"
       >
         Zoom
       </button>
@@ -2058,6 +2307,11 @@ function renderConfirmedReferenceSelection(snapshot) {
 }
 
 function renderManualAdjustmentResult(snapshot, activeFrame) {
+  if (document.body.classList.contains("desktop-body")) {
+    elements.manualAdjustmentResult.className = "hidden";
+    elements.manualAdjustmentResult.replaceChildren();
+    return;
+  }
   const latestAdjustment = getLatestManualAdjustment(snapshot);
   if (!latestAdjustment) {
     elements.manualAdjustmentResult.className = "manual-adjustment-result empty-state";
@@ -2100,6 +2354,23 @@ function renderManualAdjustmentResult(snapshot, activeFrame) {
   elements.manualAdjustmentResult.replaceChildren(heading, resultGrid);
 }
 
+function renderManualRecentActivityPanel(snapshot) {
+  if (!elements.manualRecentActivity) {
+    return;
+  }
+  const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
+  const trace = selectedManualAdjustment?.workflow_trace || snapshot?.manual_workflow_trace || null;
+  const hasTraceNodes = Array.isArray(trace?.nodes) && trace.nodes.length > 0;
+  const shouldShow = Boolean(appState.manualAdjustmentRequestInFlight || selectedManualAdjustment || hasTraceNodes);
+  if (!shouldShow) {
+    elements.manualRecentActivity.className = "manual-recent-activity hidden";
+    elements.manualRecentActivity.replaceChildren();
+    return;
+  }
+  elements.manualRecentActivity.className = "manual-recent-activity";
+  renderManualRecentActivity(elements.manualRecentActivity, { manual_workflow_trace: trace });
+}
+
 function renderManualAdjustmentPanel(snapshot) {
   const selectedOverlay = appState.selectedOverlay || { type: "region", regionId: null, objectId: null };
   const selectionBox = readManualSelectionBoxFromInputs() || appState.manualSelectionBox;
@@ -2136,19 +2407,36 @@ function renderManualAdjustmentPanel(snapshot) {
   const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
   elements.manualBaseFrame.value = activeFrame ? `${activeFrame.title} (${activeFrame.frame_id})` : "";
   const readiness = getRefineReadinessState(snapshot);
-  const referenceImagesEnabled = Boolean(readiness.canOpenRefine && elements.manualUseReferenceImages.checked);
+  const canConfigureReferences = Boolean(readiness.canOpenRefine);
+  const referenceImagesEnabled = Boolean(canConfigureReferences && elements.manualUseReferenceImages.checked);
   elements.manualApplyButton.disabled = !readiness.canApply || appState.manualAdjustmentRequestInFlight;
   elements.manualConfirmSelection.disabled = !readiness.canSelectTarget;
+  if (elements.manualReferenceUseDefault) {
+    elements.manualReferenceUseDefault.disabled = !canConfigureReferences;
+  }
+  if (elements.manualReferenceCaptureRef) {
+    elements.manualReferenceCaptureRef.disabled = !canConfigureReferences;
+  }
+  if (elements.manualReferenceAddImage) {
+    elements.manualReferenceAddImage.disabled = !canConfigureReferences;
+  }
+  if (elements.manualReferenceNoRef) {
+    elements.manualReferenceNoRef.disabled = !canConfigureReferences;
+  }
   elements.manualReferenceConfirmSelection.disabled = !readiness.canSelectTarget;
   elements.manualReferenceClearSelection.disabled = !readiness.canSelectTarget;
   elements.manualReferencePaths.disabled = !referenceImagesEnabled;
   elements.manualPasteReferenceButton.disabled = !referenceImagesEnabled;
-  elements.manualReferenceCaptureButton.disabled =
+  if (elements.manualReferenceCaptureButton) {
+    elements.manualReferenceCaptureButton.disabled =
     !referenceImagesEnabled || !snapshot?.previews?.input_image_url;
+  }
   elements.manualReferencePastezone.tabIndex = referenceImagesEnabled ? 0 : -1;
   elements.manualUploadButton.disabled = !referenceImagesEnabled;
   elements.manualUploadInput.disabled = !referenceImagesEnabled;
   elements.manualIncludeDefaultCrop.disabled = !referenceImagesEnabled;
+  updateManualReferenceModeControls();
+  renderManualRecentActivityPanel(snapshot);
   renderConfirmedTargetCard(activeFrame);
   renderManualAdjustmentResult(snapshot, activeFrame);
   renderManualWorkflowTrace(selectedManualAdjustment || snapshot, (node) => {
@@ -2194,6 +2482,9 @@ async function uploadManualReferenceFiles(files) {
   }
   setStatus("Uploading manual references...");
   appState.manualCustomReferenceConfirmed = false;
+  appState.manualReferenceMode = "add";
+  elements.manualUseReferenceImages.checked = true;
+  elements.manualIncludeDefaultCrop.checked = false;
   for (const file of files) {
     const buffer = await file.arrayBuffer();
     const data = await fetchJson("/uploads", {
@@ -2264,6 +2555,8 @@ async function captureReferenceImageFromInput(snapshot) {
   });
   await uploadManualReferenceFiles([file]);
   appState.manualCustomReferenceConfirmed = true;
+  appState.manualReferenceMode = "add";
+  elements.manualUseReferenceImages.checked = true;
   elements.manualIncludeDefaultCrop.checked = false;
   elements.manualUploadStatus.textContent = "Input crop captured and confirmed as a reference image.";
   setStatus("Reference crop captured");
@@ -2289,8 +2582,12 @@ function buildManualAdjustmentPayload(snapshot) {
     }
   }
 
-  const useReferenceImages = elements.manualUseReferenceImages.checked;
-  const confirmedCustomReferences = appState.manualCustomReferenceConfirmed;
+  const referenceMode = getManualReferenceMode();
+  const useReferenceImages = referenceMode !== "none";
+  const addImageReferencePaths = referenceMode === "add" ? getManualReferencePaths() : [];
+  const captureReferenceBox = referenceMode === "capture"
+    ? (appState.manualConfirmedReferenceSelection?.selectionBox || null)
+    : null;
   const payload = {
     thread_id: appState.threadId,
     run_id: snapshot.run_id,
@@ -2298,11 +2595,11 @@ function buildManualAdjustmentPayload(snapshot) {
     mode: elements.manualMode.value || "worker",
     target_object_ids: targetObjectIds,
     target_region_id: targetRegionId,
-    target_description: elements.manualTargetDescription.value.trim() || null,
-    user_introduction: elements.manualUserIntroduction.value.trim(),
+    target_description: elements.manualTargetDescription?.value?.trim() || null,
+    user_introduction: elements.manualUserIntroduction?.value?.trim() || getManualGoalText(),
     use_reference_images: useReferenceImages,
-    reference_image_paths: useReferenceImages && confirmedCustomReferences ? getManualReferencePaths() : [],
-    include_default_crop: useReferenceImages && (!confirmedCustomReferences && elements.manualIncludeDefaultCrop.checked),
+    reference_image_paths: useReferenceImages ? addImageReferencePaths : [],
+    include_default_crop: useReferenceImages && (referenceMode === "default" || (referenceMode === "capture" && !captureReferenceBox)),
     include_no_image: !useReferenceImages,
   };
   const selectionBox = confirmedTarget?.selectionBox || readManualSelectionBoxFromInputs() || appState.manualSelectionBox;
@@ -2312,12 +2609,8 @@ function buildManualAdjustmentPayload(snapshot) {
   if (confirmedTarget?.selectionScope === "bbox_fragment" && !targetObjectIds.length) {
     payload.target_region_id = null;
   }
-  const referenceSelectionBox =
-    confirmedCustomReferences
-      ? (appState.manualConfirmedReferenceSelection?.selectionBox || null)
-      : null;
-  if (referenceSelectionBox && useReferenceImages) {
-    payload.reference_selection_bbox = referenceSelectionBox;
+  if (captureReferenceBox && useReferenceImages) {
+    payload.reference_selection_bbox = captureReferenceBox;
   }
   if (payload.mode === "agent") {
     const agentBudget = Number.parseInt(elements.manualAgentBudget.value.trim(), 10);
@@ -2343,7 +2636,7 @@ async function applyManualAdjustment() {
     elements.manualSubmitStatus.textContent = "Select a target before applying refinement.";
     return;
   }
-  const goal = elements.manualUserIntroduction.value.trim() || elements.manualTargetDescription.value.trim();
+  const goal = getManualGoalText();
   if (!goal) {
     setStatus("Please describe the target adjustment goal.");
     elements.manualSubmitStatus.textContent = "Add a refinement goal before applying.";
@@ -2356,6 +2649,7 @@ async function applyManualAdjustment() {
   appState.manualAdjustmentRequestInFlight = true;
   elements.manualApplyButton.disabled = true;
   elements.manualSubmitStatus.textContent = "Applying refinement...";
+  renderManualRecentActivityPanel(snapshot);
   setStatus("Running refinement...");
   startManualAdjustmentPolling();
   try {
@@ -2435,6 +2729,43 @@ function setSelectedRun(runId = null) {
   schedulePolling();
 }
 
+function buildFailureDialogMessage(run) {
+  const diagnostic = run?.failure_diagnostic || {};
+  const lines = [];
+  const summary = diagnostic.summary || run?.error || "The conversion pipeline failed.";
+  lines.push(summary);
+  if (diagnostic.root_cause_type || diagnostic.root_cause_message) {
+    lines.push(`${diagnostic.root_cause_type || "Root cause"}: ${diagnostic.root_cause_message || "-"}`);
+  } else if (diagnostic.error_type || diagnostic.error_message) {
+    lines.push(`${diagnostic.error_type || "Error"}: ${diagnostic.error_message || "-"}`);
+  }
+  const renderLog = (diagnostic.artifact_hints || []).find((item) => item.kind === "render-error");
+  if (renderLog?.relative_path) {
+    lines.push(`Render error log: ${renderLog.relative_path}`);
+  }
+  return lines.filter(Boolean).join("\n\n");
+}
+
+function maybeShowRunFailureDialog(snapshot) {
+  const run = snapshot?.current_run;
+  if (!run || run.status !== "failed" || !isLiveRunSelected(snapshot)) {
+    return;
+  }
+  const key = `${run.run_id || "unknown"}:${run.updated_at || run.error || "failed"}`;
+  if (appState.dismissedFailureDialogs.has(key)) {
+    return;
+  }
+  appState.dismissedFailureDialogs.add(key);
+  const diagnostic = run.failure_diagnostic || {};
+  const isRenderFailure = diagnostic.error_type === "SvgPreviewRenderError"
+    || diagnostic.root_cause_type === "SvgPreviewRenderError"
+    || String(diagnostic.error_message || run.error || "").includes("SVG preview render failed");
+  void showDesktopErrorDialog({
+    title: isRenderFailure ? "SVG Preview Render Failed" : "Conversion Failed",
+    message: buildFailureDialogMessage(run),
+  });
+}
+
 function applySnapshot(snapshot) {
   const filteredSnapshot = filterDeletedRunsFromSnapshot(snapshot);
   appState.snapshot = filteredSnapshot;
@@ -2454,6 +2785,7 @@ function applySnapshot(snapshot) {
   }
 
   renderViews();
+  maybeShowRunFailureDialog(filteredSnapshot);
   schedulePolling();
 }
 
@@ -2803,6 +3135,7 @@ function renderArtifactViews(snapshot) {
     (overlay) => {
       appState.selectedOverlay = overlay;
       renderArtifactViews(snapshot);
+      refreshManualRefineReadiness(snapshot);
     },
     (index, options = {}) => {
       setSelectedOutputFrame(displaySnapshot, index, options);
@@ -2822,6 +3155,7 @@ function renderArtifactViews(snapshot) {
       onOutputSelectionChange: (selection) => {
         writeManualSelectionShape(selection);
         renderArtifactViews(snapshot);
+        refreshManualRefineReadiness(snapshot);
       },
     },
     appState.selectedManualAdjustmentId,
@@ -3242,11 +3576,26 @@ function bindFormEvents() {
 
   elements.manualReferencePaths.addEventListener("input", () => {
     appState.manualCustomReferenceConfirmed = false;
+    appState.manualReferenceMode = "add";
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = false;
     renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+  });
+
+  [elements.manualUserIntroduction, elements.manualTargetDescription].forEach((element) => {
+    element?.addEventListener("input", () => {
+      refreshManualRefineReadiness(appState.latestArtifactSnapshot);
+    });
   });
 
   [elements.manualReferencePanel, elements.manualTracePanel].forEach((details) => {
     details?.addEventListener("toggle", () => {
+      if (details.dataset.programmaticToggle === "true") {
+        delete details.dataset.programmaticToggle;
+        details.classList.toggle("auto-collapsed", !details.open);
+        window.requestAnimationFrame(refreshWorkflowTraceLayout);
+        return;
+      }
       details.dataset.userToggled = "true";
       details.classList.toggle("auto-collapsed", !details.open);
       window.requestAnimationFrame(refreshWorkflowTraceLayout);
@@ -3338,19 +3687,6 @@ function bindActionEvents() {
     await resumeRunFromArtifacts();
   });
 
-  elements.manualUseSelection.addEventListener("click", () => {
-    const snapshot = appState.latestArtifactSnapshot;
-    if (!getRefineReadinessState(snapshot).canSelectTarget) {
-      return;
-    }
-    const nextBox = getOverlayBox(snapshot, appState.selectedOverlay);
-    if (nextBox) {
-      writeManualSelectionBox(nextBox);
-      appState.manualSelectionShape = { kind: "box", points: [], bbox: nextBox };
-      renderArtifactViews(snapshot);
-    }
-  });
-
   elements.manualSelectMode.addEventListener("click", () => {
     setManualSelectionMode("select");
     renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
@@ -3377,6 +3713,7 @@ function bindActionEvents() {
 
   elements.manualConfirmSelection.addEventListener("click", () => {
     confirmManualSelection(appState.latestArtifactSnapshot);
+    refreshManualRefineReadiness(appState.latestArtifactSnapshot);
     if (appState.latestArtifactSnapshot) {
       renderArtifactViews(appState.latestArtifactSnapshot);
     }
@@ -3384,6 +3721,7 @@ function bindActionEvents() {
 
   elements.manualClearSelection.addEventListener("click", () => {
     clearManualSelectionBox();
+    refreshManualRefineReadiness(appState.latestArtifactSnapshot);
     if (appState.latestArtifactSnapshot) {
       renderArtifactViews(appState.latestArtifactSnapshot);
     }
@@ -3419,8 +3757,29 @@ function bindActionEvents() {
     }
   });
 
+  elements.manualReferenceUseDefault?.addEventListener("click", () => {
+    setManualReferenceMode("default");
+  });
+
+  elements.manualReferenceCaptureRef?.addEventListener("click", () => {
+    setManualReferenceMode("capture");
+  });
+
+  elements.manualReferenceAddImage?.addEventListener("click", () => {
+    setManualReferenceMode("add", { openUpload: true });
+  });
+
+  elements.manualReferenceNoRef?.addEventListener("click", () => {
+    setManualReferenceMode("none");
+  });
+
+  elements.manualReferenceUploadPanel?.addEventListener("toggle", () => {
+    updateManualReferenceModeControls();
+  });
+
   elements.manualUploadButton.addEventListener("click", (event) => {
     event.stopPropagation();
+    setManualReferenceMode("add", { openUpload: true, render: false });
     elements.manualUploadInput.click();
   });
 
@@ -3439,6 +3798,7 @@ function bindActionEvents() {
 
   elements.manualPasteReferenceButton.addEventListener("click", async (event) => {
     event.stopPropagation();
+    setManualReferenceMode("add", { openUpload: true, render: false });
     try {
       let file = null;
       if (navigator.clipboard?.read) {
@@ -3471,8 +3831,9 @@ function bindActionEvents() {
     }
   });
 
-  elements.manualReferenceCaptureButton.addEventListener("click", async (event) => {
+  elements.manualReferenceCaptureButton?.addEventListener("click", async (event) => {
     event.stopPropagation();
+    setManualReferenceMode("add", { openUpload: true, render: false });
     try {
       elements.manualUploadStatus.textContent = "Capturing the selected input area...";
       await captureReferenceImageFromInput(appState.latestArtifactSnapshot);
@@ -3487,6 +3848,10 @@ function bindActionEvents() {
     if (!elements.manualUseReferenceImages.checked) {
       appState.manualCustomReferenceConfirmed = false;
     }
+    renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+  });
+
+  elements.manualIncludeDefaultCrop.addEventListener("change", () => {
     renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
   });
 
@@ -3541,11 +3906,47 @@ function bindActionEvents() {
     const zoomButton = event.target instanceof Element ? event.target.closest(".image-zoom-button") : null;
     if (zoomButton instanceof HTMLButtonElement) {
       event.preventDefault();
+      const crop = zoomButton.dataset.zoomCrop === "true"
+        ? {
+          x: Number.parseFloat(zoomButton.dataset.zoomCropX || "0"),
+          y: Number.parseFloat(zoomButton.dataset.zoomCropY || "0"),
+          width: Number.parseFloat(zoomButton.dataset.zoomCropWidth || "0"),
+          height: Number.parseFloat(zoomButton.dataset.zoomCropHeight || "0"),
+          canvasWidth: Number.parseFloat(zoomButton.dataset.zoomCanvasWidth || "0"),
+          canvasHeight: Number.parseFloat(zoomButton.dataset.zoomCanvasHeight || "0"),
+        }
+        : null;
       openImageLightbox({
         src: zoomButton.dataset.zoomSrc || "",
         alt: zoomButton.dataset.zoomAlt || "",
         caption: zoomButton.dataset.zoomCaption || "",
+        crop: crop && crop.width && crop.height && crop.canvasWidth && crop.canvasHeight ? crop : null,
       });
+      return;
+    }
+    const previewButton = event.target instanceof Element ? event.target.closest(".run-chip-preview-zoom") : null;
+    if (previewButton instanceof HTMLButtonElement) {
+      event.preventDefault();
+      event.stopPropagation();
+      openImageLightbox({
+        src: previewButton.dataset.previewSrc || "",
+        alt: previewButton.dataset.previewAlt || "",
+        caption: previewButton.dataset.previewCaption || previewButton.dataset.previewAlt || "",
+      });
+      return;
+    }
+    const lightboxZoomAction = event.target instanceof Element
+      ? event.target.closest("[data-lightbox-zoom]")?.getAttribute("data-lightbox-zoom")
+      : null;
+    if (lightboxZoomAction && elements.imageLightbox && !elements.imageLightbox.classList.contains("hidden")) {
+      event.preventDefault();
+      if (lightboxZoomAction === "in") {
+        setImageLightboxScale(imageLightboxState.scale * 1.2);
+      } else if (lightboxZoomAction === "out") {
+        setImageLightboxScale(imageLightboxState.scale / 1.2);
+      } else if (lightboxZoomAction === "reset") {
+        resetImageLightboxZoom();
+      }
       return;
     }
     if (event.target === elements.imageLightboxBackdrop || event.target === elements.imageLightboxClose) {
@@ -3554,9 +3955,60 @@ function bindActionEvents() {
     }
   });
 
+  elements.imageLightboxStage?.addEventListener("wheel", (event) => {
+    if (!elements.imageLightbox || elements.imageLightbox.classList.contains("hidden")) {
+      return;
+    }
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+    setImageLightboxScale(imageLightboxState.scale * factor, event);
+  }, { passive: false });
+
+  elements.imageLightboxStage?.addEventListener("pointerdown", (event) => {
+    if (imageLightboxState.scale <= 1 || !imageLightboxState.surface) {
+      return;
+    }
+    event.preventDefault();
+    imageLightboxState.isDragging = true;
+    imageLightboxState.dragStartX = event.clientX;
+    imageLightboxState.dragStartY = event.clientY;
+    imageLightboxState.dragOriginX = imageLightboxState.translateX;
+    imageLightboxState.dragOriginY = imageLightboxState.translateY;
+    elements.imageLightboxStage?.classList.add("is-dragging");
+    elements.imageLightboxStage?.setPointerCapture?.(event.pointerId);
+  });
+
+  elements.imageLightboxStage?.addEventListener("pointermove", (event) => {
+    if (!imageLightboxState.isDragging) {
+      return;
+    }
+    imageLightboxState.translateX = imageLightboxState.dragOriginX + event.clientX - imageLightboxState.dragStartX;
+    imageLightboxState.translateY = imageLightboxState.dragOriginY + event.clientY - imageLightboxState.dragStartY;
+    updateImageLightboxTransform();
+  });
+
+  const stopLightboxDrag = (event) => {
+    if (!imageLightboxState.isDragging) {
+      return;
+    }
+    imageLightboxState.isDragging = false;
+    elements.imageLightboxStage?.classList.remove("is-dragging");
+    if (event?.pointerId != null) {
+      elements.imageLightboxStage?.releasePointerCapture?.(event.pointerId);
+    }
+  };
+  elements.imageLightboxStage?.addEventListener("pointerup", stopLightboxDrag);
+  elements.imageLightboxStage?.addEventListener("pointercancel", stopLightboxDrag);
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && elements.imageLightbox && !elements.imageLightbox.classList.contains("hidden")) {
       closeImageLightbox();
+    } else if ((event.key === "+" || event.key === "=") && elements.imageLightbox && !elements.imageLightbox.classList.contains("hidden")) {
+      setImageLightboxScale(imageLightboxState.scale * 1.2);
+    } else if (event.key === "-" && elements.imageLightbox && !elements.imageLightbox.classList.contains("hidden")) {
+      setImageLightboxScale(imageLightboxState.scale / 1.2);
+    } else if (event.key === "0" && elements.imageLightbox && !elements.imageLightbox.classList.contains("hidden")) {
+      resetImageLightboxZoom();
     }
   });
 }

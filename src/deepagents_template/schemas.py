@@ -1048,12 +1048,20 @@ class RegionObjectIssue(BaseModel):
 
 
 class RegionFidelityVerification(BaseModel):
-    """One-line fidelity judgment for an object that must be checked."""
+    """Axis-based fidelity judgment for an object that must be checked."""
 
     object_id: str
-    result: str
+    checks: dict[str, str] = Field(default_factory=dict)
+    reason: str = ""
 
-    @field_validator("object_id", "result", mode="before")
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_result(cls, data: object) -> object:
+        if isinstance(data, dict) and "reason" not in data and "result" in data:
+            data["reason"] = data.get("result")
+        return data
+
+    @field_validator("object_id", "reason", mode="before")
     @classmethod
     def normalize_text(cls, value: object) -> str:
         if value is None:
@@ -1304,6 +1312,13 @@ class FusionRepairPlan(BaseModel):
     strategy_label: str | None = Field(default=None)
     strategy_rationale: str | None = Field(default=None)
     strategy_confidence: Literal["low", "medium", "high"] | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def force_fixed_route(cls, data: object) -> object:
+        if isinstance(data, dict):
+            data["route"] = "fusion_repair"
+        return data
 
 
 class RegionCombinedPolicyModelResult(BaseModel):

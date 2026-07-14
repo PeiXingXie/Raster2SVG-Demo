@@ -9,7 +9,7 @@ from pathlib import Path
 from deepagents_template.debug_review import DebugObjectReviewWorkerAgent
 from deepagents_template.geometry import crop_object_image
 from deepagents_template.schemas import ObjectCandidate, ObjectReviewResult, ObjectSvgGenerationResult, RegionRecognitionResult, RegionReviewResult
-from deepagents_template.utils.svg_rendering import wrap_svg_fragment, write_svg_review_artifacts
+from deepagents_template.utils.svg_rendering import SvgPreviewRenderError, wrap_svg_fragment, write_svg_review_artifacts
 from deepagents_template.utils.svg_runtime import aggregate_region_object_svg
 from deepagents_template.utils.tasks import create_object_task
 
@@ -378,7 +378,7 @@ class ObjectProcessNodeMixin:
                 max(int(object_bbox.get("height", 1)), 1),
             ),
         )
-        _, rendered_svg_path = write_svg_review_artifacts(
+        _, rendered_svg_path, render_result = write_svg_review_artifacts(
             svg_text=wrapped_svg,
             svg_path=svg_path,
             png_path=png_path,
@@ -386,6 +386,30 @@ class ObjectProcessNodeMixin:
         self._record_written_file(svg_path, kind="svg")
         if rendered_svg_path is not None:
             self._record_written_file(rendered_svg_path, kind="png")
+        else:
+            error_path = png_path.with_suffix(".render_error.txt")
+            error_path.write_text(
+                "\n".join(
+                    [
+                        f"scope: legacy-object:{obj.object_id}",
+                        f"svg_path: {svg_path}",
+                        f"png_path: {png_path}",
+                        f"renderer: {render_result.renderer or '-'}",
+                        f"error: {render_result.error or '-'}",
+                        "stderr:",
+                        render_result.stderr or "-",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self._record_written_file(error_path, kind="txt")
+            raise SvgPreviewRenderError(
+                scope=f"legacy-object:{obj.object_id}",
+                svg_path=svg_path,
+                png_path=png_path,
+                error_path=error_path,
+                render_result=render_result,
+            )
         return DebugObjectReviewWorkerAgent(self).run(
             object_crop_path=object_crop_path,
             obj=obj,

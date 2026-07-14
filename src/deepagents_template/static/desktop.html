@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Shape Studio</title>
-    <link rel="stylesheet" href="/static/styles.css" />
-    <link rel="stylesheet" href="/static/desktop.css?v=trace-activity-layout-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=refine-activity-feed-1" />
+    <link rel="stylesheet" href="/static/desktop.css?v=refine-activity-feed-1" />
   </head>
   <body class="desktop-body" data-desktop-page="start" data-ui-mode="simple">
     <main id="app-shell" class="desktop-shell" data-ui-mode="simple">
@@ -304,7 +304,14 @@
               </div>
               <div class="workspace-context-row">
                 <div id="compare-input-message" class="workspace-context-card empty-state">No instruction yet.</div>
-                <a id="compare-input-download" class="compare-download-button workspace-download-button is-disabled" href="#" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">Download</a>
+                <a id="compare-input-download" class="compare-download-button workspace-download-button is-disabled" href="#" download aria-label="Download input preview" aria-disabled="true" tabindex="-1">
+                  <svg class="download-button-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                    <rect x="3" y="3" width="26" height="26" rx="7" fill="#e8f0f3" stroke="#b8cbd3"/>
+                    <path d="M16 8v11" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round"/>
+                    <path d="m10.8 14.8 5.2 5.2 5.2-5.2" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M9.5 22.5h13" fill="none" stroke="#a9572a" stroke-width="2.6" stroke-linecap="round"/>
+                  </svg>
+                </a>
               </div>
               <div id="compare-input" class="compare-body empty-state">No input preview yet.</div>
               <details id="artifact-structure-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="artifact-structure-panel" open>
@@ -328,7 +335,14 @@
                     <div id="output-version-select" class="output-version-buttons"></div>
                   </div>
                 </div>
-                <a id="compare-output-download" class="compare-download-button workspace-download-button is-disabled" href="#" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">Download</a>
+                <a id="compare-output-download" class="compare-download-button workspace-download-button is-disabled" href="#" download aria-label="Download output preview" aria-disabled="true" tabindex="-1">
+                  <svg class="download-button-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                    <rect x="3" y="3" width="26" height="26" rx="7" fill="#e8f0f3" stroke="#b8cbd3"/>
+                    <path d="M16 8v11" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round"/>
+                    <path d="m10.8 14.8 5.2 5.2 5.2-5.2" fill="none" stroke="#234c5d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M9.5 22.5h13" fill="none" stroke="#a9572a" stroke-width="2.6" stroke-linecap="round"/>
+                  </svg>
+                </a>
               </div>
               <div id="compare-output" class="compare-body empty-state">No output preview yet.</div>
               <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel" open>
@@ -794,22 +808,21 @@
             <section id="manual-workflow-bar" class="workspace-panel-section manual-workflow-bar">
               <div class="manual-workflow-bar-top">
                 <div class="manual-workflow-overview">
-                  <div class="compare-title">Current Edit Status</div>
+                  <div class="compare-title">Refine Target</div>
                 </div>
-                <div class="manual-toolbar">
-                  <div class="manual-toolbar-block">
+                <div class="manual-toolbar manual-target-grid">
+                  <div class="manual-toolbar-block manual-pick-target">
                     <div class="manual-toolbar-label">Pick Target</div>
                     <div class="manual-mode-group">
                       <button id="manual-select-mode" class="primary-btn" type="button">Select</button>
-                      <button id="manual-draw-box" class="secondary-btn" type="button">Draw Box</button>
-                      <button id="manual-draw-freeform" class="secondary-btn" type="button">Draw Freeform</button>
+                      <button id="manual-draw-box" class="secondary-btn" type="button">Box</button>
+                      <button id="manual-draw-freeform" class="secondary-btn" type="button">Freeform</button>
                     </div>
                   </div>
-                  <div class="manual-toolbar-block">
-                    <div class="manual-toolbar-label">Apply Target</div>
+                  <div class="manual-toolbar-block manual-set-target">
+                    <div class="manual-toolbar-label">Set Target</div>
                     <div class="manual-action-group">
-                      <button id="manual-use-selection" class="secondary-btn" type="button">Use Overlay</button>
-                      <button id="manual-confirm-selection" class="secondary-btn" type="button">Confirm Selection</button>
+                      <button id="manual-confirm-selection" class="primary-btn" type="button">Confirm Target</button>
                       <button id="manual-clear-selection" class="ghost-btn" type="button">Clear</button>
                     </div>
                   </div>
@@ -823,22 +836,8 @@
                     Click an overlay or draw a selection, then describe the change.
                   </p>
                 </div>
-
-                <div class="workspace-panel-section manual-adjust-copy manual-selection-summary-card">
-                  <div class="compare-title">Selection Status</div>
-                  <div id="manual-target-summary" class="manual-target-summary">
-                    Select a region or object, or draw a box on the output preview.
-                  </div>
-                </div>
-
-                <div class="workspace-panel-section manual-selection-preview manual-confirmed-target-card">
-                  <div class="manual-section-head">
-                    <div class="compare-title">Confirmed Target</div>
-                  </div>
-                  <div id="manual-confirmed-target" class="manual-confirmed-target empty-state">
-                    Set a target to pin the region, objects, bbox, and base output frame.
-                  </div>
-                </div>
+                <div id="manual-target-summary" class="hidden">Select a region or object, or draw a box on the output preview.</div>
+                <div id="manual-confirmed-target" class="hidden">Set a target to pin the region, objects, bbox, and base output frame.</div>
               </div>
             </section>
 
@@ -865,6 +864,7 @@
                     </div>
                     <button id="manual-apply-button" class="primary-btn" type="button">Apply Refinement</button>
                   </div>
+                  <div id="manual-recent-activity" class="manual-recent-activity hidden"></div>
                 </div>
 
                 <details id="manual-advanced-panel" class="advanced-panel manual-advanced-panel" data-persist-key="manual-advanced-panel">
@@ -931,79 +931,89 @@
                   <summary>
                     <span class="manual-reference-summary-title">Reference Images</span>
                   </summary>
-                  <div class="manual-reference-upload">
-                    <div class="manual-reference-top">
-                      <div class="manual-section-head manual-reference-intro">
-                        <div class="compare-title">Reference Inputs</div>
-                      </div>
-                    </div>
+                  <div class="manual-reference-upload" data-reference-mode="default">
                     <input id="manual-upload-input" class="hidden-input" type="file" accept="image/*" multiple />
-                    <div class="manual-reference-settings">
-                      <div class="manual-reference-options">
-                        <label class="manual-checkbox">
-                          <input id="manual-use-reference-images" type="checkbox" checked />
-                          <span>Use references</span>
-                        </label>
-                        <label class="manual-checkbox">
-                          <input id="manual-include-default-crop" type="checkbox" checked />
-                          <span>Include default crop</span>
-                        </label>
+                    <div class="manual-reference-state-row">
+                      <button id="manual-reference-use-default" class="manual-reference-state-btn" type="button">Use Default</button>
+                      <button id="manual-reference-capture-ref" class="manual-reference-state-btn" type="button">Capture Ref</button>
+                      <button id="manual-reference-add-image" class="manual-reference-state-btn" type="button" aria-controls="manual-reference-upload-panel" aria-expanded="false">
+                        <span>Add Image</span>
+                        <span id="manual-upload-status" class="manual-reference-state-meta">No images</span>
+                      </button>
+                      <button id="manual-reference-no-ref" class="manual-reference-state-btn" type="button">No Ref</button>
+                    </div>
+                    <div class="manual-reference-options hidden">
+                      <label class="manual-checkbox">
+                        <input id="manual-use-reference-images" type="checkbox" checked />
+                        <span>Use refs</span>
+                      </label>
+                      <label class="manual-checkbox">
+                        <input id="manual-include-default-crop" type="checkbox" checked />
+                        <span>Default crop</span>
+                      </label>
+                    </div>
+                    <div class="manual-reference-default-copy">
+                      <div class="manual-guidance-title">Use target input area</div>
+                      <p class="manual-guidance-body">The refinement will use the input image content that corresponds to the confirmed target area.</p>
+                    </div>
+                    <details id="manual-reference-upload-panel" class="manual-reference-paths-panel">
+                      <summary>Reference image upload tools</summary>
+                      <label class="field manual-reference-paths-field">
+                        <span class="field-label">Local Image Paths (Optional)</span>
+                        <textarea id="manual-reference-paths" rows="3" placeholder="Optional local paths, one per line"></textarea>
+                      </label>
+                      <div
+                        id="manual-reference-pastezone"
+                        class="upload-preview-panel upload-preview-empty-state manual-reference-pastezone"
+                        role="button"
+                        tabindex="0"
+                        aria-label="Reference image thumbnail upload surface"
+                      >
+                        <div class="upload-preview-copy">
+                          <span class="field-label">Reference Thumbnail</span>
+                          <span id="manual-reference-preview-meta" class="upload-preview-meta">
+                            Focus here, then paste an image. You can also choose a local image file.
+                          </span>
+                        </div>
+                        <div class="upload-preview-stage">
+                          <div id="manual-reference-preview-empty" class="upload-preview-empty">
+                            Click to focus, then paste clipboard image
+                          </div>
+                          <img id="manual-reference-preview-image" class="upload-preview-image hidden" alt="Manual reference preview" />
+                        </div>
+                        <div class="upload-preview-actions manual-reference-upload-actions">
+                          <button id="manual-paste-reference-button" class="secondary-btn" type="button">Paste Clipboard</button>
+                          <button id="manual-upload-button" class="secondary-btn" type="button">Choose Image</button>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="manual-reference-no-ref-copy">
+                      <div class="manual-guidance-title">No reference image</div>
+                      <p class="manual-guidance-body">The refinement will follow the instruction text and the confirmed target only.</p>
+                    </div>
+                    <div class="manual-reference-tools manual-target-grid">
+                      <div class="manual-toolbar-block manual-pick-target">
+                        <div class="manual-toolbar-label">Pick Area</div>
+                        <div class="manual-mode-group">
+                          <button id="manual-reference-draw-box" class="secondary-btn" type="button">Box</button>
+                          <button id="manual-reference-draw-freeform" class="secondary-btn" type="button">Freeform</button>
+                        </div>
+                      </div>
+                      <div class="manual-toolbar-block manual-set-target">
+                        <div class="manual-toolbar-label">Set Area</div>
+                        <div class="manual-action-group">
+                          <button id="manual-reference-confirm-selection" class="primary-btn" type="button">Confirm Area</button>
+                          <button id="manual-reference-clear-selection" class="ghost-btn" type="button">Clear</button>
+                        </div>
                       </div>
                       <div id="manual-reference-selection-summary" class="manual-target-summary manual-reference-selection-card">
-                        You can draw a reference area directly on the Input image.
-                      </div>
-                    </div>
-                    <div class="manual-reference-tools">
-                      <div class="manual-toolbar-label">Reference Tools</div>
-                      <div class="manual-reference-actions">
-                        <button id="manual-reference-draw-box" class="secondary-btn" type="button">Draw Ref Box</button>
-                        <button id="manual-reference-draw-freeform" class="secondary-btn" type="button">Draw Ref Freeform</button>
-                        <button id="manual-reference-confirm-selection" class="secondary-btn" type="button">Confirm Ref Area</button>
-                        <button id="manual-reference-clear-selection" class="ghost-btn" type="button">Clear Ref</button>
+                        Draw a reference area on Input, then confirm it as the reference crop.
                       </div>
                     </div>
 
                     <div class="manual-reference-body">
-                      <div class="manual-reference-form">
-                        <details class="manual-reference-paths-panel">
-                          <summary>Add Existing Local Images</summary>
-                          <label class="field">
-                            <span class="field-label">Local Image Paths (Optional)</span>
-                            <textarea id="manual-reference-paths" rows="3" placeholder="Optional local paths, one per line"></textarea>
-                          </label>
-                        </details>
-                        <div
-                          id="manual-reference-pastezone"
-                          class="upload-preview-panel upload-preview-empty-state manual-reference-pastezone"
-                          role="button"
-                          tabindex="0"
-                          aria-label="Reference image thumbnail upload surface"
-                        >
-                          <div class="upload-preview-copy">
-                            <span class="field-label">Reference Thumbnail</span>
-                            <span id="manual-reference-preview-meta" class="upload-preview-meta">
-                              Focus here, then paste an image. You can also choose a file or capture from Input.
-                            </span>
-                          </div>
-                          <div class="upload-preview-stage">
-                            <div id="manual-reference-preview-empty" class="upload-preview-empty">
-                              Click to focus, then paste clipboard image
-                            </div>
-                            <img id="manual-reference-preview-image" class="upload-preview-image hidden" alt="Manual reference preview" />
-                          </div>
-                          <div class="upload-preview-actions manual-reference-upload-actions">
-                            <button id="manual-reference-capture-button" class="secondary-btn" type="button">Capture From Input</button>
-                            <button id="manual-paste-reference-button" class="secondary-btn" type="button">Paste Clipboard Image</button>
-                            <button id="manual-upload-button" class="secondary-btn" type="button">Choose Image</button>
-                            <span id="manual-upload-status" class="dropzone-status">No reference images uploaded.</span>
-                          </div>
-                        </div>
-                      </div>
-
                       <div class="manual-reference-assets">
-                        <div id="manual-reference-preview" class="manual-reference-preview empty-state">
-                          Reference previews appear here.
-                        </div>
+                        <div id="manual-reference-preview" class="hidden"></div>
                       </div>
                     </div>
                   </div>
@@ -1011,14 +1021,7 @@
               </section>
             </div>
 
-            <section class="workspace-panel-section manual-output-section">
-              <div class="manual-section-head">
-                <div class="compare-title">Adjustment Result</div>
-              </div>
-              <div id="manual-adjustment-result" class="manual-adjustment-result empty-state">
-                Original and refined previews appear here after refinement.
-              </div>
-            </section>
+            <div id="manual-adjustment-result" class="hidden"></div>
 
             <details id="manual-trace-panel" class="manual-trace-panel" data-persist-key="manual-trace-panel">
               <summary>
@@ -1059,10 +1062,17 @@
     <div id="image-lightbox" class="image-lightbox hidden" aria-hidden="true">
       <div id="image-lightbox-backdrop" class="image-lightbox-backdrop"></div>
       <div class="image-lightbox-dialog" role="dialog" aria-modal="true" aria-label="Image preview">
-        <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="Close image preview">
-          Close
-        </button>
-        <div class="image-lightbox-stage">
+        <div class="image-lightbox-header">
+          <div class="image-lightbox-tools" aria-label="Image zoom controls">
+            <button id="image-lightbox-zoom-out" class="image-lightbox-tool" type="button" aria-label="Zoom out" data-lightbox-zoom="out">-</button>
+            <button id="image-lightbox-zoom-reset" class="image-lightbox-tool image-lightbox-scale" type="button" aria-label="Reset zoom" data-lightbox-zoom="reset">100%</button>
+            <button id="image-lightbox-zoom-in" class="image-lightbox-tool" type="button" aria-label="Zoom in" data-lightbox-zoom="in">+</button>
+          </div>
+          <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="Close image preview">
+            Close
+          </button>
+        </div>
+        <div id="image-lightbox-stage" class="image-lightbox-stage">
           <img id="image-lightbox-image" class="image-lightbox-image" alt="Expanded preview" />
         </div>
         <div id="image-lightbox-caption" class="image-lightbox-caption"></div>
@@ -1091,6 +1101,6 @@
     </div>
     <div id="desktop-toast" class="desktop-toast hidden" role="status" aria-live="polite"></div>
 
-    <script type="module" src="/static/desktop-app.js?v=run-start-state-boundary-1"></script>
+    <script type="module" src="/static/desktop-app.js?v=refine-activity-feed-1"></script>
   </body>
 </html>
