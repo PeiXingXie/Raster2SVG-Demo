@@ -848,7 +848,7 @@ setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=refine-activity-feed-1");
+    const { initApp } = await import("./js/main.js?v=refine-history-readiness-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);

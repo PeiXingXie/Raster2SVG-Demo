@@ -1043,10 +1043,23 @@ function setReadinessChip(element, { label, ready = false, active = false }) {
 
 function isMainFlowComplete(snapshot = appState.latestArtifactSnapshot) {
   const runStatus = String(snapshot?.status || "").toLowerCase();
-  if (!runStatus) {
-    return Boolean(snapshot?.available);
+  const hasOutput = hasUsableArtifactOutput(snapshot);
+  if (snapshot?.available) {
+    return true;
   }
-  return !["queued", "running"].includes(runStatus);
+  if (!runStatus) {
+    return Boolean(hasOutput);
+  }
+  if (["queued", "running"].includes(runStatus)) {
+    const currentRun = appState.snapshot?.current_run || null;
+    const isCurrentLiveRun = Boolean(
+      snapshot?.run_id
+      && currentRun?.run_id === snapshot.run_id
+      && ["queued", "running"].includes(String(currentRun.status || "").toLowerCase())
+    );
+    return Boolean(!isCurrentLiveRun && (snapshot?.available || hasOutput));
+  }
+  return true;
 }
 
 function getManualGoalText() {
