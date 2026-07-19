@@ -515,6 +515,8 @@ desktop/assets/icon.ico
 desktop/assets/icon.png
 ```
 
+Windows builds keep executable resource editing enabled so the installed `Shape Studio.exe`, Start Menu entry, desktop shortcut, and taskbar can use the custom icon. If `winCodeSign` extraction reports that symbolic links cannot be created, enable Windows Developer Mode or run the build from an administrator terminal with symbolic-link permission. Do not disable `signAndEditExecutable` as a workaround, because that leaves the main executable with the default Electron icon.
+
 For macOS public release, add:
 
 ```text
@@ -542,6 +544,8 @@ If running `npm` directly on Windows reports an execution policy error, the scri
 ### 2. electron-builder download fails
 
 On first build, electron-builder downloads Electron and NSIS/DMG-related components. If the network is unstable, rerun the command.
+
+If extraction of `winCodeSign` fails with `Cannot create symbolic link` or `A required privilege is not held by the client`, enable Windows Developer Mode and rerun the build, or use an administrator terminal. This permission is required for the cached tool archive even when the application itself is not code-signed.
 
 ### 3. PyInstaller reports a permission error while scanning user Python directories
 

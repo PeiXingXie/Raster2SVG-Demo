@@ -307,6 +307,7 @@ def build_frontend_defaults_response() -> FrontendDefaultsResponse:
         fidelity_verification_independent_budget=retry_limits.fidelity_verification_uses_independent_budget,
         fusion_repair_max_attempts=retry_limits.fusion_repair_max_attempts,
         run_model_call_budget=retry_limits.run_model_call_budget,
+        manual_refine_worker_budget=settings.resolved_manual_refine_worker_budget(),
     )
 
 
@@ -1639,9 +1640,15 @@ def resume_conversion_run(payload: ResumeRunRequest) -> RunStartResponse:
     if payload.extra_budget is not None:
         current_limit = plan.budget.limit
         if payload.budget_mode == "top_up":
-            request = request.model_copy(update={"max_budget": current_limit + payload.extra_budget})
+            resumed_budget_limit = current_limit + payload.extra_budget
         else:
-            request = request.model_copy(update={"max_budget": max(current_limit, plan.budget.used + payload.extra_budget)})
+            resumed_budget_limit = max(current_limit, plan.budget.used + payload.extra_budget)
+        request = request.model_copy(
+            update={
+                "max_budget": resumed_budget_limit,
+                "run_model_call_budget": resumed_budget_limit,
+            }
+        )
 
     request, resolved_api_key = _freeze_run_request_settings(request)
     lease = artifact_leases.try_acquire(

@@ -832,7 +832,7 @@ setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=workspace-scroll-stability-1");
+    const { initApp } = await import("./js/main.js?v=resume-lock-state-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);

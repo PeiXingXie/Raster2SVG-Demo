@@ -4349,6 +4349,34 @@ body.desktop-body .manual-recent-activity .workflow-trace-event-list {
   max-height: 88px;
 }
 
+body.desktop-body .manual-recent-activity .workflow-trace-event {
+  grid-template-columns: 9px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 24px;
+  padding: 2px 7px;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-time,
+body.desktop-body .manual-recent-activity .workflow-trace-event-copy small {
+  display: none;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-dot {
+  align-self: center;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-copy {
+  display: block;
+  min-width: 0;
+}
+
+body.desktop-body .manual-recent-activity .workflow-trace-event-copy strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 body.desktop-body .manual-mode-group button,
 body.desktop-body .manual-action-group button,
 body.desktop-body .manual-reference-upload-actions button {

@@ -2143,6 +2143,7 @@ class FrontendDefaultsResponse(BaseModel):
     fusion_repair_max_attempts: int = Field(default=0)
     max_budget: int = Field(default=0)
     run_model_call_budget: int = Field(default=0)
+    manual_refine_worker_budget: int = Field(default=15)
     supervisor_memory_enabled: bool = Field(default=False)
     supervisor_memory_persist_enabled: bool = Field(default=True)
     strategy_enabled: bool = Field(default=True)
@@ -2194,6 +2195,7 @@ class RuntimeOverridesPayload(BaseModel):
     object_repair_max_attempts: int | None = Field(default=None, ge=0)
     fusion_repair_max_attempts: int | None = Field(default=None, ge=0)
     run_model_call_budget: int | None = Field(default=None, ge=1)
+    manual_refine_worker_budget: int | None = Field(default=None, ge=1)
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
     strategy_enabled: bool | None = Field(default=None)
@@ -2541,6 +2543,14 @@ class ArtifactSnapshot(BaseModel):
     files: list[ArtifactFileEntry] = Field(default_factory=list)
 
 
+class ManualAdjustmentIssue(BaseModel):
+    """A lightweight local issue used only by post-conversion manual adjustment."""
+
+    criterion: str
+    reason: str
+    severity: Literal["low", "medium", "high"] = Field(default="medium")
+
+
 class ManualAdjustmentPreEditAnalysis(BaseModel):
     """Structured pre-edit analysis for agent-mode post-conversion manual adjustment."""
 
@@ -2548,7 +2558,7 @@ class ManualAdjustmentPreEditAnalysis(BaseModel):
     desired_outcomes: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     review_checks: list[str] = Field(default_factory=list)
-    baseline_issues: list[RegionCheckItem] = Field(default_factory=list)
+    baseline_issues: list[ManualAdjustmentIssue] = Field(default_factory=list)
     edit_strategy: Literal["object", "object_collection", "subtree", "region", "bbox_fragment"] = Field(default="object")
     rewrite_policy: Literal["patch_preferred", "rewrite_allowed", "rewrite_required"] = Field(default="patch_preferred")
 
@@ -2594,7 +2604,7 @@ class ManualAdjustmentWorkerPassResult(BaseModel):
     desired_outcomes: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     review_checks: list[str] = Field(default_factory=list)
-    baseline_issues: list[RegionCheckItem] = Field(default_factory=list)
+    baseline_issues: list[ManualAdjustmentIssue] = Field(default_factory=list)
     edit_strategy: Literal["object", "object_collection", "subtree", "region", "bbox_fragment"] = Field(default="object")
     rewrite_policy: Literal["patch_preferred", "rewrite_allowed", "rewrite_required"] = Field(default="patch_preferred")
     svg_fragment: str
@@ -2623,7 +2633,7 @@ class ManualAdjustmentReview(BaseModel):
 
     passed: bool = Field(default=False)
     regression_detected: bool = Field(default=False)
-    remaining_issues: list[RegionCheckItem] = Field(default_factory=list)
+    remaining_issues: list[ManualAdjustmentIssue] = Field(default_factory=list)
     summary: str = Field(default="")
 
 

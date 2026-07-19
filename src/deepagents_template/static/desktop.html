@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Shape Studio</title>
     <link rel="stylesheet" href="/static/styles.css?v=trace-blocked-semantics-1" />
-    <link rel="stylesheet" href="/static/desktop.css?v=output-toolbar-compact-1" />
+    <link rel="stylesheet" href="/static/desktop.css?v=manual-activity-compact-1" />
   </head>
   <body class="desktop-body" data-desktop-page="start" data-ui-mode="simple">
     <main id="app-shell" class="desktop-shell" data-ui-mode="simple">
@@ -559,11 +559,11 @@
                        </label>
                      </div>
                    </section>
-                   <section class="settings-subgroup">
-                     <div class="settings-subgroup-header">
-                       <h4>Visual Repair Depth</h4>
-                       <p>Control focused repair attempts at each visual stage.</p>
-                     </div>
+                    <section class="settings-subgroup">
+                      <div class="settings-subgroup-header">
+                        <h4>Visual Repair Depth</h4>
+                        <p>Control focused repair attempts at each visual stage.</p>
+                      </div>
                      <div class="settings-field-grid settings-field-grid-single">
                        <label class="field" data-field-id="region-repair-max-attempts">
                          <span class="field-heading">
@@ -588,12 +588,28 @@
                          </span>
                          <input id="fusion-repair-max-attempts" type="number" min="0" placeholder="Uses environment default" />
                          <span class="field-help">Maximum repairs after all regions have been merged.</span>
-                       </label>
-                     </div>
-                   </section>
-                 </div>
-               </section>
-              </div>
+                        </label>
+                      </div>
+                    </section>
+                    <section class="settings-subgroup">
+                      <div class="settings-subgroup-header">
+                        <h4>Manual Refine Depth</h4>
+                        <p>Control post-conversion worker-mode adjustment retries.</p>
+                      </div>
+                      <div class="settings-field-grid settings-field-grid-single">
+                        <label class="field" data-field-id="manual-refine-worker-budget">
+                          <span class="field-heading">
+                            <span class="field-label">Worker Budget</span>
+                            <span id="effective-manual-refine-worker-budget" class="field-effective"></span>
+                          </span>
+                          <input id="manual-refine-worker-budget" type="number" min="1" placeholder="Uses environment default" />
+                          <span class="field-help">Maximum model calls allowed for one worker-mode manual refine session.</span>
+                        </label>
+                      </div>
+                    </section>
+                  </div>
+                </section>
+               </div>
             </details>
 
             <details class="runtime-config-category" data-persist-key="settings-recognition-experiments">
@@ -1132,6 +1148,6 @@
     </div>
     <div id="desktop-toast" class="desktop-toast hidden" role="status" aria-live="polite"></div>
 
-    <script type="module" src="/static/desktop-app.js?v=workspace-scroll-stability-1"></script>
+    <script type="module" src="/static/desktop-app.js?v=resume-lock-state-1"></script>
   </body>
 </html>

@@ -120,6 +120,7 @@ class ManualAdjustmentService:
         self._manual_budget_used = 0
 
     def execute(self, payload: ManualAdjustmentRequest, *, artifact_snapshot: ArtifactSnapshot) -> dict:
+        settings = get_settings()
         base_svg_text = self._load_base_svg_text(payload, artifact_snapshot) or self._load_current_final_svg_text()
         adjustment_dir = self.manual_root / f"adjustment-{len(list(self.manual_root.glob('adjustment-*'))) + 1:03d}"
         adjustment_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +135,11 @@ class ManualAdjustmentService:
             base_svg_text=base_svg_text,
         )
         image_paths = self._resolve_reference_images(payload, target, adjustment_dir=adjustment_dir)
-        call_budget = max(3, int(payload.agent_budget or 3)) if payload.mode == "agent" else 1
+        call_budget = (
+            max(3, int(payload.agent_budget or 3))
+            if payload.mode == "agent"
+            else settings.resolved_manual_refine_worker_budget()
+        )
         self._manual_budget_limit = call_budget
         self._manual_budget_used = 0
         self._write_json(adjustment_dir / "request.json", payload.model_dump(mode="json"))

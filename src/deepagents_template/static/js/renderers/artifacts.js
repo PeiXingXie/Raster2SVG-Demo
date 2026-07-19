@@ -26,6 +26,34 @@ const TRACE_ZOOM_STEP = 1.12;
 const TRACE_ACTIVE_CENTER_RATIO = 0.5;
 const TRACE_MIN_BOTTOM_SPACER_PX = 160;
 const TRACE_BOTTOM_SPACER_EXTRA_PX = 72;
+const RESUME_BLOCKED_RUN_STATUSES = new Set(["queued", "running", "completed"]);
+const RESUME_BLOCKING_OPERATIONS = ["resume", "invoke", "manual-adjust"];
+
+export function updateResumeButtonAvailability(snapshot, runStatus = null) {
+  if (!elements.resumeRun) {
+    return false;
+  }
+  const session = appState.workspaceSessions.get(appState.activeWorkspaceTabId) || null;
+  const operationInFlight = RESUME_BLOCKING_OPERATIONS.some(
+    (kind) => Boolean(session?.operationInFlight?.[kind])
+  );
+  const snapshotRunId = snapshot?.run_id || session?.boundRunId || null;
+  const liveRun = appState.snapshot?.current_run;
+  const sessionRun = session?.state?.snapshot?.current_run;
+  const currentRunStatus = liveRun?.run_id === snapshotRunId
+    ? liveRun.status
+    : sessionRun?.run_id === snapshotRunId
+      ? sessionRun.status
+      : null;
+  const normalizedStatus = String(currentRunStatus ?? runStatus ?? snapshot?.status ?? "").trim().toLowerCase();
+  const available = Boolean(
+    snapshot?.resume?.available
+    && !RESUME_BLOCKED_RUN_STATUSES.has(normalizedStatus)
+    && !operationInFlight
+  );
+  elements.resumeRun.disabled = !available;
+  return available;
+}
 
 const SIMPLE_TRACE_KIND_LABELS = {
   root: "Run Overview",
@@ -1077,7 +1105,7 @@ function renderManualAdjustmentSummary(snapshot, adjustment) {
 
   const inline = document.createElement("div");
   inline.className = "manual-adjustment-summary-inline-card";
-  inline.textContent = "Manual adjustment selected. Main pipeline progress is hidden for this version.";
+  inline.textContent = "Timeline hidden for branch.";
   elements.outputProgressSlider.appendChild(inline);
 
   const card = document.createElement("div");
@@ -1805,7 +1833,6 @@ function persistTraceViewportState(viewport, state) {
       scrollLeft: viewport.scrollLeft,
       panelScrollTop: panel ? panel.scrollTop : state.panelScrollTop,
       anchor: state.anchor,
-      pendingAnchorRestore: state.pendingAnchorRestore,
     };
     traceContainerViewportState.set(container, nextState);
     setTraceStableState(container, nextState);
@@ -1884,20 +1911,11 @@ function getTraceRunSignature(nodes = []) {
 }
 
 function setTraceManualControl(viewport, { persist = true } = {}) {
-  const container = getTraceContainerFromViewport(viewport);
-  if (container) {
-    container.dataset.traceAutoFollow = "manual";
-    const state = traceViewportState.get(viewport) || {};
-    state.traceAutoFollow = "manual";
-    traceViewportState.set(viewport, state);
-    if (persist) {
-      persistTraceViewportState(viewport, state);
-    }
+  if (!persist) {
+    return;
   }
-}
-
-function shouldTraceAutoFollow(viewport) {
-  return getTraceContainerFromViewport(viewport)?.dataset.traceAutoFollow === "active";
+  const state = traceViewportState.get(viewport) || {};
+  persistTraceViewportState(viewport, state);
 }
 
 function getTraceScrollPanel(viewport) {
@@ -1922,26 +1940,6 @@ function scrollTraceViewportToNode(viewport, nodeId) {
   return false;
 }
 
-function scrollTraceViewportToActive(viewport, options = {}) {
-  if (!(viewport instanceof HTMLElement)) {
-    return false;
-  }
-  const activeNodeId = viewport.dataset.traceActiveNodeId || "";
-  if (!activeNodeId) {
-    return false;
-  }
-  let active = Array.from(viewport.querySelectorAll("[data-trace-node-id]"))
-    .find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === activeNodeId);
-  if (!(active instanceof HTMLElement) && options.allowSelectedDeck) {
-    active = viewport.querySelector(".workflow-trace-deck-item.is-expanded > .workflow-trace-lane > .workflow-trace-card");
-  }
-  if (!(active instanceof HTMLElement)) {
-    return false;
-  }
-  scrollTraceViewportToElement(viewport, active);
-  return true;
-}
-
 export function renderTraceInto(container, trace, emptyText, onNodeSelect = () => {}) {
   const visibleNodes = filterTraceNodes(trace?.nodes || []);
   const summary = trace?.summary || {};
@@ -1958,7 +1956,6 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
       scrollLeft: previousViewport.scrollLeft,
       panelScrollTop: previousPanel ? previousPanel.scrollTop : previousState?.panelScrollTop,
       anchor: previousAnchor,
-      traceAutoFollow: container.dataset.traceAutoFollow || previousState?.traceAutoFollow || "active",
     };
     traceContainerViewportState.set(container, nextState);
     setTraceStableState(container, nextState, runSignature || container.dataset.traceRunSignature);
@@ -1972,20 +1969,9 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   }
 
   const stableState = getTraceStableState(container, runSignature);
-  const previousAutoFollowNodeId = stableState?.lastAutoFollowNodeId || container.dataset.traceLastAutoFollowNodeId || "";
-  if (
-    runSignature
-    && container.dataset.traceRunSignature
-    && container.dataset.traceRunSignature !== runSignature
-  ) {
-    container.dataset.traceAutoFollow = "active";
-  } else if (stableState?.traceAutoFollow) {
-    container.dataset.traceAutoFollow = stableState.traceAutoFollow;
-  }
   if (runSignature) {
     container.dataset.traceRunSignature = runSignature;
   }
-  container.dataset.traceAutoFollow = container.dataset.traceAutoFollow || "active";
   container.className = "workflow-trace";
   const controls = document.createElement("div");
   controls.className = "workflow-trace-controls";
@@ -2067,20 +2053,6 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
         tracePendingFocusNodeId = null;
         didScrollTrace = true;
       }
-    } else if (shouldTraceAutoFollow(viewport)) {
-      const activeNodeId = viewport.dataset.traceActiveNodeId || "";
-      const state = traceViewportState.get(viewport) || {};
-      const lastAutoFollowNodeId = state.lastAutoFollowNodeId || previousAutoFollowNodeId;
-      if (activeNodeId && activeNodeId !== lastAutoFollowNodeId) {
-        const didFollow = scrollTraceViewportToActive(viewport);
-        if (didFollow && activeNodeId) {
-          state.lastAutoFollowNodeId = activeNodeId;
-          traceViewportState.set(viewport, state);
-          container.dataset.traceLastAutoFollowNodeId = activeNodeId;
-          persistTraceViewportState(viewport, state);
-          didScrollTrace = true;
-        }
-      }
     }
     if (!didScrollTrace) {
       const state = traceViewportState.get(viewport) || {};
@@ -2091,6 +2063,7 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
       } else {
         delete state.pendingAnchorRestore;
         traceViewportState.set(viewport, state);
+        persistTraceViewportState(viewport, state);
       }
     }
   });
@@ -2334,7 +2307,6 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
   };
   state.controls = controls;
   state.dragPointerId = null;
-  state.traceAutoFollow = container?.dataset.traceAutoFollow || state.traceAutoFollow || "active";
   if (state.anchor) {
     state.pendingAnchorRestore = true;
   }
@@ -2394,14 +2366,8 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
   }, { passive: true });
 
   const panel = getTraceScrollPanel(viewport);
-  if (panel && panel.dataset.traceAutoFollowListenerAttached !== "true") {
-    panel.dataset.traceAutoFollowListenerAttached = "true";
-    panel.addEventListener("wheel", () => {
-      const liveViewport = panel.querySelector(".workflow-trace-viewport");
-      if (liveViewport instanceof HTMLElement) {
-        setTraceManualControl(liveViewport, { persist: false });
-      }
-    }, { passive: true });
+  if (panel && panel.dataset.traceScrollListenerAttached !== "true") {
+    panel.dataset.traceScrollListenerAttached = "true";
     panel.addEventListener("scroll", () => {
       const liveViewport = panel.querySelector(".workflow-trace-viewport");
       if (liveViewport instanceof HTMLElement && !isTraceProgrammaticScroll(liveViewport)) {
@@ -2597,7 +2563,7 @@ export function renderArtifactSummary(
   if (!hasSnapshot) {
     updateWorkspaceDownload(elements.compareInputDownload, null);
     updateWorkspaceDownload(elements.compareOutputDownload, null);
-    elements.resumeRun.disabled = true;
+    updateResumeButtonAvailability(null);
     elements.artifactStatus.textContent = "No artifacts yet.";
     elements.artifactSummary.className = "artifact-summary";
     elements.artifactSummaryContent.className = "artifact-summary-content empty-state";
@@ -2628,8 +2594,9 @@ export function renderArtifactSummary(
     return;
   }
 
+  updateResumeButtonAvailability(snapshot);
+
   if (!isArtifactReady) {
-    elements.resumeRun.disabled = true;
     const stageText = snapshot?.failure_stage || snapshot?.current_stage || "-";
     elements.artifactStatus.textContent = `${snapshot?.project_name || "artifact"} | ${snapshot?.status || "in progress"} | ${stageText}`;
     elements.artifactSummary.className = "artifact-summary";
@@ -2795,8 +2762,6 @@ export function renderArtifactSummary(
     <div><span class="summary-label">Canvas</span><span class="summary-value">${snapshot.canvas_width ?? "-"} x ${snapshot.canvas_height ?? "-"}</span></div>
   `;
   detailsBody.appendChild(summaryList);
-  elements.resumeRun.disabled = !resume.available;
-
   const noteGrid = document.createElement("div");
   noteGrid.className = "artifact-note-grid";
   if (request.message) {

@@ -45,6 +45,7 @@ RUNTIME_OVERRIDE_FIELDS = {
     "object_repair_max_attempts",
     "fusion_repair_max_attempts",
     "run_model_call_budget",
+    "manual_refine_worker_budget",
     "supervisor_memory_enabled",
     "supervisor_memory_persist_enabled",
     "strategy_enabled",
@@ -140,6 +141,7 @@ class Settings(BaseSettings):
     fusion_repair_max_attempts: int | None = Field(default=3, ge=0, alias="FUSION_REPAIR_MAX_ATTEMPTS")
     max_budget: int = Field(default=80, ge=0, alias="MAX_BUDGET")
     run_model_call_budget: int | None = Field(default=80, ge=0, alias="RUN_MODEL_CALL_BUDGET")
+    manual_refine_worker_budget: int = Field(default=15, ge=1, alias="MANUAL_REFINE_WORKER_BUDGET")
     supervisor_memory_enabled: bool = Field(default=False, alias="SUPERVISOR_MEMORY_ENABLED")
     supervisor_memory_persist_enabled: bool = Field(default=True, alias="SUPERVISOR_MEMORY_PERSIST_ENABLED")
     strategy_enabled: bool = Field(default=True, alias="STRATEGY_ENABLED")
@@ -526,6 +528,16 @@ class Settings(BaseSettings):
             minimum=0,
         )
         return resolved if resolved is not None else self.resolved_max_budget(legacy_max_budget)
+
+    def resolved_manual_refine_worker_budget(self, override: int | None = None) -> int:
+        return int(
+            self._resolved_new_int(
+                "manual_refine_worker_budget",
+                override,
+                self.manual_refine_worker_budget,
+                minimum=1,
+            )
+        )
 
     def resolved_bbox_global_stagnation_max_rounds(
         self,

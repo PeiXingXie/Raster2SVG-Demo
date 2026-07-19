@@ -3,6 +3,7 @@ const FIELD_LABELS = {
   "settings-workflow-mode": "Refinement Depth",
   "region-processing-mode": "Processing Schedule",
   "settings-region-processing-mode": "Processing Schedule",
+  "manual-refine-worker-budget": "Manual Refine Depth",
   "api-provider": "API Protocol",
   "api-format": "Request Format",
   "recognition-bbox-refine-mode": "Detection Box Refinement",

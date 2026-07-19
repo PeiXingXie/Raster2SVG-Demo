@@ -31,8 +31,9 @@ import {
   renderArtifactSummary,
   renderWorkspaceRecentActivity,
   renderWorkspaceArtifactLoadingState,
+  updateResumeButtonAvailability,
   updateWorkflowTraceTimers,
-} from "./renderers/artifacts.js?v=workspace-scroll-stability-1";
+} from "./renderers/artifacts.js?v=manual-branch-timeline-copy-1";
 import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=workspace-session-isolation-5";
 import { arrayBufferToBase64, formatElapsedDuration, scrollIntoContainerView, stableStringify } from "./utils.js";
 
@@ -318,6 +319,7 @@ function beginWorkspaceOperation(kind) {
     session.lastError = null;
     session.hasUnreadError = false;
   }
+  updateResumeButtonAvailability(appState.latestArtifactSnapshot, getSelectedRun()?.status);
   return operation;
 }
 
@@ -326,6 +328,9 @@ function finishWorkspaceOperation(operation) {
   if (session) {
     session.operationInFlight = session.operationInFlight || {};
     session.operationInFlight[operation.kind] = false;
+  }
+  if (isOperationActive(operation)) {
+    updateResumeButtonAvailability(appState.latestArtifactSnapshot, getSelectedRun()?.status);
   }
   return session;
 }
@@ -5008,13 +5013,14 @@ async function resumeRunForRun(run) {
     setStatus("No resumable run is available.");
     return;
   }
-  if (isActiveWorkspaceOperationInFlight("manual-adjust")) {
-    setStatus("Wait for the current refinement to finish before resuming this tab.");
+  if (!updateResumeButtonAvailability(appState.latestArtifactSnapshot, run.status)) {
+    setStatus("Resume is unavailable while this run or another workspace operation is active.");
     return;
   }
 
   const extraBudgetRaw = elements.resumeExtraBudget.value.trim();
   const operation = beginWorkspaceOperation("resume");
+  updateResumeButtonAvailability(appState.latestArtifactSnapshot, run.status);
   const payload = {
     run_id: run.run_id,
     thread_id: operation.threadId,
@@ -5028,13 +5034,14 @@ async function resumeRunForRun(run) {
   }
 
   setStatus("Resuming from saved artifacts...");
-  elements.resumeRun.disabled = true;
+  let acceptedRunStatus = null;
   try {
     const data = await fetchJson("/runs/resume", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    acceptedRunStatus = data.run?.status || "queued";
     const originSession = getOperationSession(operation);
     if (!originSession) {
       return;
@@ -5062,7 +5069,10 @@ async function resumeRunForRun(run) {
   } finally {
     finishWorkspaceOperation(operation);
     if (isOperationActive(operation)) {
-      elements.resumeRun.disabled = false;
+      updateResumeButtonAvailability(
+        appState.latestArtifactSnapshot,
+        acceptedRunStatus || getSelectedRun()?.status || run.status
+      );
     }
   }
 }

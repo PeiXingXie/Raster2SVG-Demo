@@ -1,3 +1,3 @@
-import { initApp } from "./js/main.js?v=convert-submit-lifecycle-1";
+import { initApp } from "./js/main.js?v=resume-lock-state-1";
 
 initApp();
