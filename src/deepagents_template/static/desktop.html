@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Shape Studio</title>
-    <link rel="stylesheet" href="/static/styles.css?v=refine-activity-feed-1" />
-    <link rel="stylesheet" href="/static/desktop.css?v=refine-activity-feed-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=trace-blocked-semantics-1" />
+    <link rel="stylesheet" href="/static/desktop.css?v=output-toolbar-compact-1" />
   </head>
   <body class="desktop-body" data-desktop-page="start" data-ui-mode="simple">
     <main id="app-shell" class="desktop-shell" data-ui-mode="simple">
@@ -277,6 +277,18 @@
           </section>
         </section>
 
+        <section id="workspace-tab-strip" class="workspace-tab-strip" aria-label="Open conversion workspaces">
+          <div id="workspace-tab-list" class="workspace-tab-list" role="tablist" aria-label="Conversion workspaces"></div>
+          <button id="workspace-new-tab" class="workspace-tab-icon-button" type="button" aria-label="Go to Start for a new conversion" title="New conversion">+</button>
+          <div class="workspace-tab-overflow-wrap">
+            <button id="workspace-tab-overflow" class="workspace-tab-overflow" type="button" aria-haspopup="menu" aria-expanded="false" title="Open projects">
+              <span id="workspace-tab-summary">No active conversions</span>
+              <span aria-hidden="true">&#9662;</span>
+            </button>
+            <div id="workspace-tab-menu" class="workspace-tab-menu" role="menu" hidden></div>
+          </div>
+        </section>
+
         <section id="desktop-stage-area" class="artifact-panel panel-card desktop-stage-card">
           <div class="artifact-header">
             <div>
@@ -292,10 +304,22 @@
                 </div>
               </label>
               <button id="resume-run" class="secondary-btn" type="button">Resume</button>
-              <button id="desktop-refine-toggle" class="primary-btn" type="button" aria-expanded="false" aria-controls="workspace-sidebar">Refine</button>
-              <span id="refine-status" class="desktop-action-hint">Locked</span>
+              <button id="desktop-stop-run" class="danger-btn" type="button" disabled>Stop</button>
             </div>
           </div>
+
+          <section id="workspace-status-strip" class="workspace-status-strip" aria-label="Workspace status">
+            <div id="workspace-recent-activity" class="workspace-recent-activity"></div>
+            <section id="workspace-refine-guide" class="workspace-refine-guide" aria-label="Refine guidance">
+              <div class="workspace-refine-guide-copy">
+                <strong id="workspace-refine-guide-title">Need a finer adjustment?</strong>
+                <span id="workspace-refine-guide-body">If anything still needs local changes, continue with the Refine flow.</span>
+              </div>
+              <button id="workspace-refine-open" class="secondary-btn workspace-refine-open" type="button" data-workspace-sidebar-tab="refine">
+                Open Refine
+              </button>
+            </section>
+          </section>
 
           <div class="compare-grid compare-grid-below desktop-compare-grid">
             <section class="compare-card">
@@ -314,7 +338,7 @@
                 </a>
               </div>
               <div id="compare-input" class="compare-body empty-state">No input preview yet.</div>
-              <details id="artifact-structure-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="artifact-structure-panel" open>
+              <details id="artifact-structure-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="artifact-structure-panel">
                 <summary class="compare-subtitle">Regions And Objects</summary>
                 <div id="artifact-structure" class="artifact-structure empty-state">No region split yet.</div>
               </details>
@@ -327,11 +351,11 @@
               <div class="workspace-context-row">
                 <div class="output-preview-toolbar desktop-output-strip workspace-context-card">
                   <div class="output-progress-control">
-                    <div class="output-control-label">Output Timeline</div>
+                    <div class="output-control-label">Timeline</div>
                     <div id="output-progress-slider" class="output-progress output-progress-inline empty-state">No output frames yet.</div>
                   </div>
                   <div class="output-version-picker">
-                    <div class="output-control-label">Manual Versions</div>
+                    <div class="output-control-label">Versions</div>
                     <div id="output-version-select" class="output-version-buttons"></div>
                   </div>
                 </div>
@@ -345,7 +369,7 @@
                 </a>
               </div>
               <div id="compare-output" class="compare-body empty-state">No output preview yet.</div>
-              <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel" open>
+              <details id="output-progress-panel" class="compare-subpanel compare-subpanel-details" data-persist-key="output-progress-panel">
                 <summary class="compare-subtitle">Output Progress</summary>
                 <div id="output-progress" class="output-progress empty-state">No progressive output frames yet.</div>
                 <div id="output-progress-details" class="output-progress-details empty-state">
@@ -411,7 +435,7 @@
                     </span>
                     <input id="api-provider" type="text" placeholder="For example: openai_compatible" />
                   </label>
-                  <label class="field" data-field-id="api-format">
+                   <label class="field" data-field-id="api-format">
                     <span class="field-heading">
                       <span class="field-label">Request Format</span>
                       <span id="effective-api-format" class="field-effective"></span>
@@ -419,8 +443,18 @@
                     <select id="api-format">
                       <option value="openai_chat_completions">Chat Completions API</option>
                       <option value="openai_responses">Responses API</option>
-                    </select>
-                  </label>
+                     </select>
+                   </label>
+                   <label class="field" data-field-id="use-previous-response-id">
+                     <span class="field-heading">
+                       <span class="field-label">Reuse Response State</span>
+                       <span id="effective-use-previous-response-id" class="field-effective"></span>
+                     </span>
+                     <select id="use-previous-response-id">
+                       <option value="true">true</option>
+                       <option value="false">false</option>
+                     </select>
+                   </label>
                   <label class="field" data-field-id="agent-model">
                     <span class="field-heading">
                       <span class="field-label">Coordinator Model</span>
@@ -487,53 +521,78 @@
               </div>
             </details>
 
-            <details class="runtime-config-category" data-persist-key="settings-quality-budget">
-              <summary>
-                <span>Quality And Budget</span>
-                <span class="settings-summary-note">Retry behavior, model-call budget, and response state</span>
-              </summary>
-              <div class="runtime-config-body">
-              <section class="settings-group">
-                <div class="settings-group-header">
-                  <div>
-                    <h3>Quality And Budget</h3>
-                    <p class="section-note">Controls retry behavior, total model-call budget, and API retry tolerance.</p>
-                  </div>
-                </div>
-                <div class="settings-field-grid">
-                  <label class="field" data-field-id="max-budget">
-                    <span class="field-heading">
-                      <span class="field-label">Max Budget</span>
-                      <span id="effective-max-budget" class="field-effective"></span>
-                    </span>
-                    <input id="max-budget" type="number" min="0" placeholder="Override MAX_BUDGET" />
-                  </label>
-                  <label class="field" data-field-id="max-repair-retry">
-                    <span class="field-heading">
-                      <span class="field-label">Max Repair Retry</span>
-                      <span id="effective-max-repair-retry" class="field-effective"></span>
-                    </span>
-                    <input id="max-repair-retry" type="number" min="0" placeholder="Override MAX_RETRY" />
-                  </label>
-                  <label class="field" data-field-id="max-retries">
-                    <span class="field-heading">
-                      <span class="field-label">API Max Retries</span>
-                      <span id="effective-max-retries" class="field-effective"></span>
-                    </span>
-                    <input id="max-retries" type="number" min="0" placeholder="Low-level API retries" />
-                  </label>
-                  <label class="field" data-field-id="use-previous-response-id">
-                    <span class="field-heading">
-                      <span class="field-label">Reuse Response State</span>
-                      <span id="effective-use-previous-response-id" class="field-effective"></span>
-                    </span>
-                    <select id="use-previous-response-id">
-                      <option value="true">true</option>
-                      <option value="false">false</option>
-                    </select>
-                  </label>
-                </div>
-              </section>
+             <details class="runtime-config-category" data-persist-key="settings-quality-budget">
+               <summary>
+                 <span>Quality And Budget</span>
+                 <span class="settings-summary-note">Model-call cost and visual refinement depth</span>
+               </summary>
+               <div class="runtime-config-body">
+               <section class="settings-group">
+                 <div class="settings-group-header">
+                   <div>
+                     <h3>Quality And Budget</h3>
+                     <p class="section-note">User-facing limits for model usage, object localization, and visual repair.</p>
+                   </div>
+                 </div>
+                 <div class="settings-quality-columns">
+                   <section class="settings-subgroup">
+                     <div class="settings-subgroup-header">
+                       <h4>Cost And Localization</h4>
+                       <p>Control total model usage and object-boundary refinement.</p>
+                     </div>
+                     <div class="settings-field-grid settings-field-grid-single">
+                       <label class="field" data-field-id="run-model-call-budget">
+                         <span class="field-heading">
+                           <span class="field-label">Model Call Budget</span>
+                           <span id="effective-run-model-call-budget" class="field-effective"></span>
+                         </span>
+                         <input id="run-model-call-budget" type="number" min="1" placeholder="Uses environment default" />
+                         <span class="field-help">Maximum model calls allowed for one conversion.</span>
+                       </label>
+                       <label class="field" data-field-id="bbox-refinement-max-rounds">
+                         <span class="field-heading">
+                           <span class="field-label">Detection Box Refinement</span>
+                           <span id="effective-bbox-refinement-max-rounds" class="field-effective"></span>
+                         </span>
+                         <input id="bbox-refinement-max-rounds" type="number" min="0" placeholder="Uses environment default" />
+                         <span class="field-help">Maximum boundary-refinement rounds after initial localization.</span>
+                       </label>
+                     </div>
+                   </section>
+                   <section class="settings-subgroup">
+                     <div class="settings-subgroup-header">
+                       <h4>Visual Repair Depth</h4>
+                       <p>Control focused repair attempts at each visual stage.</p>
+                     </div>
+                     <div class="settings-field-grid settings-field-grid-single">
+                       <label class="field" data-field-id="region-repair-max-attempts">
+                         <span class="field-heading">
+                           <span class="field-label">Region Repair Attempts</span>
+                           <span id="effective-region-repair-max-attempts" class="field-effective"></span>
+                         </span>
+                         <input id="region-repair-max-attempts" type="number" min="0" placeholder="Uses environment default" />
+                         <span class="field-help">Maximum SVG repair attempts for each detected region.</span>
+                       </label>
+                       <label class="field" data-field-id="object-repair-max-attempts">
+                         <span class="field-heading">
+                           <span class="field-label">Object Repair Attempts</span>
+                           <span id="effective-object-repair-max-attempts" class="field-effective"></span>
+                         </span>
+                         <input id="object-repair-max-attempts" type="number" min="0" placeholder="Uses environment default" />
+                         <span class="field-help">Maximum focused repair attempts for each recognized object.</span>
+                       </label>
+                       <label class="field" data-field-id="fusion-repair-max-attempts">
+                         <span class="field-heading">
+                           <span class="field-label">Final Integration Repairs</span>
+                           <span id="effective-fusion-repair-max-attempts" class="field-effective"></span>
+                         </span>
+                         <input id="fusion-repair-max-attempts" type="number" min="0" placeholder="Uses environment default" />
+                         <span class="field-help">Maximum repairs after all regions have been merged.</span>
+                       </label>
+                     </div>
+                   </section>
+                 </div>
+               </section>
               </div>
             </details>
 
@@ -597,28 +656,7 @@
                       <option value="false">false</option>
                     </select>
                   </label>
-                  <label class="field" data-field-id="bbox-issue-concurrency">
-                    <span class="field-heading">
-                      <span class="field-label">BBox Issue Concurrency</span>
-                      <span id="effective-bbox-issue-concurrency" class="field-effective"></span>
-                    </span>
-                    <input id="bbox-issue-concurrency" type="number" min="1" max="8" placeholder="1-8" />
-                  </label>
-                  <label class="field" data-field-id="bbox-issue-stagnation-rounds">
-                    <span class="field-heading">
-                      <span class="field-label">Issue Stagnation Rounds</span>
-                      <span id="effective-bbox-issue-stagnation-rounds" class="field-effective"></span>
-                    </span>
-                    <input id="bbox-issue-stagnation-rounds" type="number" min="1" max="8" placeholder="1-8" />
-                  </label>
-                  <label class="field" data-field-id="bbox-global-stagnation-rounds">
-                    <span class="field-heading">
-                      <span class="field-label">Global Stagnation Rounds</span>
-                      <span id="effective-bbox-global-stagnation-rounds" class="field-effective"></span>
-                    </span>
-                    <input id="bbox-global-stagnation-rounds" type="number" min="1" max="8" placeholder="1-8" />
-                  </label>
-                </div>
+                 </div>
               </details>
 
               <details class="settings-group settings-collapsible-group" open>
@@ -767,13 +805,6 @@
                 <div id="workflow-trace" class="workspace-panel-section workspace-panel-section--flush workflow-trace empty-state">
                   Process trace appears here when the conversion starts.
                 </div>
-                <section class="trace-refine-guide" aria-label="Refine guidance">
-                  <div class="trace-refine-guide-copy">
-                    <strong>Need a finer adjustment?</strong>
-                    <span>If anything still needs local changes, continue with the Refine flow.</span>
-                  </div>
-                  <button class="trace-refine-guide-btn" type="button" data-workspace-sidebar-tab="refine">Open Refine</button>
-                </section>
               </div>
             </section>
             <section
@@ -1101,6 +1132,6 @@
     </div>
     <div id="desktop-toast" class="desktop-toast hidden" role="status" aria-live="polite"></div>
 
-    <script type="module" src="/static/desktop-app.js?v=refine-history-readiness-1"></script>
+    <script type="module" src="/static/desktop-app.js?v=workspace-scroll-stability-1"></script>
   </body>
 </html>

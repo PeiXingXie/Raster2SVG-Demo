@@ -12,6 +12,7 @@ Usage: packaging/set-version.sh --version VERSION [--project-root PATH] [--pytho
 
 Synchronizes version metadata in:
 - pyproject.toml
+- src/deepagents_template/version.py
 - desktop/package.json
 - desktop/package-lock.json
 EOF
@@ -73,6 +74,7 @@ def replace_once(path: Path, pattern: str, replacement: str, description: str) -
 package_path = root / "desktop" / "package.json"
 lock_path = root / "desktop" / "package-lock.json"
 pyproject_path = root / "pyproject.toml"
+package_version_path = root / "src" / "deepagents_template" / "version.py"
 
 replace_once(
     package_path,
@@ -102,6 +104,12 @@ replace_once(
     r'(^version\s*=\s*")[^"]+(")',
     rf'\g<1>{version}\2',
     "pyproject.toml version",
+)
+replace_once(
+    package_version_path,
+    r'(^__version__\s*=\s*")[^"]+(")',
+    rf'\g<1>{version}\2',
+    "src/deepagents_template/version.py version",
 )
 PY
 

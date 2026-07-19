@@ -1,5 +1,5 @@
 import { elements } from "../dom.js";
-import { DEFAULT_MESSAGE, renderState, appState } from "../state.js?v=run-start-state-boundary-1";
+import { DEFAULT_MESSAGE, renderState, appState } from "../state.js?v=workspace-session-isolation-5";
 import { createLoadingState } from "../components/loading-state.js";
 import {
   captureDetailsState,
@@ -847,20 +847,25 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
   const sliderShell = document.createElement("div");
   sliderShell.className = "output-progress-slider-shell output-progress-node-slider";
   sliderShell.style.setProperty("--output-frame-count", String(snapshot.output_frames.length));
+  const outputFrameTrackInsetPx = 8;
+  sliderShell.style.setProperty("--output-frame-track-inset", `${outputFrameTrackInsetPx}px`);
   const denominator = Math.max(1, snapshot.output_frames.length - 1);
-  const progressPercent = `${(selectedOutputFrameIndex / denominator) * 100}%`;
+  const progressRatio = selectedOutputFrameIndex / denominator;
+  const progressPercent = `${progressRatio * 100}%`;
   sliderShell.style.setProperty("--output-frame-progress", progressPercent);
   const progressFill = document.createElement("div");
   progressFill.className = "output-progress-fill";
-  progressFill.style.width = progressPercent;
+  progressFill.style.width = `calc((100% - ${outputFrameTrackInsetPx * 2}px) * ${progressRatio})`;
   sliderShell.appendChild(progressFill);
   const clampFrameIndex = (value) => Math.max(0, Math.min(snapshot.output_frames.length - 1, value));
   let lastDragFrameIndex = selectedOutputFrameIndex;
   const frameIndexFromClientX = (clientX, rect) => {
-    if (!rect.width) {
+    const trackLeft = rect.left + outputFrameTrackInsetPx;
+    const trackWidth = Math.max(1, rect.width - outputFrameTrackInsetPx * 2);
+    if (!rect.width || !trackWidth) {
       return selectedOutputFrameIndex;
     }
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const ratio = Math.max(0, Math.min(1, (clientX - trackLeft) / trackWidth));
     return clampFrameIndex(Math.round(ratio * denominator));
   };
   const selectFrameIndex = (index, { force = false } = {}) => {
@@ -877,22 +882,30 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
     }
     event.preventDefault();
     sliderShell.classList.add("is-dragging");
+    sliderShell.setPointerCapture?.(event.pointerId);
     const dragRect = sliderShell.getBoundingClientRect();
     selectFrameIndex(frameIndexFromClientX(event.clientX, dragRect), { force: true });
 
     const handlePointerMove = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) {
+        return;
+      }
       moveEvent.preventDefault();
       selectFrameIndex(frameIndexFromClientX(moveEvent.clientX, dragRect));
     };
-    const stopDrag = () => {
+    const stopDrag = (stopEvent) => {
+      if (stopEvent.pointerId !== event.pointerId) {
+        return;
+      }
       sliderShell.classList.remove("is-dragging");
-      document.removeEventListener("pointermove", handlePointerMove);
-      document.removeEventListener("pointerup", stopDrag);
-      document.removeEventListener("pointercancel", stopDrag);
+      sliderShell.releasePointerCapture?.(event.pointerId);
+      sliderShell.removeEventListener("pointermove", handlePointerMove);
+      sliderShell.removeEventListener("pointerup", stopDrag);
+      sliderShell.removeEventListener("pointercancel", stopDrag);
     };
-    document.addEventListener("pointermove", handlePointerMove);
-    document.addEventListener("pointerup", stopDrag, { once: true });
-    document.addEventListener("pointercancel", stopDrag, { once: true });
+    sliderShell.addEventListener("pointermove", handlePointerMove);
+    sliderShell.addEventListener("pointerup", stopDrag);
+    sliderShell.addEventListener("pointercancel", stopDrag);
   });
   const range = document.createElement("input");
   range.type = "range";
@@ -915,7 +928,11 @@ export function renderOutputProgress(snapshot, selectedOutputFrameIndex, onFrame
     marker.style.left = `${(index / denominator) * 100}%`;
     marker.title = `${index + 1}. ${frameItem.title}`;
     marker.setAttribute("aria-label", `View output version ${index + 1}: ${frameItem.title}`);
-    marker.addEventListener("click", () => {
+    marker.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
+    marker.addEventListener("click", (event) => {
+      event.stopPropagation();
       onFrameChange(index, { source: "user" });
     });
     markerRow.appendChild(marker);
@@ -1519,13 +1536,17 @@ function buildRecentTraceEvents(nodes, activeNodeId) {
       }
       return a.index - b.index;
     });
-  return events.slice(-7).map((item) => ({
+  return events.map((item) => ({
     ...item,
     active: item.node.node_id === activeNodeId || ["running", "retrying"].includes(item.node.status),
   }));
 }
 
-function getTraceStallInfo(nodes, activeNodeId) {
+function getTraceStallInfo(nodes, activeNodeId, traceStatus = null) {
+  const normalizedTraceStatus = String(traceStatus || "").toLowerCase();
+  if (!["running", "retrying"].includes(normalizedTraceStatus)) {
+    return null;
+  }
   const activeNode = nodes.find((node) => node.node_id === activeNodeId)
     || [...nodes].reverse().find((node) => ["running", "retrying"].includes(node.status));
   if (!activeNode || !activeNode.started_at || !["running", "retrying"].includes(activeNode.status)) {
@@ -1543,7 +1564,7 @@ function getTraceStallInfo(nodes, activeNodeId) {
   };
 }
 
-function createTraceEventFeed(nodes, activeNodeId) {
+function createTraceEventFeed(nodes, activeNodeId, traceStatus = null) {
   const feed = document.createElement("section");
   feed.className = "workflow-trace-event-feed";
   const label = document.createElement("div");
@@ -1560,11 +1581,10 @@ function createTraceEventFeed(nodes, activeNodeId) {
   header.className = "workflow-trace-event-feed-head";
   header.innerHTML = `
     <span>Recent Activity</span>
-    <small>latest updates only</small>
   `;
   body.appendChild(header);
 
-  const stall = getTraceStallInfo(nodes, activeNodeId);
+  const stall = getTraceStallInfo(nodes, activeNodeId, traceStatus);
   if (stall) {
     const notice = document.createElement("div");
     notice.className = "workflow-trace-stall-notice";
@@ -1610,6 +1630,23 @@ function createTraceEventFeed(nodes, activeNodeId) {
   return feed;
 }
 
+export function renderWorkspaceRecentActivity(container, snapshot) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  const trace = snapshot?.workflow_trace || null;
+  const nodes = Array.isArray(trace?.nodes) ? trace.nodes : [];
+  if (!nodes.length) {
+    container.className = "workspace-recent-activity";
+    container.replaceChildren(createTraceEventFeed([], null));
+    return;
+  }
+  const summary = trace?.summary || {};
+  const visibleNodes = filterTraceNodes(nodes);
+  container.className = "workspace-recent-activity";
+  container.replaceChildren(createTraceEventFeed(visibleNodes, summary.active_node_id, summary.status));
+}
+
 export function renderManualRecentActivity(container, snapshot) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -1621,10 +1658,10 @@ export function renderManualRecentActivity(container, snapshot) {
     container.replaceChildren(createTraceEventFeed([], null));
     return;
   }
-  const summary = summarizeTrace(trace);
-  const visibleNodes = filterVisibleTraceNodes(nodes, summary.active_node_id);
+  const summary = trace?.summary || {};
+  const visibleNodes = filterTraceNodes(nodes);
   container.className = "manual-recent-activity";
-  container.replaceChildren(createTraceEventFeed(visibleNodes, summary.active_node_id));
+  container.replaceChildren(createTraceEventFeed(visibleNodes, summary.active_node_id, summary.status));
 }
 
 function getTraceViewportVisibleRect(viewport) {
@@ -1678,6 +1715,75 @@ function setTraceStableState(container, state, runSignature = null) {
   });
 }
 
+function getTraceViewportAnchor(viewport) {
+  if (!(viewport instanceof HTMLElement)) {
+    return null;
+  }
+  const visibleRect = getTraceViewportVisibleRect(viewport);
+  const candidates = Array.from(viewport.querySelectorAll("[data-trace-node-id]"))
+    .filter((item) => item instanceof HTMLElement);
+  if (!candidates.length) {
+    return null;
+  }
+  let best = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const item of candidates) {
+    const rect = item.getBoundingClientRect();
+    if (rect.bottom < visibleRect.top || rect.top > visibleRect.bottom) {
+      continue;
+    }
+    const distance = Math.abs(rect.top - visibleRect.top);
+    if (distance < bestDistance) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  if (!(best instanceof HTMLElement)) {
+    best = candidates.reduce((closest, item) => {
+      const distance = Math.abs(item.getBoundingClientRect().top - visibleRect.top);
+      const closestDistance = Math.abs(closest.getBoundingClientRect().top - visibleRect.top);
+      return distance < closestDistance ? item : closest;
+    }, candidates[0]);
+  }
+  const nodeId = best?.dataset?.traceNodeId || "";
+  if (!nodeId) {
+    return null;
+  }
+  return {
+    nodeId,
+    offsetTop: best.getBoundingClientRect().top - visibleRect.top,
+  };
+}
+
+function restoreTraceViewportAnchor(viewport, anchor) {
+  if (!(viewport instanceof HTMLElement) || !anchor?.nodeId) {
+    return false;
+  }
+  const target = Array.from(viewport.querySelectorAll("[data-trace-node-id]"))
+    .find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === anchor.nodeId);
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const panel = getTraceScrollPanel(viewport);
+  markTraceProgrammaticScroll(viewport);
+  if (panel) {
+    const visibleRect = getTraceViewportVisibleRect(viewport);
+    const targetTop = target.getBoundingClientRect().top;
+    const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    panel.scrollTop = Math.max(
+      0,
+      Math.min(maxScrollTop, panel.scrollTop + targetTop - visibleRect.top - (anchor.offsetTop || 0)),
+    );
+  } else {
+    const scale = Math.max(TRACE_MIN_ZOOM, Math.min(TRACE_MAX_ZOOM, traceViewportState.get(viewport)?.zoomMultiplier || 1));
+    viewport.scrollTop = Math.max(0, target.offsetTop * scale - (anchor.offsetTop || 0));
+  }
+  const state = traceViewportState.get(viewport) || {};
+  delete state.pendingAnchorRestore;
+  persistTraceViewportState(viewport, state);
+  return true;
+}
+
 function persistTraceViewportState(viewport, state) {
   if (!(viewport instanceof HTMLElement) || !state) {
     return;
@@ -1687,6 +1793,10 @@ function persistTraceViewportState(viewport, state) {
   if (panel) {
     state.panelScrollTop = panel.scrollTop;
   }
+  const anchor = state.pendingAnchorRestore ? state.anchor : getTraceViewportAnchor(viewport);
+  if (anchor && !state.pendingAnchorRestore) {
+    state.anchor = anchor;
+  }
   const container = getTraceContainerFromViewport(viewport);
   if (container) {
     const nextState = {
@@ -1694,6 +1804,8 @@ function persistTraceViewportState(viewport, state) {
       controls: null,
       scrollLeft: viewport.scrollLeft,
       panelScrollTop: panel ? panel.scrollTop : state.panelScrollTop,
+      anchor: state.anchor,
+      pendingAnchorRestore: state.pendingAnchorRestore,
     };
     traceContainerViewportState.set(container, nextState);
     setTraceStableState(container, nextState);
@@ -1751,6 +1863,9 @@ function scrollTraceViewportToElement(viewport, target) {
     const targetTop = Math.max(0, target.offsetTop * scale - Math.max(20, viewport.clientHeight * 0.24));
     viewport.scrollTop = targetTop;
   }
+  if (state) {
+    delete state.pendingAnchorRestore;
+  }
   persistTraceViewportState(viewport, state);
 }
 
@@ -1768,14 +1883,16 @@ function getTraceRunSignature(nodes = []) {
     || "";
 }
 
-function setTraceManualControl(viewport) {
+function setTraceManualControl(viewport, { persist = true } = {}) {
   const container = getTraceContainerFromViewport(viewport);
   if (container) {
     container.dataset.traceAutoFollow = "manual";
     const state = traceViewportState.get(viewport) || {};
     state.traceAutoFollow = "manual";
     traceViewportState.set(viewport, state);
-    persistTraceViewportState(viewport, state);
+    if (persist) {
+      persistTraceViewportState(viewport, state);
+    }
   }
 }
 
@@ -1807,35 +1924,40 @@ function scrollTraceViewportToNode(viewport, nodeId) {
 
 function scrollTraceViewportToActive(viewport, options = {}) {
   if (!(viewport instanceof HTMLElement)) {
-    return;
+    return false;
   }
   const activeNodeId = viewport.dataset.traceActiveNodeId || "";
-  let active = activeNodeId
-    ? Array.from(viewport.querySelectorAll("[data-trace-node-id]")).find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === activeNodeId)
-    : viewport.querySelector(".workflow-trace-card.active, .workflow-trace-card.running, .workflow-trace-card.retrying, .workflow-trace-card.failed, .workflow-trace-card.blocked");
+  if (!activeNodeId) {
+    return false;
+  }
+  let active = Array.from(viewport.querySelectorAll("[data-trace-node-id]"))
+    .find((item) => item instanceof HTMLElement && item.dataset.traceNodeId === activeNodeId);
   if (!(active instanceof HTMLElement) && options.allowSelectedDeck) {
     active = viewport.querySelector(".workflow-trace-deck-item.is-expanded > .workflow-trace-lane > .workflow-trace-card");
   }
   if (!(active instanceof HTMLElement)) {
-    return;
+    return false;
   }
   scrollTraceViewportToElement(viewport, active);
+  return true;
 }
 
 export function renderTraceInto(container, trace, emptyText, onNodeSelect = () => {}) {
   const visibleNodes = filterTraceNodes(trace?.nodes || []);
   const summary = trace?.summary || {};
-  const runSignature = getTraceRunSignature(visibleNodes);
+  const runSignature = trace?.run_id || trace?.artifact_dir || getTraceRunSignature(visibleNodes);
   const previousViewport = container.querySelector(".workflow-trace-viewport");
   if (previousViewport instanceof HTMLElement) {
     const previousState = traceViewportState.get(previousViewport);
     const previousPanel = getTraceScrollPanel(previousViewport);
+    const previousAnchor = getTraceViewportAnchor(previousViewport) || previousState?.anchor || null;
     const nextState = {
       ...(previousState || {}),
       dragPointerId: null,
       controls: null,
       scrollLeft: previousViewport.scrollLeft,
       panelScrollTop: previousPanel ? previousPanel.scrollTop : previousState?.panelScrollTop,
+      anchor: previousAnchor,
       traceAutoFollow: container.dataset.traceAutoFollow || previousState?.traceAutoFollow || "active",
     };
     traceContainerViewportState.set(container, nextState);
@@ -1850,6 +1972,7 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   }
 
   const stableState = getTraceStableState(container, runSignature);
+  const previousAutoFollowNodeId = stableState?.lastAutoFollowNodeId || container.dataset.traceLastAutoFollowNodeId || "";
   if (
     runSignature
     && container.dataset.traceRunSignature
@@ -1920,7 +2043,6 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   canvas.appendChild(body);
   viewport.appendChild(canvas);
   container.appendChild(viewport);
-  container.appendChild(createTraceEventFeed(visibleNodes, summary.active_node_id));
 
   initializeTraceViewport(viewport, canvas, body, controls);
   if ((summary.status === "running" || summary.status === "retrying") && trace?.nodes?.length) {
@@ -1938,13 +2060,38 @@ export function renderTraceInto(container, trace, emptyText, onNodeSelect = () =
   }
   requestAnimationFrame(() => {
     refreshWorkflowTraceLayout();
+    let didScrollTrace = false;
     if (tracePendingFocusNodeId) {
       const didFocus = scrollTraceViewportToNode(viewport, tracePendingFocusNodeId);
       if (didFocus) {
         tracePendingFocusNodeId = null;
+        didScrollTrace = true;
       }
     } else if (shouldTraceAutoFollow(viewport)) {
-      scrollTraceViewportToActive(viewport);
+      const activeNodeId = viewport.dataset.traceActiveNodeId || "";
+      const state = traceViewportState.get(viewport) || {};
+      const lastAutoFollowNodeId = state.lastAutoFollowNodeId || previousAutoFollowNodeId;
+      if (activeNodeId && activeNodeId !== lastAutoFollowNodeId) {
+        const didFollow = scrollTraceViewportToActive(viewport);
+        if (didFollow && activeNodeId) {
+          state.lastAutoFollowNodeId = activeNodeId;
+          traceViewportState.set(viewport, state);
+          container.dataset.traceLastAutoFollowNodeId = activeNodeId;
+          persistTraceViewportState(viewport, state);
+          didScrollTrace = true;
+        }
+      }
+    }
+    if (!didScrollTrace) {
+      const state = traceViewportState.get(viewport) || {};
+      const anchor = state.anchor || stableState?.anchor || null;
+      if (anchor && restoreTraceViewportAnchor(viewport, anchor)) {
+        state.anchor = anchor;
+        traceViewportState.set(viewport, state);
+      } else {
+        delete state.pendingAnchorRestore;
+        traceViewportState.set(viewport, state);
+      }
     }
   });
 }
@@ -2188,21 +2335,26 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
   state.controls = controls;
   state.dragPointerId = null;
   state.traceAutoFollow = container?.dataset.traceAutoFollow || state.traceAutoFollow || "active";
+  if (state.anchor) {
+    state.pendingAnchorRestore = true;
+  }
   traceViewportState.set(viewport, state);
   if (container) {
     const nextState = {
       ...state,
       controls: null,
       scrollLeft: state.scrollLeft ?? 0,
-      panelScrollTop: state.panelScrollTop ?? 0,
     };
+    if (Number.isFinite(state.panelScrollTop)) {
+      nextState.panelScrollTop = state.panelScrollTop;
+    }
     traceContainerViewportState.set(container, nextState);
     setTraceStableState(container, nextState);
   }
   if (Number.isFinite(state.scrollLeft)) {
     state.pendingScrollLeft = state.scrollLeft;
   }
-  if (Number.isFinite(state.panelScrollTop)) {
+  if (!state.anchor && Number.isFinite(state.panelScrollTop)) {
     state.pendingPanelScrollTop = state.panelScrollTop;
   }
 
@@ -2233,7 +2385,7 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
   });
 
   viewport.addEventListener("wheel", () => {
-    setTraceManualControl(viewport);
+    setTraceManualControl(viewport, { persist: false });
   }, { passive: true });
   viewport.addEventListener("scroll", () => {
     if (!isTraceProgrammaticScroll(viewport)) {
@@ -2247,7 +2399,7 @@ function initializeTraceViewport(viewport, canvas, body, controls) {
     panel.addEventListener("wheel", () => {
       const liveViewport = panel.querySelector(".workflow-trace-viewport");
       if (liveViewport instanceof HTMLElement) {
-        setTraceManualControl(liveViewport);
+        setTraceManualControl(liveViewport, { persist: false });
       }
     }, { passive: true });
     panel.addEventListener("scroll", () => {
@@ -2337,18 +2489,21 @@ function renderOutputVersionOptions(snapshot, selectedManualAdjustmentId, onManu
   const baseOption = document.createElement("button");
   baseOption.type = "button";
   baseOption.className = `ghost-btn compact-btn${selectedManualAdjustmentId ? "" : " active-version"}`;
-  baseOption.textContent = "Pipeline";
+  baseOption.textContent = "Main";
+  baseOption.title = "Main pipeline output";
   baseOption.dataset.previewUrl = pipelinePreviewUrl;
   baseOption.addEventListener("click", () => onManualAdjustmentChange(null));
   baseOption.addEventListener("mouseenter", () => preloadPreviewImage(baseOption.dataset.previewUrl).catch(() => {}));
   baseOption.addEventListener("focus", () => preloadPreviewImage(baseOption.dataset.previewUrl).catch(() => {}));
   elements.outputVersionSelect.appendChild(baseOption);
 
-  for (const adjustment of snapshot?.manual_adjustments || []) {
+  for (const [index, adjustment] of (snapshot?.manual_adjustments || []).entries()) {
     const option = document.createElement("button");
     option.type = "button";
     option.className = `ghost-btn compact-btn${selectedManualAdjustmentId === adjustment.adjustment_id ? " active-version" : ""}`;
-    option.textContent = adjustment.title;
+    const branchLabel = `Branch${index + 1}`;
+    option.textContent = branchLabel;
+    option.title = adjustment.title ? `${branchLabel} - ${adjustment.title}` : branchLabel;
     option.dataset.previewUrl = adjustment.preview_url || "";
     option.addEventListener("click", () => onManualAdjustmentChange(adjustment.adjustment_id));
     option.addEventListener("mouseenter", () => preloadPreviewImage(option.dataset.previewUrl).catch(() => {}));
@@ -2624,11 +2779,13 @@ export function renderArtifactSummary(
     <div><span class="summary-label">Image path</span><span class="summary-value">${escapeHtml(request.image_path || "-")}</span></div>
     <div><span class="summary-label">Base URL</span><span class="summary-value">${escapeHtml(request.base_url || "-")}</span></div>
     <div><span class="summary-label">API</span><span class="summary-value">${escapeHtml(request.api_provider || "-")} / ${escapeHtml(request.api_format || "-")}</span></div>
-    <div><span class="summary-label">API retries</span><span class="summary-value">${request.max_retries ?? "-"}</span></div>
+    <div><span class="summary-label">Transport attempts</span><span class="summary-value">${request.transport_max_attempts ?? ((request.max_retries ?? 0) + 1)}</span></div>
+    <div><span class="summary-label">Response validation attempts</span><span class="summary-value">${request.response_validation_max_attempts ?? "-"}</span></div>
     <div><span class="summary-label">Agent models</span><span class="summary-value">${escapeHtml(request.agent_model || "-")} / ${escapeHtml(request.subagent_model || "-")}</span></div>
     <div><span class="summary-label">Agent name</span><span class="summary-value">${escapeHtml(request.agent_name || "-")}</span></div>
     <div><span class="summary-label">Use previous response ID</span><span class="summary-value">${request.use_previous_response_id ?? "-"}</span></div>
-    <div><span class="summary-label">Repair / Budget</span><span class="summary-value">${request.max_retry ?? "-"} / ${request.max_budget ?? "-"}</span></div>
+    <div><span class="summary-label">Region / Object repair attempts</span><span class="summary-value">${request.region_repair_max_attempts ?? request.max_retry ?? "-"} / ${request.object_repair_max_attempts ?? request.max_retry ?? "-"}</span></div>
+    <div><span class="summary-label">Fusion repair / Model budget</span><span class="summary-value">${request.fusion_repair_max_attempts ?? request.fusion_max_retry ?? "-"} / ${request.run_model_call_budget ?? request.max_budget ?? "-"}</span></div>
     <div><span class="summary-label">Supervisor memory use</span><span class="summary-value">${request.supervisor_memory_enabled ?? "-"}</span></div>
     <div><span class="summary-label">Memory artifact persist</span><span class="summary-value">${request.supervisor_memory_persist_enabled ?? "-"}</span></div>
     <div><span class="summary-label">Strategy hints</span><span class="summary-value">${request.strategy_enabled ?? "-"}</span></div>

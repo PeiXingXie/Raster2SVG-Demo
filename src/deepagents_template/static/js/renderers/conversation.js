@@ -1,5 +1,5 @@
 import { elements } from "../dom.js";
-import { renderState } from "../state.js?v=run-start-state-boundary-1";
+import { renderState } from "../state.js?v=workspace-session-isolation-5";
 import {
   captureDetailsState,
   createCollapsibleContent,

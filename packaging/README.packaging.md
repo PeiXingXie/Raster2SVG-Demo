@@ -1,6 +1,8 @@
 # Installer Packaging README
 
-This directory contains the installer packaging flow for building desktop release artifacts. Windows users can install the app by downloading the Windows installer from the repository's Releases page and double-clicking it. Target Windows users do not need Python, Node.js, conda, or a terminal to start the backend service manually.
+This document is the authoritative guide for installer packaging, release builds, installed-app behavior, overwrite updates, uninstall behavior, dependency-size notes, and packaging troubleshooting.
+
+This directory contains the installer packaging flow for building desktop release artifacts. Windows users can install the app by downloading the Windows installer from the repository's Releases page and double-clicking it. Target Windows users do not need Python, Node.js, Conda, or a terminal to start the backend service manually.
 
 The current packaging approach is:
 
@@ -54,12 +56,14 @@ File roles:
 - `build-backend-macos.sh`: builds the macOS backend executable with PyInstaller.
 - `build-desktop-macos.sh`: builds the macOS Electron DMG after the backend has been bundled.
 - `build-release-macos.sh`: macOS release build entrypoint; synchronizes version metadata, builds the backend, then builds the DMG.
-- `set-version.ps1`: updates versions in `pyproject.toml`, `desktop/package.json`, and `desktop/package-lock.json`.
+- `set-version.ps1`: updates versions in `pyproject.toml`, `src/deepagents_template/version.py`, `desktop/package.json`, and `desktop/package-lock.json`.
 - `validate-version.ps1`: checks version consistency and ensures `appId` and `productName` were not accidentally changed.
 - `analyze-package-deps.ps1`: reports the largest packages in `.venv_package`.
 - `generate-icon.py`: generates app icon assets.
 
 Windows has complete `.ps1` scripts. macOS now has Bash packaging scripts for developers who need to build a DMG on a Mac. There is still no supported macOS/Linux product-user installer release path yet; for ordinary macOS/Linux users, use the source-bundle backend startup flow in `quick-start/README.quick-start.md`.
+
+The older root-level `docs.installer.md` file is now only an archived compatibility note that points here.
 
 ## Installed App Startup Model
 
@@ -197,7 +201,7 @@ If `desktop/node_modules` is missing or Electron dependencies changed, omit `--s
 
 The script does five things:
 
-1. updates versions in `pyproject.toml`, `desktop/package.json`, and `desktop/package-lock.json`
+1. updates versions in `pyproject.toml`, `src/deepagents_template/version.py`, `desktop/package.json`, and `desktop/package-lock.json`
 2. validates version metadata and stable app identity
 3. prepares `.venv_package` unless `--skip-package-venv` is used
 4. builds the macOS backend with PyInstaller
@@ -610,8 +614,9 @@ npm install
 npm run dist -- --mac dmg
 ```
 
-More background:
+Related documents:
 
-```text
-docs.installer.md
-```
+- [../README.md](../README.md): product-facing install/update basics
+- [../README.developer.md](../README.developer.md): developer entrypoint
+- [../RELEASE_NOTES.md](../RELEASE_NOTES.md): version-specific artifacts, checksums, and verification
+- [../architecture-summary/05-deployment-and-release.md](../architecture-summary/05-deployment-and-release.md): deployment and release architecture

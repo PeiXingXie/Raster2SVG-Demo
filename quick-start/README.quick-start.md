@@ -13,6 +13,7 @@ Use this document when your main goal is:
 
 For overall project navigation, start with the root [README.md](../README.md).
 For local development, use [README.developer.md](../README.developer.md).
+For installer packaging and release builds, use [packaging/README.packaging.md](../packaging/README.packaging.md).
 
 ## What This README Covers
 
@@ -117,7 +118,7 @@ By default the package includes:
 - `README.md`
 - `README.developer.md`
 - `docs.development.md`
-- `docs.installer.md`
+- `docs.installer.md` compatibility note
 - `.env.example`
 - `environment.yml`
 - `start-dev.ps1`
@@ -310,12 +311,7 @@ APP_HOST=127.0.0.1
 APP_PORT=8120
 ```
 
-For LAN access, a common choice is:
-
-```env
-APP_HOST=0.0.0.0
-APP_PORT=8120
-```
+Shape Studio is intentionally local-only because its API does not expose a user authentication layer. Keep `APP_HOST=127.0.0.1`; the startup scripts reject non-loopback addresses.
 
 Optional startup interaction setting:
 
@@ -350,10 +346,10 @@ cd quick-start
 start-api.bat
 ```
 
-Override host and port:
+Override the local host spelling or port:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\start-api.ps1 -ListenHost 0.0.0.0 -Port 8120
+powershell -ExecutionPolicy Bypass -File .\start-api.ps1 -ListenHost 127.0.0.1 -Port 8120
 ```
 
 Enable reload:
@@ -369,10 +365,10 @@ cd quick-start
 ./start-api.sh
 ```
 
-Override host and port:
+Override the local host spelling or port:
 
 ```bash
-APP_HOST=0.0.0.0 APP_PORT=8120 ./start-api.sh
+APP_HOST=127.0.0.1 APP_PORT=8120 ./start-api.sh
 ```
 
 Enable reload:
@@ -388,10 +384,10 @@ cd quick-start
 ./start-api.sh
 ```
 
-Override host and port:
+Override the local host spelling or port:
 
 ```bash
-APP_HOST=0.0.0.0 APP_PORT=8120 ./start-api.sh
+APP_HOST=127.0.0.1 APP_PORT=8120 ./start-api.sh
 ```
 
 Enable reload:
@@ -400,10 +396,7 @@ Enable reload:
 ./start-api.sh --reload
 ```
 
-The service is usually available at:
-
-- `http://127.0.0.1:8120/`
-- `http://<server-ip>:8120/` when listening on `0.0.0.0`
+The service is available only from the same computer, usually at `http://127.0.0.1:8120/`.
 
 Useful endpoints:
 
@@ -520,3 +513,4 @@ Check whether you also copied:
 - [README.developer.md](../README.developer.md)
 - [docs.development.md](../docs.development.md)
 - [desktop/README.desktop.md](../desktop/README.desktop.md)
+- [packaging/README.packaging.md](../packaging/README.packaging.md)

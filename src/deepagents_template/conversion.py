@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from PIL import Image
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.checklist import final_review_issues
 from deepagents_template.config import get_settings
 from deepagents_template.error_reporting import build_failure_diagnostic_from_exception
@@ -20,6 +21,7 @@ from deepagents_template.geometry import recognition_bboxes_to_global_if_local
 from deepagents_template.memory import ThreadStore
 from deepagents_template.modeling.executor import MultimodalJsonCaller
 from deepagents_template.resume import create_run_state, load_run_state, write_run_state
+from deepagents_template.retry_policy import RetryTracker, resolve_retry_limits
 from deepagents_template.schemas import (
     AgentRequest,
     ExecutionRun,
@@ -43,10 +45,7 @@ from deepagents_template.utils.reports import (
 )
 from deepagents_template.workflow import RasterToSvgNodeMixin
 from deepagents_template.workflow_agents import WorkflowAgentSuite
-
-
-class BudgetExceededError(RuntimeError):
-    """Raised before a model call when the run-level API budget is exhausted."""
+from deepagents_template.workflow_errors import BudgetExceededError, RunCancelledError
 
 
 class RasterToSvgPipeline(RasterToSvgNodeMixin):
@@ -61,6 +60,11 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         request: AgentRequest,
         agent_model: str,
         subagent_model: str,
+        run_id: str | None = None,
+        project_name: str | None = None,
+        api_key_override: str | None = None,
+        use_frozen_runtime: bool = False,
+        cancellation_event: threading.Event | None = None,
         event_callback: Callable[[ExecutionRun], None] | None = None,
     ) -> None:
         self.thread_store = thread_store
@@ -69,21 +73,23 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self.request = request
         self.agent_model = agent_model
         self.subagent_model = subagent_model
+        self.run_id = run_id
+        self.project_name = project_name
         self.event_callback = event_callback
+        self.cancellation_event = cancellation_event
         self._context_payload_warning_callback = self._record_context_payload_warning
-        self._previous_context_payload_warning_callback = set_context_payload_warning_callback(
-            self._context_payload_warning_callback
-        )
+        self._previous_context_payload_warning_callback = None
         settings = get_settings()
+        self.retry_limits = resolve_retry_limits(settings, request)
         self.api_provider = settings.resolved_api_provider(request.api_provider)
-        self.api_key = settings.resolved_api_key(request.api_key)
-        self.base_url = settings.resolved_base_url(request.base_url)
+        self.api_key = api_key_override if api_key_override is not None else settings.resolved_api_key(request.api_key)
+        self.base_url = request.base_url if use_frozen_runtime else settings.resolved_base_url(request.base_url)
         self.api_format = settings.resolved_api_format(request.api_format)
-        self.max_retries = settings.resolved_max_retries(request.max_retries)
+        self.max_retries = self.retry_limits.model_retry_limit()
         self.user_message = settings.resolved_user_input(request.message)
-        self.max_retry = settings.resolved_max_retry(request.max_retry)
-        self.fusion_max_retry = settings.resolved_fusion_max_retry(request.fusion_max_retry)
-        self.max_budget = settings.resolved_max_budget(request.max_budget)
+        self.max_retry = self.retry_limits.region_repair_max_attempts
+        self.fusion_max_retry = self.retry_limits.fusion_repair_max_attempts
+        self.max_budget = self.retry_limits.run_model_call_budget
         self.supervisor_memory_enabled = settings.resolved_supervisor_memory_enabled(
             request.supervisor_memory_enabled
         )
@@ -95,7 +101,11 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             request.recognition_bbox_refine_mode
         )
         self.sam_provider_mode = settings.resolved_sam_provider_mode(request.sam_provider_mode)
-        self.sam_remote_url = settings.resolved_sam_remote_url(request.sam_remote_url)
+        self.sam_remote_url = (
+            request.sam_remote_url
+            if use_frozen_runtime
+            else settings.resolved_sam_remote_url(request.sam_remote_url)
+        )
         self.sam_enabled = settings.resolved_sam_enabled(request.sam_enabled)
         self.sam_fallback_to_llm = settings.resolved_sam_fallback_to_llm(
             request.sam_fallback_to_llm
@@ -113,9 +123,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self.bbox_issue_stagnation_rounds = settings.resolved_bbox_issue_stagnation_rounds(
             request.bbox_issue_stagnation_rounds
         )
-        self.bbox_global_stagnation_rounds = settings.resolved_bbox_global_stagnation_rounds(
-            request.bbox_global_stagnation_rounds
-        )
+        self.bbox_global_stagnation_rounds = self.retry_limits.bbox_global_stagnation_max_rounds
         self.workflow_mode = settings.resolved_workflow_mode(request.workflow_mode)
         self.root_input_dir = artifact_dir / "input"
         self.root_intermediate_dir = artifact_dir / "intermediate"
@@ -124,9 +132,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self._run_state_lock = threading.RLock()
         self._model_call_lock = threading.Lock()
         self._model_call_count = 0
-        self._retry_lock = threading.Lock()
-        self._retry_counts: dict[str, int] = {}
-        self._retry_exhausted_tasks: set[str] = set()
+        self._retry_tracker = RetryTracker(self.retry_limits)
         self._parallel_budget_lock = threading.Lock()
         self._active_region_workers = 0
         self._pending_region_tasks = 0
@@ -160,6 +166,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "bbox_issue_stagnation_rounds": self.bbox_issue_stagnation_rounds,
             "bbox_global_stagnation_rounds": self.bbox_global_stagnation_rounds,
             "fusion_max_retry": self.fusion_max_retry,
+            "retry_limits": self.retry_limits.model_dump(mode="json"),
         }
         for directory in (
             self.root_input_dir,
@@ -174,26 +181,43 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
+            response_validation_max_attempts=self.retry_limits.response_validation_max_attempts,
             api_provider=self.api_provider,
             api_format=self.api_format,
             response_callback=self._record_model_response,
             request_callback=self._record_model_request,
             warning_callback=self._record_model_warning,
+            cancellation_check=self._check_cancelled,
         )
         self.final_caller = MultimodalJsonCaller(
             agent_model,
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
+            response_validation_max_attempts=self.retry_limits.response_validation_max_attempts,
             api_provider=self.api_provider,
             api_format=self.api_format,
             response_callback=self._record_model_response,
             request_callback=self._record_model_request,
             warning_callback=self._record_model_warning,
+            cancellation_check=self._check_cancelled,
         )
         self.workflow_agents = WorkflowAgentSuite(self)
         self.run_state = self._load_or_init_run_state()
         self._restore_runtime_counters_from_state()
+
+    def _check_cancelled(self) -> None:
+        if self.cancellation_event is not None and self.cancellation_event.is_set():
+            raise RunCancelledError("Run cancelled by the user.")
+
+    def _run_with_context_payload_warning_callback(self, fn, *args, **kwargs):
+        previous = set_context_payload_warning_callback(self._context_payload_warning_callback)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            clear_context_payload_warning_callback(self._context_payload_warning_callback)
+            if previous is not None:
+                set_context_payload_warning_callback(previous)
 
     @staticmethod
     def _normalize_trace_stage(value: object) -> str | None:
@@ -281,9 +305,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         if existing is not None:
             return existing
         state = create_run_state(
-            run_id=str(uuid4()),
+            run_id=self.run_id or str(uuid4()),
             thread_id=self.thread_id,
-            project_name=self.artifact_dir.name,
+            project_name=self.project_name or self.artifact_dir.name,
             request=self.request,
             budget_limit=self.max_budget,
             max_retry=self.max_retry,
@@ -298,17 +322,21 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             self.run_state.budget.used = self._model_call_count
             self.run_state.budget.remaining = max(self.max_budget - self._model_call_count, 0)
             self.run_state.retry.max_retry = self.max_retry
-            self.run_state.retry.counts = dict(self._retry_counts)
-            self.run_state.retry.exhausted_tasks = sorted(self._retry_exhausted_tasks)
+            self.run_state.retry.limits = self.retry_limits.model_dump_for_snapshot()
+            self.run_state.retry.counts = self._retry_tracker.counts_snapshot()
+            self.run_state.retry.exhausted_tasks = sorted(self._retry_tracker.exhausted_snapshot())
             write_run_state(self.artifact_dir, self.run_state)
 
     def _restore_runtime_counters_from_state(self) -> None:
         with self._run_state_lock:
             self._model_call_count = self.run_state.budget.used
-            self._retry_counts = dict(self.run_state.retry.counts)
-            self._retry_exhausted_tasks = set(self.run_state.retry.exhausted_tasks)
+            self._retry_tracker.restore(
+                counts=self.run_state.retry.counts,
+                exhausted=self.run_state.retry.exhausted_tasks,
+            )
 
     def _mark_stage_started(self, stage: str) -> None:
+        self._check_cancelled()
         with self._run_state_lock:
             self.run_state.status = "running"
             self.run_state.current_stage = stage
@@ -377,6 +405,16 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         with self._run_state_lock:
             self.run_state.status = "completed"
             self.run_state.current_stage = "completed"
+            self.run_state.timestamps.finished_at = utc_now()
+            self._save_run_state()
+
+    def _mark_cancelled(self, exc: Exception) -> None:
+        with self._run_state_lock:
+            self.run_state.status = "cancelled"
+            self.run_state.current_stage = "cancelled"
+            self.run_state.pause_reason = "cancelled_by_user"
+            self.run_state.failure.type = type(exc).__name__
+            self.run_state.failure.message = str(exc)
             self.run_state.timestamps.finished_at = utc_now()
             self._save_run_state()
 
@@ -463,6 +501,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         return results
 
     def run(self) -> str:
+        self._previous_context_payload_warning_callback = set_context_payload_warning_callback(
+            self._context_payload_warning_callback
+        )
         try:
             run_started_at = time.perf_counter()
             image_path = Path(self.request.image_path or "")
@@ -542,7 +583,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     )
                     self._mark_checkpoint("crops_completed", "region-cropping")
 
-                self._mark_stage_started("region-process-refine" if self.workflow_mode != "initial_only" else "region-process-initial")
+                self._mark_stage_started("region-process-initial")
                 if self.run_state.checkpoints.get("initial_regions_completed"):
                     initial_region_results = self._load_initial_region_results_from_artifacts()
                     self._push_event("region-process", "Resuming from initial region outputs", f"Reusing {len(initial_region_results)} initial region results.", trace_stage="initial-generate")
@@ -663,8 +704,13 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             rendered_report = render_conversion_report_markdown(report)
             self._write_text(self.root_output_dir / "report.md", rendered_report)
             self._mark_checkpoint("report_completed", "summarizing-result")
+            self._flush_async_io()
+            self._persist_runtime_logs(rescan=True)
             self._mark_completed()
             return rendered_report
+        except RunCancelledError as exc:
+            self._mark_cancelled(exc)
+            raise
         except BudgetExceededError as exc:
             self._mark_paused("budget_exhausted", exc)
             raise
@@ -675,9 +721,10 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             clear_context_payload_warning_callback(self._context_payload_warning_callback)
             if self._previous_context_payload_warning_callback is not None:
                 set_context_payload_warning_callback(self._previous_context_payload_warning_callback)
-            self._flush_async_io()
-            self._persist_runtime_logs(rescan=True)
-            self._shutdown_async_io()
+            try:
+                self._flush_async_io()
+            finally:
+                self._shutdown_async_io()
 
     def _build_input_section(self, *, input_metadata: dict, run_elapsed_ms: int) -> dict:
         return {
@@ -688,6 +735,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
             "api_format": self.api_format,
             "max_retry": self.max_retry,
             "fusion_max_retry": self.fusion_max_retry,
+            "retry_limits": self.retry_limits.model_dump(mode="json"),
             "max_budget": self.max_budget,
             "api_calls_used": self._model_call_count,
             "supervisor_memory_enabled": self.supervisor_memory_enabled,
@@ -865,9 +913,9 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
 
         if run is not None:
             timeline_payload = [event.model_dump(mode="json") for event in run.events]
-            (self.root_logs_dir / "timeline.json").write_text(
+            atomic_write_text(
+                self.root_logs_dir / "timeline.json",
                 json.dumps(timeline_payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
             )
             timeline_lines = ["# Timeline", ""]
             for event in run.events:
@@ -877,7 +925,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 )
                 if event.detail:
                     timeline_lines.append(f"  detail: {event.detail}")
-            (self.root_logs_dir / "timeline.md").write_text("\n".join(timeline_lines) + "\n", encoding="utf-8")
+            atomic_write_text(self.root_logs_dir / "timeline.md", "\n".join(timeline_lines) + "\n")
 
         with self._file_log_lock:
             known_paths = {item["path"] for item in self._file_log_entries}
@@ -900,22 +948,22 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                     )
             self._file_log_entries.sort(key=lambda item: item["relative_path"])
             file_payload = list(self._file_log_entries)
-        (self.root_logs_dir / "files.json").write_text(json.dumps(file_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(self.root_logs_dir / "files.json", json.dumps(file_payload, ensure_ascii=False, indent=2))
         file_lines = ["# Written Files", ""]
         for item in file_payload:
             file_lines.append(f"- {item['relative_path']} | kind={item['kind']} | path={item['path']}")
-        (self.root_logs_dir / "files.md").write_text("\n".join(file_lines) + "\n", encoding="utf-8")
+        atomic_write_text(self.root_logs_dir / "files.md", "\n".join(file_lines) + "\n")
 
         with self._overview_lock:
             overview_payload = dict(self._overview_payload)
-        (self.root_logs_dir / "overview.json").write_text(
+        atomic_write_text(
+            self.root_logs_dir / "overview.json",
             json.dumps(overview_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
         overview_lines = ["# Overview", ""]
         for key, value in overview_payload.items():
             overview_lines.append(f"- {key}: {json.dumps(value, ensure_ascii=False)}")
-        (self.root_logs_dir / "overview.txt").write_text("\n".join(overview_lines) + "\n", encoding="utf-8")
+        atomic_write_text(self.root_logs_dir / "overview.txt", "\n".join(overview_lines) + "\n")
 
     def _region_retry_task_name(self, region_id: str) -> str:
         return f"region:{region_id}:repair"
@@ -923,33 +971,19 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
     def _object_retry_task_name(self, region_id: str, object_id: str) -> str:
         return f"object:{region_id}:{object_id}:repair"
 
+    def _fidelity_retry_task_name(self, region_id: str) -> str:
+        return f"fidelity:{region_id}:verification"
+
     def _begin_retry(self, task_name: str) -> bool:
-        with self._retry_lock:
-            used = self._retry_counts.get(task_name, 0)
-            if used >= self.max_retry:
-                self._retry_exhausted_tasks.add(task_name)
-                self._save_run_state()
-                return False
-            self._retry_counts[task_name] = used + 1
+        allowed = self._retry_tracker.begin(task_name)
         self._save_run_state()
-        return True
+        return allowed
 
     def _retry_state(self, task_name: str) -> dict[str, int | str | bool]:
-        with self._retry_lock:
-            used = self._retry_counts.get(task_name, 0)
-            return {
-                "task": task_name,
-                "limit": self.max_retry,
-                "used": used,
-                "exhausted": used >= self.max_retry or task_name in self._retry_exhausted_tasks,
-            }
+        return self._retry_tracker.state(task_name)
 
     def _retry_exhausted(self, task_name: str) -> bool:
-        with self._retry_lock:
-            return (
-                self._retry_counts.get(task_name, 0) >= self.max_retry
-                or task_name in self._retry_exhausted_tasks
-            )
+        return self._retry_tracker.exhausted(task_name)
 
     def _has_object_retry_capacity(
         self,
@@ -958,33 +992,31 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         object_issues: list,
     ) -> bool:
         objects_by_id = {obj.object_id for obj in recognition.recognized_objects}
-        with self._retry_lock:
-            if not object_issues:
-                return any(
-                    self._retry_counts.get(self._object_retry_task_name(region_id, object_id), 0) < self.max_retry
-                    for object_id in objects_by_id
-                )
-            for issue in object_issues:
-                if issue.object_id not in objects_by_id:
-                    continue
-                task_name = self._object_retry_task_name(region_id, issue.object_id)
-                if self._retry_counts.get(task_name, 0) < self.max_retry:
-                    return True
-                self._retry_exhausted_tasks.add(task_name)
+        if not object_issues:
+            return any(
+                not self._retry_tracker.exhausted(self._object_retry_task_name(region_id, object_id))
+                for object_id in objects_by_id
+            )
+        for issue in object_issues:
+            if issue.object_id not in objects_by_id:
+                continue
+            task_name = self._object_retry_task_name(region_id, issue.object_id)
+            if not self._retry_tracker.exhausted(task_name):
+                return True
+            self._retry_tracker.mark_exhausted(task_name)
         return False
 
     def _retry_summary_for_region(self, region_id: str) -> dict[str, dict[str, int | str | bool]]:
-        prefixes = (f"region:{region_id}:", f"object:{region_id}:")
-        with self._retry_lock:
-            task_names = {
-                task_name
-                for task_name in set(self._retry_counts) | self._retry_exhausted_tasks
-                if task_name.startswith(prefixes)
-            }
+        prefixes = (f"region:{region_id}:", f"object:{region_id}:", f"fidelity:{region_id}:")
+        task_names = {
+            task_name
+            for task_name in self._retry_tracker.known_task_names()
+            if task_name.startswith(prefixes)
+        }
         return {task_name: self._retry_state(task_name) for task_name in sorted(task_names)}
 
     def _write_json(self, path: Path, payload: dict | list) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         self._record_written_file(path, kind="json")
 
     def use_supervisor_memory(self) -> bool:
@@ -998,7 +1030,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         return bool(self.supervisor_memory_persist_enabled)
 
     def _write_text(self, path: Path, text: str) -> None:
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
         self._record_written_file(path, kind=path.suffix.lstrip(".") or "text")
 
     def _write_json_async(self, path: Path, payload: dict | list) -> None:
@@ -1008,26 +1040,27 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         self._submit_async_io(self._write_text_direct, path, text)
 
     def _write_json_direct(self, path: Path, payload: dict | list) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         self._record_written_file(path, kind="json", schedule_logs=False)
         self._schedule_runtime_logs()
 
     def _write_text_direct(self, path: Path, text: str) -> None:
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
         self._record_written_file(path, kind=path.suffix.lstrip(".") or "text", schedule_logs=False)
         self._schedule_runtime_logs()
 
     def _submit_async_io(self, fn, *args) -> None:
         with self._async_io_lock:
-            self._async_io_futures = [future for future in self._async_io_futures if not future.done()]
             self._async_io_futures.append(self._async_io_executor.submit(fn, *args))
 
     def _flush_async_io(self) -> None:
         with self._async_io_lock:
             futures = list(self._async_io_futures)
-            runtime_logs_future = self._runtime_logs_future
+            self._async_io_futures = []
         for future in futures:
             future.result()
+        with self._async_io_lock:
+            runtime_logs_future = self._runtime_logs_future
         if runtime_logs_future is not None:
             runtime_logs_future.result()
 
@@ -1110,6 +1143,7 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
         level: str = "info",
         trace_stage: str | None = None,
     ) -> None:
+        self._check_cancelled()
         worker_snapshot = worker_statuses if worker_statuses is not None else self._worker_status_snapshot()
         enriched_payload = dict(payload or {})
         resolved_trace_stage = self._resolve_trace_stage(stage, enriched_payload, trace_stage)
@@ -1178,7 +1212,8 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 f"{str(overview['invalid_response_preview']).replace(chr(10), ' ')[:240]}"
             )
         if raw_response_relative_path:
-            detail = f"{detail} Raw saved at {raw_response_relative_path.replace('/', '\\')}."
+            windows_raw_response_path = raw_response_relative_path.replace("/", "\\")
+            detail = f"{detail} Raw saved at {windows_raw_response_path}."
         self._push_event(
             "model-response",
             title,
@@ -1217,7 +1252,8 @@ class RasterToSvgPipeline(RasterToSvgNodeMixin):
                 f"{str(overview['invalid_response_preview']).replace(chr(10), ' ')[:240]}"
             )
         if raw_response_relative_path:
-            detail = f"{detail} Raw saved at {raw_response_relative_path.replace('/', '\\')}."
+            windows_raw_response_path = raw_response_relative_path.replace("/", "\\")
+            detail = f"{detail} Raw saved at {windows_raw_response_path}."
         self._push_event(
             "model-response",
             "Model response format warning",

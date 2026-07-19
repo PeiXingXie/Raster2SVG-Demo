@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.svg_utils import (
     ensure_region_svg_comment,
     extract_object_svg_index,
@@ -62,5 +63,5 @@ def persist_merged_svg(
 ) -> str:
     merged_svg = merge_svg(svg_template, merged_regions)
     merged_svg = normalize_svg(merged_svg)
-    output_path.write_text(merged_svg, encoding="utf-8")
+    atomic_write_text(output_path, merged_svg)
     return merged_svg

@@ -137,6 +137,7 @@ def render_conversion_report_markdown(report: dict) -> str:
     node_timings = report["node_timings"]
     residual = report["residual_issues"]
     error_summary = report.get("errors") or {"warnings_total": 0, "errors_total": 0, "items": []}
+    retry_limits = input_section.get("retry_limits") or {}
 
     lines = [
         "# Shape Studio Report",
@@ -155,9 +156,12 @@ def render_conversion_report_markdown(report: dict) -> str:
         f"- Size: `{input_section['width']}x{input_section['height']}`",
         f"- API provider: `{input_section['api_provider']}`",
         f"- API format: `{input_section['api_format']}`",
-        f"- Max retry per repair task: `{input_section['max_retry']}`",
-        f"- Fusion max retry: `{input_section.get('fusion_max_retry', 3)}`",
-        f"- Max API budget: `{input_section['max_budget']}`",
+        f"- Response validation max attempts: `{retry_limits.get('response_validation_max_attempts', '-')}`",
+        f"- BBox refinement max rounds: `{retry_limits.get('bbox_refinement_max_rounds', input_section['max_retry'])}`",
+        f"- Region repair max attempts: `{retry_limits.get('region_repair_max_attempts', input_section['max_retry'])}`",
+        f"- Object repair max attempts: `{retry_limits.get('object_repair_max_attempts', input_section['max_retry'])}`",
+        f"- Fusion repair max attempts: `{retry_limits.get('fusion_repair_max_attempts', input_section.get('fusion_max_retry'))}`",
+        f"- Model call budget: `{retry_limits.get('run_model_call_budget', input_section['max_budget'])}`",
         f"- API calls used: `{input_section['api_calls_used']}`",
         f"- Run elapsed: `{input_section['run_elapsed_ms']} ms`",
         (

@@ -8,7 +8,9 @@ from pathlib import Path
 from threading import current_thread
 
 from PIL import Image, ImageDraw
+from pydantic import ValidationError
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.checklist import (
     final_review_spatial_logical_issues,
     fusion_review_issue_id,
@@ -25,6 +27,14 @@ from deepagents_template.geometry import (
     normalize_regions,
     recognition_bboxes_to_global,
 )
+from deepagents_template.object_contracts import (
+    audit_object_contracts,
+    degrade_unresolved_contracts,
+    initialize_contracts,
+    merge_contract_enrichment,
+    merge_contract_patches,
+)
+from deepagents_template.modeling.executor import InvalidModelResponseError
 from deepagents_template.policy import BboxPolicyEngine, FusionPolicyEngine, ObjectPolicyEngine, RegionPolicyEngine
 from deepagents_template.recognition_grouping import group_oversegmented_recognition
 from deepagents_template.schemas import (
@@ -33,13 +43,14 @@ from deepagents_template.schemas import (
     BboxIssueThreadSummary,
     BboxSupervisorMemory,
     FinalReviewResult,
+    FusionPolicyDecision,
     FusionSupervisorMemory,
     LayoutDetectionResult,
     ObjectBboxCandidateSelectionResult,
     ObjectInitialBboxResult,
     LayoutSupervisorMemory,
     ObjectRepairSupervisorMemory,
-    ObjectCandidate,
+    RegionStructureRecognitionResult,
     RegionRecognitionResult,
     RegionBoundingBox,
     RegionRepairResult,
@@ -47,8 +58,10 @@ from deepagents_template.schemas import (
     RegionSupervisorMemory,
     SupervisorIssueMemory,
 )
+from deepagents_template.workflow_errors import BudgetExceededError, RunCancelledError
 from deepagents_template.svg_utils import extract_group_template
 from deepagents_template.svg_bbox_validation import build_region_bbox_review_feedback
+from deepagents_template.taxonomy import OBJECT_ISSUE_REPAIR_PRIORITY
 from deepagents_template.utils.planning import summarize_conversion_requirements
 from deepagents_template.utils.bbox_visualization import render_bbox_overlay
 from deepagents_template.utils.context_payloads import (
@@ -90,12 +103,7 @@ _CANDIDATE_BBOX_COLORS = {
 
 _REGION_REPAIR_ISSUE_LIMIT = 3
 _OBJECT_REPAIR_ISSUE_LIMIT = 3
-_OBJECT_FIDELITY_ISSUE_FAMILIES = {
-    "content_accuracy",
-    "shape_fidelity",
-    "internal_structure",
-    "style_appearance",
-}
+_OBJECT_ISSUE_SEVERITY_PRIORITY = {"high": 0, "medium": 1, "low": 2}
 
 
 class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
@@ -603,7 +611,10 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
             self.pipeline._write_text(bbox_dir / "initial_bbox_raw.txt", initial_raw)
             self.pipeline._write_json(bbox_dir / "initial_bbox.json", initial_result.model_dump(mode="json"))
             missing_object_ids = self._objects_missing_bboxes(current_recognition)
-            if missing_object_ids:
+            max_attempts = self.pipeline.retry_limits.bbox_initial_localization_max_attempts
+            for attempt in range(2, max_attempts + 1):
+                if not missing_object_ids:
+                    break
                 missing_objects = [
                     obj
                     for obj in self._recognition_objects_payload(current_recognition)
@@ -621,22 +632,24 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                     initial_result=retry_result,
                     crop_path=crop_path,
                 )
-                self.pipeline._write_text(bbox_dir / "initial_bbox_missing_retry_raw.txt", retry_raw)
+                suffix = "" if attempt == 2 else f"_{attempt}"
+                self.pipeline._write_text(bbox_dir / f"initial_bbox_missing_retry{suffix}_raw.txt", retry_raw)
                 self.pipeline._write_json(
-                    bbox_dir / "initial_bbox_missing_retry.json",
+                    bbox_dir / f"initial_bbox_missing_retry{suffix}.json",
                     {
+                        "attempt": attempt,
                         "missing_object_ids": missing_object_ids,
                         "result": retry_result.model_dump(mode="json"),
                     },
                 )
-                remaining_missing = self._objects_missing_bboxes(current_recognition)
-                if remaining_missing:
-                    self._push_bbox_warning(
-                        region_id=region["region_id"],
-                        title="Initial object bbox missing after retry",
-                        detail="Initial bbox generation still omitted recognized objects after targeted retry.",
-                        payload={"missing_object_ids": remaining_missing},
-                    )
+                missing_object_ids = self._objects_missing_bboxes(current_recognition)
+            if missing_object_ids:
+                self._push_bbox_warning(
+                    region_id=region["region_id"],
+                    title="Initial object bbox missing after retry",
+                    detail="Initial bbox generation still omitted recognized objects after configured attempts.",
+                    payload={"missing_object_ids": missing_object_ids, "max_attempts": max_attempts},
+                )
 
         latest_result = BboxAdjustmentResult(scope="recognition", region_id=region["region_id"], overview="", issues=[], needs_adjustment=False)
         resolved_issue_ids: set[str] = set()
@@ -693,7 +706,7 @@ class BboxAdjustmentSupervisorAgent(BaseWorkflowAgent):
                 memory.stop_reason = stop_reason
                 break
 
-            if repeated_rounds >= self.pipeline.bbox_global_stagnation_rounds:
+            if repeated_rounds >= self.pipeline.retry_limits.bbox_global_stagnation_max_rounds:
                 latest_result = scan_result.model_copy(update={"issues": ranked_issues, "needs_adjustment": True})
                 round_summary = BboxGlobalRoundSummary(
                     round_index=round_index,
@@ -1401,6 +1414,139 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
     def _persist_region_memory(self, region_dir: Path, memory: RegionSupervisorMemory) -> None:
         self._persist_memory(region_dir / "supervisor_memory.json", memory)
 
+    def _build_object_contracts(
+        self,
+        *,
+        crop_path: Path,
+        region: dict,
+        checklist: dict,
+        structure,
+        region_dir: Path,
+    ) -> RegionRecognitionResult:
+        diagnostic: dict = {
+            "region_id": region["region_id"],
+            "stage_2_status": "running",
+        }
+        if not structure.recognized_objects:
+            recognition = initialize_contracts(structure)
+            diagnostic.update(
+                {
+                    "stage_2_status": "skipped",
+                    "stage_2_skip_reason": "no recognized objects",
+                    "stage_2_audit": [],
+                    "final_audit": [],
+                    "object_contract_status": {},
+                    "status": "completed",
+                }
+            )
+            self.pipeline._write_json(region_dir / "recognition_contract_audit.json", [])
+            self.pipeline._write_json(region_dir / "recognition_contract_status.json", diagnostic)
+            return recognition
+        try:
+            enrichment, raw_response = self.recognition_worker.enrich_object_contracts(
+                crop_path=crop_path,
+                region=region,
+                checklist=checklist,
+                recognized_objects=[obj.model_dump(mode="json") for obj in structure.recognized_objects],
+            )
+            self.pipeline._write_text(region_dir / "recognition_enrichment_raw.txt", raw_response)
+            self.pipeline._write_json(
+                region_dir / "recognition_enrichment.json",
+                enrichment.model_dump(mode="json"),
+            )
+            if enrichment.region_id != region["region_id"]:
+                raise ValueError(
+                    f'Contract enrichment returned region_id="{enrichment.region_id}" '
+                    f'instead of "{region["region_id"]}".'
+                )
+            recognition, rejected_enrichment = merge_contract_enrichment(
+                structure,
+                enrichment,
+            )
+            diagnostic.update(
+                {
+                    "stage_2_status": "completed",
+                    "stage_2_rejected_updates": rejected_enrichment,
+                }
+            )
+        except (BudgetExceededError, RunCancelledError):
+            raise
+        except Exception as exc:
+            recognition = initialize_contracts(structure)
+            diagnostic.update(
+                {
+                    "stage_2_status": "failed",
+                    "stage_2_error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+        issues = audit_object_contracts(recognition)
+        diagnostic["stage_2_audit"] = issues
+        self.pipeline._write_json(region_dir / "recognition_contract_audit.json", issues)
+        if issues:
+            try:
+                completion, raw_response = self.recognition_worker.complete_object_contracts(
+                    crop_path=crop_path,
+                    region=region,
+                    objects_to_complete=issues,
+                )
+                self.pipeline._write_text(region_dir / "recognition_contract_completion_raw.txt", raw_response)
+                self.pipeline._write_json(
+                    region_dir / "recognition_contract_completion.json",
+                    completion.model_dump(mode="json"),
+                )
+                if completion.region_id != region["region_id"]:
+                    raise ValueError(
+                        f'Contract completion returned region_id="{completion.region_id}" '
+                        f'instead of "{region["region_id"]}".'
+                    )
+                recognition, applied_fields, rejected_patches = merge_contract_patches(
+                    recognition,
+                    audit_issues=issues,
+                    patches=completion.object_updates,
+                )
+                diagnostic.update(
+                    {
+                        "stage_3_status": "completed",
+                        "stage_3_applied_fields": applied_fields,
+                        "stage_3_rejected_patches": rejected_patches,
+                    }
+                )
+            except (BudgetExceededError, RunCancelledError):
+                raise
+            except Exception as exc:
+                diagnostic.update(
+                    {
+                        "stage_3_status": "failed",
+                        "stage_3_error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+
+        remaining_issues = audit_object_contracts(recognition)
+        diagnostic["final_audit"] = remaining_issues
+        status = {}
+        if remaining_issues:
+            recognition, status = degrade_unresolved_contracts(recognition, remaining_issues)
+            self.pipeline._push_event(
+                "region-process",
+                f"Object contracts degraded for {region['region_id']}",
+                (
+                    "Targeted contract completion left unavailable fields for: "
+                    + ", ".join(item["object_id"] for item in remaining_issues)
+                    + ". Continuing with structure, object-type defaults, and available contract fields."
+                ),
+                payload={
+                    "region_id": region["region_id"],
+                    "object_contract_status": status,
+                },
+                status="running",
+                level="warning",
+            )
+        diagnostic["object_contract_status"] = status
+        diagnostic["status"] = "degraded" if remaining_issues else "completed"
+        self.pipeline._write_json(region_dir / "recognition_contract_status.json", diagnostic)
+        return recognition
+
     def _warn_unscoped_visuals(
         self,
         *,
@@ -1563,13 +1709,15 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
             if issue.object_id in valid_object_ids
             and (not target_objects or issue.object_id in target_objects)
         ]
-        fidelity_candidates = [
-            issue
-            for issue in candidates
-            if issue.severity in {"medium", "high"}
-            and getattr(issue, "issue_family", "") in _OBJECT_FIDELITY_ISSUE_FAMILIES
-        ]
-        selected = fidelity_candidates or candidates
+        material_candidates = [issue for issue in candidates if issue.severity in {"medium", "high"}]
+        selected = material_candidates or candidates
+        selected = sorted(
+            selected,
+            key=lambda issue: (
+                _OBJECT_ISSUE_SEVERITY_PRIORITY.get(issue.severity, 3),
+                OBJECT_ISSUE_REPAIR_PRIORITY.get(getattr(issue, "issue_family", ""), 4),
+            ),
+        )
         return selected[:limit]
 
     def _region_bbox_feedback(
@@ -1630,20 +1778,81 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 "Region content stays inside the bounding box.",
                 "Main objects are represented with editable SVG primitives.",
                 "Region output remains mergeable into the global SVG.",
-                f"Stop after at most {self.pipeline.max_retry} retry iterations per named repair task.",
+                f"Stop after at most {self.pipeline.retry_limits.region_repair_max_attempts} region repair attempts.",
             ],
         )
         self.pipeline._write_json(region_dir / "region_task.json", region_task)
 
         self._emit_region_semantic_stage(region=region, semantic_stage="Region Scan", phase="initial")
-        recognition, recognition_raw = self.recognition_worker.run(
-            crop_path=crop_path,
-            region=region,
-            checklist=checklist,
-        )
+        try:
+            structure, recognition_raw = self.recognition_worker.run(
+                crop_path=crop_path,
+                region=region,
+                checklist=checklist,
+            )
+        except (BudgetExceededError, RunCancelledError):
+            raise
+        except InvalidModelResponseError as exc:
+            if not isinstance(exc.cause, ValidationError) or not isinstance(exc.payload, dict):
+                raise
+            recognition_raw = json.dumps(exc.payload, ensure_ascii=False)
+            try:
+                recovered_structure = RegionStructureRecognitionResult.model_validate(exc.payload)
+            except ValidationError:
+                structure = RegionStructureRecognitionResult(
+                    region_id=region_id,
+                    observation="Stage 1 recognition contract remained invalid after schema retries.",
+                    recognized_objects=[],
+                )
+                degradation_reason = "invalid object identity or required object content"
+            else:
+                structure = recovered_structure.model_copy(update={"region_id": region_id})
+                degradation_reason = (
+                    "region_id mismatch corrected"
+                    if structure.recognized_objects
+                    else "no editable objects recognized after schema retries"
+                )
+            self.pipeline._write_json(
+                region_dir / "recognition_structure_retry_exhausted.json",
+                {
+                    "region_id": region_id,
+                    "degradation_reason": degradation_reason,
+                    "validation_error": str(exc.cause),
+                    "last_payload": exc.payload,
+                },
+            )
+            self.pipeline._push_event(
+                "region-process",
+                f"Recognition contract degraded for {region_id}",
+                f"Schema retries were exhausted due to {degradation_reason}. Continuing safely at region level.",
+                payload={
+                    "region_id": region_id,
+                    "degradation_reason": degradation_reason,
+                    "recognized_object_count": len(structure.recognized_objects),
+                },
+                status="running",
+                level="warning",
+            )
+        recognition = initialize_contracts(structure)
         recognition = normalize_recognition_bboxes(recognition, region=region)
         grouped_recognition, grouping_summary = group_oversegmented_recognition(recognition)
         recognition = grouped_recognition
+        if grouping_summary.merged_count:
+            structure = RegionStructureRecognitionResult.model_validate(
+                {
+                    "region_id": structure.region_id,
+                    "observation": structure.observation,
+                    "recognized_objects": [
+                        {
+                            "object_id": obj.object_id,
+                            "object_type": obj.object_type,
+                            "description": obj.description,
+                            "included_elements": obj.included_elements,
+                        }
+                        for obj in recognition.recognized_objects
+                    ],
+                }
+            )
         if grouping_summary.merged_count:
             self.pipeline._push_event(
                 "region-process",
@@ -1659,6 +1868,15 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 status="running",
                 level="warning",
             )
+        self.pipeline._write_text(region_dir / "recognition_structure_raw.txt", recognition_raw)
+        self.pipeline._write_json(region_dir / "recognition_structure.json", structure.model_dump(mode="json"))
+        recognition = self._build_object_contracts(
+            crop_path=crop_path,
+            region=region,
+            checklist=checklist,
+            structure=structure,
+            region_dir=region_dir,
+        )
         self._emit_region_semantic_stage(region=region, semantic_stage="BBox Review", phase="initial")
         if hasattr(self.pipeline, "workflow_agents"):
             recognition, bbox_result = self.pipeline.workflow_agents.bbox.review_recognition(
@@ -1821,6 +2039,11 @@ class RegionSupervisorAgent(BaseWorkflowAgent):
                 region_retry_exhausted=self.pipeline._retry_exhausted(region_retry_task),
                 iteration=str(policy_iteration),
                 region_retry_task=region_retry_task,
+                fidelity_retry_task=(
+                    self.pipeline._fidelity_retry_task_name(region_id)
+                    if self.pipeline.retry_limits.fidelity_verification_uses_independent_budget
+                    else region_retry_task
+                ),
                 rendered_svg_path=rendered_region_svg_path,
                 svg_file_path=region_policy_dir / region_svg_file_name,
             )
@@ -2049,7 +2272,7 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
         final_review_raw = ""
         final_review = FinalReviewResult()
         iteration = 0
-        fusion_retry_limit = max(0, int(getattr(self.pipeline, "fusion_max_retry", 3)))
+        fusion_retry_limit = self.pipeline.retry_limits.fusion_repair_max_attempts
         final_decision = None
         while True:
             fusion_policy_dir = self.pipeline.root_output_dir / "policy"
@@ -2089,6 +2312,8 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
             )
             if decision.accept_current_result or not decision.continue_refinement:
                 break
+            if iteration >= fusion_retry_limit:
+                break
             strategy_label = decision.final_strategy_label or "conservative_merge_repair"
             self.memory.attempted_merge_strategies.append(strategy_label)
             repair_result, repair_raw = self.repair_worker.run(
@@ -2098,14 +2323,12 @@ class FusionSupervisorAgent(BaseWorkflowAgent):
                 svg_file_path=output_path,
             )
             merged_svg = repair_result.repaired_svg
-            output_path.write_text(merged_svg, encoding="utf-8")
+            atomic_write_text(output_path, merged_svg)
             self.pipeline._record_written_file(output_path, kind=output_path.suffix.lstrip(".") or "text")
             stem = output_path.stem
             self.pipeline._write_text(output_path.with_name(f"{stem}_integrate_repair_raw.txt"), repair_raw)
             self.pipeline._write_json(output_path.with_name(f"{stem}_integrate_repair.json"), repair_result.model_dump(mode="json"))
             iteration += 1
-            if iteration > fusion_retry_limit:
-                break
         self.pipeline._write_text(review_raw_path, final_review_raw)
         self.pipeline._write_json(review_json_path, final_review.model_dump(mode="json"))
         remaining_regions = set()

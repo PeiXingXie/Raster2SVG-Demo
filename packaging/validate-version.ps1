@@ -19,6 +19,7 @@ $Root = Get-ProjectRoot
 $DesktopPackagePath = Join-Path $Root "desktop\package.json"
 $DesktopLockPath = Join-Path $Root "desktop\package-lock.json"
 $PyprojectPath = Join-Path $Root "pyproject.toml"
+$PackageVersionPath = Join-Path $Root "src\deepagents_template\version.py"
 
 $DesktopPackage = Get-Content -Raw -LiteralPath $DesktopPackagePath | ConvertFrom-Json
 $DesktopVersion = [string]$DesktopPackage.version
@@ -32,6 +33,16 @@ $PyprojectVersion = $PyprojectMatch.Groups[1].Value
 
 if ($DesktopVersion -ne $PyprojectVersion) {
     throw "Version mismatch: desktop/package.json=$DesktopVersion pyproject.toml=$PyprojectVersion"
+}
+
+$PackageVersionText = Get-Content -Raw -LiteralPath $PackageVersionPath
+$PackageVersionMatch = [regex]::Match($PackageVersionText, '(?m)^__version__\s*=\s*"([^"]+)"')
+if (-not $PackageVersionMatch.Success) {
+    throw "Could not find __version__ in src/deepagents_template/version.py."
+}
+$PackageVersion = $PackageVersionMatch.Groups[1].Value
+if ($PackageVersion -ne $DesktopVersion) {
+    throw "Version mismatch: src/deepagents_template/version.py=$PackageVersion desktop/package.json=$DesktopVersion"
 }
 
 if (Test-Path -LiteralPath $DesktopLockPath) {

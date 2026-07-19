@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import threading
+from contextvars import ContextVar
 import warnings
 
 from deepagents_template.checklist import FINAL_REVIEW_ISSUE_LISTS, fusion_review_issue_id
@@ -12,33 +12,27 @@ from deepagents_template.schemas import DecisionDelta, FinalReviewResult, Object
 CONTEXT_PAYLOAD_WORD_BUDGET = 32
 CONTEXT_PAYLOAD_ISSUE_LABEL_BUDGET = 24
 
-_WARNING_CALLBACK_LOCK = threading.Lock()
-_WARNING_CALLBACK = None
+_WARNING_CALLBACK: ContextVar = ContextVar("context_payload_warning_callback", default=None)
 
 
 def set_context_payload_warning_callback(callback):
     """Register a structured warning callback for oversized context payload text."""
 
-    global _WARNING_CALLBACK
-    with _WARNING_CALLBACK_LOCK:
-        previous = _WARNING_CALLBACK
-        _WARNING_CALLBACK = callback
+    previous = _WARNING_CALLBACK.get()
+    _WARNING_CALLBACK.set(callback)
     return previous
 
 
 def clear_context_payload_warning_callback(callback=None):
     """Clear the current structured warning callback if it matches the expected callback."""
 
-    global _WARNING_CALLBACK
-    with _WARNING_CALLBACK_LOCK:
-        if callback is None or _WARNING_CALLBACK is callback:
-            _WARNING_CALLBACK = None
+    current = _WARNING_CALLBACK.get()
+    if callback is None or current is callback:
+        _WARNING_CALLBACK.set(None)
 
 
 def _emit_warning(payload: dict, message: str) -> None:
-    callback = None
-    with _WARNING_CALLBACK_LOCK:
-        callback = _WARNING_CALLBACK
+    callback = _WARNING_CALLBACK.get()
     if callback is not None:
         callback(payload)
         return
@@ -156,27 +150,6 @@ def _included_elements_from_object(obj: ObjectCandidate | dict) -> list[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
-_OWNED_SYMBOLIC_FIDELITY_TERMS = (
-    "icon",
-    "mark",
-    "badge",
-    "emblem",
-    "logo",
-)
-
-
-def _object_type_from_object(obj: ObjectCandidate | dict) -> str:
-    if isinstance(obj, dict):
-        return str(obj.get("object_type") or "").strip()
-    return str(obj.object_type or "").strip()
-
-
-def _description_from_object(obj: ObjectCandidate | dict) -> str:
-    if isinstance(obj, dict):
-        return str(obj.get("description") or "").strip()
-    return str(obj.description or "").strip()
-
-
 def _raw_fidelity_hints_from_object(obj: ObjectCandidate | dict) -> dict | None:
     raw = obj.get("fidelity_hints") if isinstance(obj, dict) else getattr(obj, "fidelity_hints", None)
     if raw is None:
@@ -186,69 +159,22 @@ def _raw_fidelity_hints_from_object(obj: ObjectCandidate | dict) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _contains_symbolic_term(text: str) -> bool:
-    normalized = " ".join(str(text or "").lower().replace("_", " ").replace("-", " ").split())
-    words = set(normalized.split())
-    return any((" " in term and term in normalized) or (term in words) for term in _OWNED_SYMBOLIC_FIDELITY_TERMS)
-
-
-def _goal_from_hint_text(text: str) -> str:
-    cleaned = " ".join(str(text or "").strip().split())
-    if not cleaned:
-        return ""
-    return f"Preserve visible fidelity of: {cleaned}."
-
-
 def _fidelity_hints_from_object(obj: ObjectCandidate | dict) -> dict | None:
     raw = _raw_fidelity_hints_from_object(obj)
-    raw_goals: list[str] = []
-    verify_required = False
-    if raw is not None:
-        verify_required = bool(raw.get("verify_required"))
-        goals = raw.get("fidelity_goals")
-        if goals is None:
-            goals = raw.get("must_preserve")
-        if isinstance(goals, str):
-            goals = [goals]
-        if isinstance(goals, list):
-            raw_goals = [str(item).strip() for item in goals if str(item).strip()]
-        if raw_goals:
-            return {
-                "verify_required": bool(verify_required),
-                "fidelity_goals": list(dict.fromkeys(raw_goals))[:5],
-            }
-
-    included = _included_elements_from_object(obj)
-    focus = _generation_focus_from_object(obj) if not isinstance(obj, dict) else [
-        item.strip()
-        for item in (obj.get("generation_focus") or [])
-        if isinstance(item, str) and item.strip()
-    ][:3]
-    object_type = _object_type_from_object(obj)
-    if object_type == "icon":
-        verify_required = True
-
-    if not verify_required:
-        symbolic_candidates = [item for item in included if _contains_symbolic_term(item)]
-        if symbolic_candidates:
-            verify_required = True
-            raw_goals.extend(symbolic_candidates[:4])
-
-    if verify_required and not raw_goals:
-        raw_goals = (included or focus)[:5]
-    if verify_required and not raw_goals:
-        description = _description_from_object(obj)
-        if description:
-            raw_goals = [description]
-
-    fidelity_goals = list(
-        dict.fromkeys(goal for goal in (_goal_from_hint_text(item) for item in raw_goals) if goal)
-    )[:5]
-    if not verify_required and not fidelity_goals:
+    if raw is None or not bool(raw.get("verify_required")):
         return None
     return {
-        "verify_required": bool(verify_required),
-        "fidelity_goals": fidelity_goals,
+        "verify_required": True,
+        "target_elements": [
+            str(item).strip()
+            for item in (raw.get("target_elements") or [])
+            if str(item).strip()
+        ][:5],
+        "fidelity_goals": [
+            str(item).strip()
+            for item in (raw.get("fidelity_goals") or [])
+            if str(item).strip()
+        ][:5],
     }
 
 

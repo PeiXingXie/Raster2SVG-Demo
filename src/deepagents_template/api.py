@@ -6,27 +6,29 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import ipaddress
 import logging
 import mimetypes
 import os
 import secrets
 import signal
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from deepagents_template.config import get_settings
 from deepagents_template.config import load_runtime_overrides
 from deepagents_template.config import RUNTIME_OVERRIDE_PATH
 from deepagents_template.config import save_runtime_overrides
-from deepagents_template.conversion import BudgetExceededError, RasterToSvgPipeline
-from deepagents_template.debug_review import DebugReviewService
+from deepagents_template.artifact_leases import ArtifactLease, artifact_leases
+from deepagents_template.bounded_executor import BoundedExecutor, QueueFullError
+from deepagents_template.conversion import BudgetExceededError, RasterToSvgPipeline, RunCancelledError
 from deepagents_template.error_reporting import (
     build_failure_diagnostic_from_exception,
     load_failure_diagnostic_from_run_dir,
@@ -36,17 +38,16 @@ from deepagents_template.manual_adjustment import ManualAdjustmentService
 from deepagents_template.artifacts import (
     PREVIEWABLE_KINDS,
     ArtifactStore,
-    derive_project_name_from_image,
     slugify_project_name,
 )
 from deepagents_template.resume import build_artifact_resume_info, build_resume_plan, load_request_from_run_dir
+from deepagents_template.retry_policy import resolve_retry_limits
 from deepagents_template.runtime import (
     get_thread_store,
 )
 from deepagents_template.schemas import (
     AgentRequest,
     AgentResponse,
-    ArtifactBox,
     ArtifactFileEntry,
     ArtifactManualAdjustmentVersion,
     ArtifactOutputFrame,
@@ -57,16 +58,17 @@ from deepagents_template.schemas import (
     ArtifactSnapshot,
     ApprovalDecision,
     ChatMessage,
-    DebugReviewRequest,
-    DebugReviewResponse,
     FrontendDefaultsResponse,
     FrontendHostInfoResponse,
+    HistoryPreviewResponse,
     ManualAdjustmentRequest,
     ManualAdjustmentResponse,
     RuntimeOverridesPayload,
     ResumePlan,
     ResumeRunRequest,
     ResumeResponse,
+    RunListResponse,
+    RunOpenResponse,
     RunRenameRequest,
     RunStartResponse,
     ThreadCreateResponse,
@@ -75,15 +77,127 @@ from deepagents_template.schemas import (
     UploadImageResponse,
     ExecutionRun,
 )
+from deepagents_template.version import __version__
 from deepagents_template.workflow_trace import build_workflow_trace
 
 
 logger = logging.getLogger(__name__)
-executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="deepagents-template")
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        logger.warning("Invalid %s; using %s.", name, default)
+        return default
+
+
+executor = BoundedExecutor(
+    max_workers=4,
+    max_queued=_positive_env_int("SHAPE_STUDIO_MAX_QUEUED_RUNS", 12),
+    thread_name_prefix="deepagents-template",
+)
+manual_adjustment_executor = BoundedExecutor(
+    max_workers=_positive_env_int("SHAPE_STUDIO_MANUAL_ADJUSTMENT_WORKERS", 2),
+    max_queued=_positive_env_int("SHAPE_STUDIO_MAX_QUEUED_MANUAL_ADJUSTMENTS", 6),
+    thread_name_prefix="manual-adjustment",
+)
 artifact_store = ArtifactStore()
 DEV_SHUTDOWN_TOKEN = os.getenv("RASTER_SVG_DEV_SHUTDOWN_TOKEN", "").strip()
 _active_run_ids: set[str] = set()
 _active_run_lock = Lock()
+_run_cancel_events: dict[str, Event] = {}
+_run_cancel_lock = Lock()
+_run_futures: dict[str, Future] = {}
+_run_future_lock = Lock()
+_manual_adjustment_thread_ids: set[str] = set()
+_thread_operation_lock = Lock()
+
+
+def _try_mark_manual_adjustment(thread_id: str) -> bool:
+    with _thread_operation_lock:
+        if thread_id in _manual_adjustment_thread_ids:
+            return False
+        current_run = get_thread_store().get(thread_id).current_run
+        if current_run is not None and current_run.status in {"queued", "running"}:
+            return False
+        _manual_adjustment_thread_ids.add(thread_id)
+        return True
+
+
+def _unmark_manual_adjustment(thread_id: str) -> None:
+    with _thread_operation_lock:
+        _manual_adjustment_thread_ids.discard(thread_id)
+
+
+def _register_cancel_event(run_id: str) -> Event:
+    event = Event()
+    with _run_cancel_lock:
+        _run_cancel_events[run_id] = event
+    return event
+
+
+def _remove_cancel_event(run_id: str) -> None:
+    with _run_cancel_lock:
+        _run_cancel_events.pop(run_id, None)
+
+
+def _request_run_cancel(run_id: str) -> bool:
+    with _run_cancel_lock:
+        event = _run_cancel_events.get(run_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+
+def _register_run_future(
+    run_id: str,
+    future: Future | None,
+    *,
+    thread_id: str,
+    lease: ArtifactLease,
+) -> None:
+    if future is None:
+        return
+    with _run_future_lock:
+        _run_futures[run_id] = future
+
+    def handle_done(completed: Future) -> None:
+        with _run_future_lock:
+            if _run_futures.get(run_id) is completed:
+                _run_futures.pop(run_id, None)
+        if not completed.cancelled():
+            return
+        try:
+            thread_store = get_thread_store()
+            thread = thread_store.get(thread_id)
+            if thread.current_run is not None and thread.current_run.run_id == run_id:
+                thread_store.append_message(
+                    thread_id,
+                    ChatMessage(role="system", content="Run cancelled before execution started."),
+                )
+                thread = thread_store.finish_run(
+                    thread_id,
+                    status="cancelled",
+                    stage="cancelled",
+                    title="Queued run cancelled",
+                    detail="The run was removed from the queue before execution started.",
+                    level="warning",
+                )
+                artifact_store.write_metadata(thread)
+        finally:
+            _unmark_active_run(run_id)
+            artifact_leases.release(lease)
+            _remove_cancel_event(run_id)
+
+    future.add_done_callback(handle_done)
+
+
+def _cancel_queued_future(run_id: str) -> bool:
+    with _run_future_lock:
+        future = _run_futures.get(run_id)
+    return bool(future is not None and future.cancel())
 
 
 def _mark_active_run(run_id: str | None) -> None:
@@ -113,9 +227,35 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         executor.shutdown(wait=True)
+        manual_adjustment_executor.shutdown(wait=True)
 
 
-app = FastAPI(title="Shape Studio API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Shape Studio API", version=__version__, lifespan=lifespan)
+
+
+def _is_loopback_client(host: str | None) -> bool:
+    if not host:
+        return False
+    normalized = host.strip().strip("[]").split("%", 1)[0].lower()
+    if normalized in {"localhost", "testclient"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def local_access_only(request: Request, call_next):
+    client_host = getattr(request.client, "host", None)
+    if not _is_loopback_client(client_host):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Shape Studio only accepts requests from this computer."},
+        )
+    return await call_next(request)
+
+
 static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -127,6 +267,7 @@ async def _request_process_shutdown() -> None:
 
 def build_frontend_defaults_response() -> FrontendDefaultsResponse:
     settings = get_settings()
+    retry_limits = resolve_retry_limits(settings, AgentRequest())
     return FrontendDefaultsResponse(
         default_user_input=settings.resolved_user_input(),
         api_key_configured=bool(settings.resolved_api_key()),
@@ -134,6 +275,8 @@ def build_frontend_defaults_response() -> FrontendDefaultsResponse:
         api_provider=settings.resolved_api_provider(),
         api_format=settings.resolved_api_format(),
         max_retries=settings.resolved_max_retries(),
+        transport_max_attempts=retry_limits.transport_max_attempts,
+        response_validation_max_attempts=retry_limits.response_validation_max_attempts,
         region_processing_mode=settings.resolved_region_processing_mode(),
         region_concurrency=settings.resolved_region_concurrency(),
         workflow_mode=settings.resolved_workflow_mode(),
@@ -155,7 +298,83 @@ def build_frontend_defaults_response() -> FrontendDefaultsResponse:
         bbox_issue_concurrency=settings.resolved_bbox_issue_concurrency(),
         bbox_issue_stagnation_rounds=settings.resolved_bbox_issue_stagnation_rounds(),
         bbox_global_stagnation_rounds=settings.resolved_bbox_global_stagnation_rounds(),
+        bbox_initial_localization_max_attempts=retry_limits.bbox_initial_localization_max_attempts,
+        bbox_refinement_max_rounds=retry_limits.bbox_refinement_max_rounds,
+        bbox_global_stagnation_max_rounds=retry_limits.bbox_global_stagnation_max_rounds,
+        region_repair_max_attempts=retry_limits.region_repair_max_attempts,
+        object_repair_max_attempts=retry_limits.object_repair_max_attempts,
+        fidelity_verification_max_attempts=retry_limits.fidelity_verification_max_attempts,
+        fidelity_verification_independent_budget=retry_limits.fidelity_verification_uses_independent_budget,
+        fusion_repair_max_attempts=retry_limits.fusion_repair_max_attempts,
+        run_model_call_budget=retry_limits.run_model_call_budget,
     )
+
+
+def _freeze_run_request_settings(request: AgentRequest) -> tuple[AgentRequest, str]:
+    """Resolve mutable runtime defaults once so queued runs cannot affect each other."""
+    settings = get_settings()
+    region_processing_mode = settings.resolved_region_processing_mode(request.region_processing_mode)
+    retry_limits = resolve_retry_limits(settings, request)
+    frozen = request.model_copy(
+        update={
+            "api_provider": settings.resolved_api_provider(request.api_provider),
+            "base_url": settings.resolved_base_url(request.base_url),
+            "api_format": settings.resolved_api_format(request.api_format),
+            "max_retries": settings.resolved_max_retries(request.max_retries),
+            "transport_max_attempts": retry_limits.transport_max_attempts,
+            "response_validation_max_attempts": retry_limits.response_validation_max_attempts,
+            "region_processing_mode": region_processing_mode,
+            "region_concurrency": settings.resolved_region_concurrency(
+                region_processing_mode,
+                request.region_concurrency,
+            ),
+            "bbox_issue_concurrency": settings.resolved_bbox_issue_concurrency(
+                request.bbox_issue_concurrency
+            ),
+            "bbox_issue_stagnation_rounds": settings.resolved_bbox_issue_stagnation_rounds(
+                request.bbox_issue_stagnation_rounds
+            ),
+            "bbox_global_stagnation_rounds": settings.resolved_bbox_global_stagnation_rounds(
+                request.bbox_global_stagnation_rounds
+            ),
+            "bbox_initial_localization_max_attempts": retry_limits.bbox_initial_localization_max_attempts,
+            "bbox_refinement_max_rounds": retry_limits.bbox_refinement_max_rounds,
+            "bbox_global_stagnation_max_rounds": retry_limits.bbox_global_stagnation_max_rounds,
+            "workflow_mode": settings.resolved_workflow_mode(request.workflow_mode),
+            "agent_model": settings.resolved_agent_model(request.agent_model),
+            "subagent_model": settings.resolved_subagent_model(request.subagent_model),
+            "agent_name": settings.resolved_agent_name(request.agent_name),
+            "use_previous_response_id": settings.resolved_use_previous_response_id(
+                request.use_previous_response_id
+            ),
+            "max_retry": settings.resolved_max_retry(request.max_retry),
+            "region_repair_max_attempts": retry_limits.region_repair_max_attempts,
+            "object_repair_max_attempts": retry_limits.object_repair_max_attempts,
+            "fidelity_verification_max_attempts": retry_limits.fidelity_verification_max_attempts,
+            "fidelity_verification_independent_budget": retry_limits.fidelity_verification_uses_independent_budget,
+            "fusion_max_retry": settings.resolved_fusion_max_retry(request.fusion_max_retry),
+            "fusion_repair_max_attempts": retry_limits.fusion_repair_max_attempts,
+            "max_budget": settings.resolved_max_budget(request.max_budget),
+            "run_model_call_budget": retry_limits.run_model_call_budget,
+            "supervisor_memory_enabled": settings.resolved_supervisor_memory_enabled(
+                request.supervisor_memory_enabled
+            ),
+            "supervisor_memory_persist_enabled": settings.resolved_supervisor_memory_persist_enabled(
+                request.supervisor_memory_persist_enabled
+            ),
+            "strategy_enabled": settings.resolved_strategy_enabled(request.strategy_enabled),
+            "recognition_bbox_refine_mode": settings.resolved_recognition_bbox_refine_mode(
+                request.recognition_bbox_refine_mode
+            ),
+            "sam_provider_mode": settings.resolved_sam_provider_mode(request.sam_provider_mode),
+            "sam_remote_url": settings.resolved_sam_remote_url(request.sam_remote_url),
+            "sam_enabled": settings.resolved_sam_enabled(request.sam_enabled),
+            "sam_fallback_to_llm": settings.resolved_sam_fallback_to_llm(
+                request.sam_fallback_to_llm
+            ),
+        }
+    )
+    return frozen, settings.resolved_api_key(request.api_key)
 
 
 def _artifact_revision_for_run(run: ExecutionRun | None) -> str | None:
@@ -240,7 +459,10 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
     elif thread.pending_approval is not None:
         status_value = "needs_approval"
 
-    recent_runs = []
+    recent_runs = [run.model_copy(deep=True) for run in thread.recent_runs]
+    for run in recent_runs:
+        run.artifact_revision = _artifact_revision_for_run(run)
+    project_runs = []
     seen_run_ids: set[str] = set()
     if current_run is not None:
         seen_run_ids.add(current_run.run_id)
@@ -248,7 +470,7 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
         if run.run_id in seen_run_ids:
             continue
         run.artifact_revision = _artifact_revision_for_run(run)
-        recent_runs.append(run)
+        project_runs.append(run)
         seen_run_ids.add(run.run_id)
 
     if current_run is not None:
@@ -257,12 +479,14 @@ def build_agent_response(thread: ThreadState) -> AgentResponse:
 
     return AgentResponse(
         thread_id=thread.thread_id,
+        bound_run_id=thread.bound_run_id,
         status=status_value,
         content=latest_assistant,
         approval_request=thread.pending_approval,
         messages=thread.messages,
         current_run=current_run,
         recent_runs=recent_runs,
+        project_runs=project_runs,
     )
 
 
@@ -290,6 +514,39 @@ def _find_run_for_thread(thread: ThreadState, run_id: str | None = None):
         return artifact_store.find_run_by_id(run_id)
     if candidates:
         return candidates[0]
+    return None
+
+
+def _find_owned_run_for_thread(thread: ThreadState, run_id: str | None = None):
+    """Find a mutable run only when its persisted owner matches the URL thread."""
+    candidates = []
+    if thread.current_run is not None:
+        candidates.append(thread.current_run)
+    candidates.extend(thread.recent_runs)
+    if run_id is None:
+        for run in candidates:
+            if run.owner_thread_id == thread.thread_id:
+                return run
+        return None
+    for run in candidates:
+        if run.run_id == run_id and run.owner_thread_id == thread.thread_id:
+            return run
+
+    run = artifact_store.find_run_by_id(run_id)
+    if run is not None and run.owner_thread_id == thread.thread_id:
+        return run
+    return None
+
+
+def _find_attached_run_for_thread(thread: ThreadState, run_id: str | None = None):
+    """Find a mutable run already attached to this in-memory thread state."""
+    candidates = []
+    if thread.current_run is not None:
+        candidates.append(thread.current_run)
+    candidates.extend(thread.recent_runs)
+    for run in candidates:
+        if (run_id is None or run.run_id == run_id) and run.owner_thread_id == thread.thread_id:
+            return run
     return None
 
 
@@ -496,26 +753,37 @@ def _save_uploaded_image(payload: UploadImageRequest) -> UploadImageResponse:
     suffix = Path(filename).suffix or ".png"
     stem = Path(filename).stem or "upload"
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    candidate = upload_root / f"{timestamp}-{slugify_project_name(stem)}{suffix}"
-    counter = 1
-    while candidate.exists():
-        counter += 1
-        candidate = upload_root / f"{timestamp}-{slugify_project_name(stem)}-{counter}{suffix}"
 
     try:
         content = base64.b64decode(payload.content_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid base64 upload payload.") from exc
 
-    candidate.write_bytes(content)
+    safe_stem = slugify_project_name(stem)
+    while True:
+        candidate = upload_root / f"{timestamp}-{safe_stem}-{secrets.token_hex(8)}{suffix}"
+        try:
+            with candidate.open("xb") as handle:
+                handle.write(content)
+            break
+        except FileExistsError:
+            continue
     return UploadImageResponse(image_path=str(candidate), filename=filename, size_bytes=len(content))
 
 
-def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir: str) -> None:
+def _execute_agent_in_background(
+    thread_id: str,
+    run_id: str,
+    request: AgentRequest,
+    artifact_dir: str,
+    api_key: str,
+    cancellation_event: Event,
+) -> None:
     thread_store = get_thread_store()
-    active_run_id = thread_store.get(thread_id).current_run.run_id if thread_store.get(thread_id).current_run else None
+    active_run_id = run_id
     _mark_active_run(active_run_id)
     settings = get_settings()
+    retry_limits = resolve_retry_limits(settings, request)
     try:
         resolved_agent_model = settings.resolved_agent_model(request.agent_model)
         resolved_subagent_model = settings.resolved_subagent_model(request.subagent_model)
@@ -540,6 +808,7 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
                 "max_retry": settings.resolved_max_retry(request.max_retry),
                 "fusion_max_retry": settings.resolved_fusion_max_retry(request.fusion_max_retry),
                 "max_budget": settings.resolved_max_budget(request.max_budget),
+                "retry_limits": retry_limits.model_dump(mode="json"),
                 "region_processing_mode": settings.resolved_region_processing_mode(
                     request.region_processing_mode
                 ),
@@ -573,8 +842,27 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             request=request,
             agent_model=resolved_agent_model,
             subagent_model=resolved_subagent_model,
+            run_id=run_id,
+            project_name=thread.current_run.project_name if thread.current_run else None,
+            api_key_override=api_key,
+            use_frozen_runtime=True,
+            cancellation_event=cancellation_event,
         )
         final_content = pipeline.run()
+        if cancellation_event.is_set():
+            raise RunCancelledError("Run cancelled by the user.")
+    except RunCancelledError as exc:
+        thread_store.append_message(thread_id, ChatMessage(role="system", content=str(exc)))
+        thread = thread_store.finish_run(
+            thread_id,
+            status="cancelled",
+            stage="cancelled",
+            title="Run cancelled",
+            detail=str(exc),
+            level="warning",
+        )
+        artifact_store.write_metadata(thread)
+        return
     except BudgetExceededError as exc:
         logger.warning("Conversion pipeline paused on budget for thread %s", thread_id)
         latest_run = thread_store.get(thread_id).current_run
@@ -591,6 +879,10 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             failure_stage=failure_stage,
             status="paused",
         )
+        thread_store.append_message(
+            thread_id,
+            ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
+        )
         thread = thread_store.finish_run(
             thread_id,
             status="paused",
@@ -601,10 +893,6 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             level="warning",
             error=diagnostic.error_message or str(exc),
             failure_diagnostic=diagnostic,
-        )
-        thread = thread_store.append_message(
-            thread_id,
-            ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
         )
         artifact_store.write_metadata(thread)
         _unmark_active_run(active_run_id)
@@ -625,6 +913,10 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             failure_stage=failure_stage,
             status="failed",
         )
+        thread_store.append_message(
+            thread_id,
+            ChatMessage(role="system", content=f"Conversion pipeline failed: {exc}"),
+        )
         thread = thread_store.finish_run(
             thread_id,
             status="failed",
@@ -635,10 +927,6 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
             level="error",
             error=diagnostic.error_message or str(exc),
             failure_diagnostic=diagnostic,
-        )
-        thread = thread_store.append_message(
-            thread_id,
-            ChatMessage(role="system", content=f"Conversion pipeline failed: {exc}"),
         )
         artifact_store.write_metadata(thread)
         _unmark_active_run(active_run_id)
@@ -669,9 +957,16 @@ def _run_agent_in_background(thread_id: str, request: AgentRequest, artifact_dir
     _unmark_active_run(active_run_id)
 
 
-def _resume_conversion_in_background(thread_id: str, request: AgentRequest, artifact_dir: str) -> None:
+def _execute_resume_conversion_in_background(
+    thread_id: str,
+    run_id: str,
+    request: AgentRequest,
+    artifact_dir: str,
+    api_key: str,
+    cancellation_event: Event,
+) -> None:
     thread_store = get_thread_store()
-    active_run_id = thread_store.get(thread_id).current_run.run_id if thread_store.get(thread_id).current_run else None
+    active_run_id = run_id
     _mark_active_run(active_run_id)
     settings = get_settings()
     resolved_agent_model = settings.resolved_agent_model(request.agent_model)
@@ -692,8 +987,27 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             request=request,
             agent_model=resolved_agent_model,
             subagent_model=resolved_subagent_model,
+            run_id=run_id,
+            project_name=thread.current_run.project_name if thread.current_run else None,
+            api_key_override=api_key,
+            use_frozen_runtime=True,
+            cancellation_event=cancellation_event,
         )
         final_content = pipeline.run()
+        if cancellation_event.is_set():
+            raise RunCancelledError("Run cancelled by the user.")
+    except RunCancelledError as exc:
+        thread_store.append_message(thread_id, ChatMessage(role="system", content=str(exc)))
+        thread = thread_store.finish_run(
+            thread_id,
+            status="cancelled",
+            stage="cancelled",
+            title="Run cancelled",
+            detail=str(exc),
+            level="warning",
+        )
+        artifact_store.write_metadata(thread)
+        return
     except BudgetExceededError as exc:
         latest_run = thread_store.get(thread_id).current_run
         failure_stage = (
@@ -709,6 +1023,10 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             failure_stage=failure_stage,
             status="paused",
         )
+        thread_store.append_message(
+            thread_id,
+            ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
+        )
         thread = thread_store.finish_run(
             thread_id,
             status="paused",
@@ -719,10 +1037,6 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             level="warning",
             error=diagnostic.error_message or str(exc),
             failure_diagnostic=diagnostic,
-        )
-        thread = thread_store.append_message(
-            thread_id,
-            ChatMessage(role="system", content=f"Conversion pipeline paused: {exc}"),
         )
         artifact_store.write_metadata(thread)
         _unmark_active_run(active_run_id)
@@ -743,6 +1057,10 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             failure_stage=failure_stage,
             status="failed",
         )
+        thread_store.append_message(
+            thread_id,
+            ChatMessage(role="system", content=f"Conversion resume failed: {exc}"),
+        )
         thread = thread_store.finish_run(
             thread_id,
             status="failed",
@@ -753,10 +1071,6 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
             level="error",
             error=diagnostic.error_message or str(exc),
             failure_diagnostic=diagnostic,
-        )
-        thread = thread_store.append_message(
-            thread_id,
-            ChatMessage(role="system", content=f"Conversion resume failed: {exc}"),
         )
         artifact_store.write_metadata(thread)
         _unmark_active_run(active_run_id)
@@ -784,6 +1098,51 @@ def _resume_conversion_in_background(thread_id: str, request: AgentRequest, arti
     artifact_store.write_output(thread.current_run, final_content)
     artifact_store.write_metadata(thread)
     _unmark_active_run(active_run_id)
+
+
+def _run_agent_in_background(
+    thread_id: str,
+    run_id: str,
+    request: AgentRequest,
+    artifact_dir: str,
+    api_key: str,
+    lease: ArtifactLease,
+    cancellation_event: Event,
+) -> None:
+    try:
+        _execute_agent_in_background(thread_id, run_id, request, artifact_dir, api_key, cancellation_event)
+    finally:
+        _unmark_active_run(run_id)
+        artifact_leases.release(lease)
+        _remove_cancel_event(run_id)
+
+
+def _resume_conversion_in_background(
+    thread_id: str,
+    run_id: str,
+    request: AgentRequest,
+    artifact_dir: str,
+    api_key: str,
+    lease: ArtifactLease,
+    cancellation_event: Event,
+) -> None:
+    try:
+        _execute_resume_conversion_in_background(
+            thread_id, run_id, request, artifact_dir, api_key, cancellation_event
+        )
+    finally:
+        _unmark_active_run(run_id)
+        artifact_leases.release(lease)
+        _remove_cancel_event(run_id)
+
+
+def _artifact_conflict(artifact_dir: str | Path) -> HTTPException:
+    lease = artifact_leases.get(artifact_dir)
+    operation = lease.operation if lease is not None else "another operation"
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"This project is already in use by {operation}.",
+    )
 
 
 @app.get("/")
@@ -853,6 +1212,82 @@ def create_thread() -> ThreadCreateResponse:
     return ThreadCreateResponse(thread_id=thread.thread_id)
 
 
+@app.get("/runs", response_model=RunListResponse)
+def list_saved_runs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=6, ge=1, le=100),
+    status_filter: str = Query(default="all", alias="status"),
+    search: str = Query(default="", max_length=200),
+    sort: str = Query(default="updated_desc"),
+) -> RunListResponse:
+    if status_filter not in {"all", "completed", "failed", "paused"}:
+        raise HTTPException(status_code=400, detail="Unsupported History status filter.")
+    if sort not in {"updated_desc", "name_asc", "status_asc"}:
+        raise HTTPException(status_code=400, detail="Unsupported History sort order.")
+    runs, total, total_pages, has_more = artifact_store.list_runs_page(
+        page=page,
+        page_size=page_size,
+        status_filter=status_filter,
+        search=search,
+        sort=sort,
+    )
+    for run in runs:
+        run.artifact_revision = _artifact_revision_for_run(run)
+    return RunListResponse(
+        runs=runs,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        has_more=has_more,
+    )
+
+
+@app.post("/runs/{run_id}/open", response_model=RunOpenResponse)
+def open_saved_run(run_id: str) -> RunOpenResponse:
+    run = artifact_store.find_run_by_id(run_id)
+    if run is None or not run.owner_thread_id:
+        raise HTTPException(status_code=404, detail="Saved project was not found.")
+    try:
+        thread = get_thread_store().attach_persisted_run(run)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RunOpenResponse(
+        thread_id=thread.thread_id,
+        run=run,
+        snapshot=build_agent_response(thread),
+    )
+
+
+@app.get("/runs/{run_id}/history-preview", response_model=HistoryPreviewResponse)
+def get_history_preview_metadata(run_id: str) -> HistoryPreviewResponse:
+    run = artifact_store.find_run_by_id(run_id)
+    if run is None or not run.artifact_dir:
+        raise HTTPException(status_code=404, detail="Saved project was not found.")
+    previews = artifact_store.find_existing_history_previews(run.artifact_dir)
+    return HistoryPreviewResponse(
+        run_id=run_id,
+        input_preview_url=f"/runs/{run_id}/preview/input" if previews["input"] else None,
+        output_preview_url=f"/runs/{run_id}/preview/output" if previews["output"] else None,
+    )
+
+
+@app.get("/runs/{run_id}/preview/{kind}")
+def get_history_preview_file(run_id: str, kind: str) -> FileResponse:
+    if kind not in {"input", "output"}:
+        raise HTTPException(status_code=404, detail="Preview kind was not found.")
+    run = artifact_store.find_run_by_id(run_id)
+    if run is None or not run.artifact_dir:
+        raise HTTPException(status_code=404, detail="Saved project was not found.")
+    preview_path = artifact_store.find_existing_history_previews(run.artifact_dir)[kind]
+    if preview_path is None:
+        raise HTTPException(status_code=404, detail="Preview is not available.")
+    media_type = mimetypes.guess_type(preview_path.name)[0]
+    if preview_path.suffix.lower() == ".svg":
+        media_type = "image/svg+xml"
+    return FileResponse(preview_path, media_type=media_type)
+
+
 @app.get("/threads/{thread_id}", response_model=ThreadState)
 def get_thread(thread_id: str) -> ThreadState:
     return get_thread_store().get(thread_id)
@@ -872,15 +1307,24 @@ def get_thread_artifacts(thread_id: str, run_id: str | None = None) -> ArtifactS
 def rename_thread_run(thread_id: str, run_id: str, payload: RunRenameRequest) -> ExecutionRun:
     thread_store = get_thread_store()
     thread = thread_store.get(thread_id)
-    run = _find_run_for_thread(thread, run_id)
+    run = _find_owned_run_for_thread(thread, run_id)
     if run is None or not run.artifact_dir:
         raise HTTPException(status_code=404, detail="Saved project was not found.")
+    lease = artifact_leases.try_acquire(
+        run.artifact_dir,
+        owner_id=f"rename:{run_id}",
+        operation="rename",
+    )
+    if lease is None:
+        raise _artifact_conflict(run.artifact_dir)
     try:
         updated_run = artifact_store.update_run_project_name(run, payload.project_name)
+        thread_store.update_run_project_name(thread_id, run_id, payload.project_name)
+        return updated_run
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    thread_store.update_run_project_name(thread_id, run_id, payload.project_name)
-    return updated_run
+    finally:
+        artifact_leases.release(lease)
 
 
 @app.delete("/threads/{thread_id}/runs/{run_id}")
@@ -891,28 +1335,67 @@ def delete_thread_run(
 ) -> dict[str, bool | str | None]:
     thread_store = get_thread_store()
     thread = thread_store.get(thread_id)
-    run = _find_run_for_thread(thread, run_id)
-    target_artifact_dir = artifact_dir or (run.artifact_dir if run is not None else None)
+    run = _find_owned_run_for_thread(thread, run_id)
+    target_artifact_dir = run.artifact_dir if run is not None else None
     if not target_artifact_dir:
         raise HTTPException(status_code=404, detail="Saved project was not found.")
-    if _is_active_run(run_id):
-        raise HTTPException(status_code=409, detail="Active runs cannot be deleted.")
+    if artifact_dir and artifact_store.resolve_run_dir(artifact_dir) != artifact_store.resolve_run_dir(target_artifact_dir):
+        raise HTTPException(status_code=400, detail="Artifact directory does not match the requested run.")
+    lease = artifact_leases.try_acquire(
+        target_artifact_dir,
+        owner_id=f"delete:{run_id}",
+        operation="delete",
+    )
+    if lease is None:
+        raise _artifact_conflict(target_artifact_dir)
     try:
         deleted_dir = artifact_store.delete_run_dir(target_artifact_dir)
+        thread_store.remove_run(thread_id, run_id)
+        return {
+            "ok": True,
+            "run_id": run.run_id if run is not None else run_id,
+            "project_name": run.project_name if run is not None else deleted_dir.name,
+            "artifact_dir": str(deleted_dir),
+        }
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    thread_store.remove_run(thread_id, run_id)
+    finally:
+        artifact_leases.release(lease)
+
+
+@app.post("/threads/{thread_id}/runs/{run_id}/cancel")
+def cancel_thread_run(thread_id: str, run_id: str) -> dict[str, bool | str]:
+    thread = get_thread_store().get(thread_id)
+    run = thread.current_run
+    if run is None or run.run_id != run_id:
+        raise HTTPException(status_code=404, detail="Active run was not found.")
+    if run.status not in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="This run can no longer be cancelled.")
+    if not _request_run_cancel(run_id):
+        raise HTTPException(status_code=409, detail="Cancellation is not available for this run.")
+    cancelled_while_queued = _cancel_queued_future(run_id)
     return {
         "ok": True,
-        "run_id": run.run_id if run is not None else run_id,
-        "project_name": run.project_name if run is not None else deleted_dir.name,
-        "artifact_dir": str(deleted_dir),
+        "run_id": run_id,
+        "status": "cancelled" if cancelled_while_queued else "cancelling",
     }
 
 
+def _resolve_owned_resume_target(thread_id: str, run_id: str) -> tuple[ThreadState, ExecutionRun, Path]:
+    thread = get_thread_store().get(thread_id)
+    run = _find_owned_run_for_thread(thread, run_id)
+    if run is None or not run.artifact_dir:
+        raise HTTPException(status_code=404, detail="Owned resumable run was not found.")
+    run_dir = artifact_store.resolve_run_dir(run.artifact_dir)
+    if run_dir is None:
+        raise HTTPException(status_code=404, detail="Owned resumable run was not found.")
+    return thread, run, run_dir
+
+
 @app.get("/runs/resume-plan", response_model=ResumePlan)
-def get_resume_plan(run_dir: str) -> ResumePlan:
-    return build_resume_plan(Path(run_dir))
+def get_resume_plan(thread_id: str, run_id: str) -> ResumePlan:
+    _, _, run_dir = _resolve_owned_resume_target(thread_id, run_id)
+    return build_resume_plan(run_dir)
 
 
 @app.get("/threads/{thread_id}/artifacts/file")
@@ -939,78 +1422,100 @@ def get_thread_artifact_file(
     return FileResponse(file_path, media_type=media_type, filename=filename)
 
 
-@app.post("/threads/{thread_id}/manual-adjust", response_model=ManualAdjustmentResponse)
-def manual_adjust_artifacts(thread_id: str, payload: ManualAdjustmentRequest) -> ManualAdjustmentResponse:
+def _execute_manual_adjustment(
+    thread_id: str,
+    payload: ManualAdjustmentRequest,
+    thread: ThreadState,
+    run: ExecutionRun,
+    lease: ArtifactLease,
+) -> ManualAdjustmentResponse:
     thread_store = get_thread_store()
-    thread = thread_store.get(thread_id)
-    run = _find_run_for_thread(thread, payload.run_id)
-    if run is None or not run.artifact_dir:
-        raise HTTPException(status_code=404, detail="No artifact-backed run found for this thread.")
-    snapshot = build_artifact_response(thread, run_id=run.run_id)
-    if not snapshot.available:
-        raise HTTPException(status_code=400, detail="Artifacts are not ready for manual adjustment.")
-
-    service = ManualAdjustmentService(
-        artifact_store=artifact_store,
-        thread=thread,
-        run=run,
-    )
     try:
-        result = service.execute(payload, artifact_snapshot=snapshot)
-    except Exception as exc:
+        snapshot = build_artifact_response(thread, run_id=run.run_id)
+        if not snapshot.available:
+            raise HTTPException(status_code=400, detail="Artifacts are not ready for manual adjustment.")
+        service = ManualAdjustmentService(
+            artifact_store=artifact_store,
+            thread=thread,
+            run=run,
+        )
+        try:
+            result = service.execute(payload, artifact_snapshot=snapshot)
+        except Exception as exc:
+            updated_snapshot = build_artifact_response(thread_store.get(thread_id), run_id=run.run_id)
+            artifact_store.write_metadata(thread_store.get(thread_id))
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": str(exc) or "Manual adjustment failed.",
+                    "error_type": type(exc).__name__,
+                    "artifact_snapshot": updated_snapshot.model_dump(mode="json"),
+                },
+            ) from exc
         updated_snapshot = build_artifact_response(thread_store.get(thread_id), run_id=run.run_id)
-        artifact_store.write_metadata(thread_store.get(thread_id))
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": str(exc) or "Manual adjustment failed.",
-                "error_type": type(exc).__name__,
-                "artifact_snapshot": updated_snapshot.model_dump(mode="json"),
-            },
-        ) from exc
-    updated_snapshot = build_artifact_response(thread_store.get(thread_id), run_id=run.run_id)
-    thread_store.append_message(
-        thread_id,
-        ChatMessage(
-            role="system",
-            content=(
-                f"Manual adjustment applied on {result['scope']} target(s): "
-                f"{', '.join(result['target_ids']) or 'manual-layer'}."
+        thread_store.append_message(
+            thread_id,
+            ChatMessage(
+                role="system",
+                content=(
+                    f"Manual adjustment applied on {result['scope']} target(s): "
+                    f"{', '.join(result['target_ids']) or 'manual-layer'}."
+                ),
             ),
-        ),
-    )
-    artifact_store.write_metadata(thread_store.get(thread_id))
-    return ManualAdjustmentResponse(
-        ok=True,
-        run_id=result["run_id"],
-        scope=result["scope"],
-        target_ids=result["target_ids"],
-        applied_files=result["applied_files"],
-        notes=result["notes"],
-        edit_strategy=result.get("edit_strategy"),
-        artifact_snapshot=updated_snapshot,
-    )
+        )
+        artifact_store.write_metadata(thread_store.get(thread_id))
+        return ManualAdjustmentResponse(
+            ok=True,
+            run_id=result["run_id"],
+            scope=result["scope"],
+            target_ids=result["target_ids"],
+            applied_files=result["applied_files"],
+            notes=result["notes"],
+            edit_strategy=result.get("edit_strategy"),
+            artifact_snapshot=updated_snapshot,
+        )
+    finally:
+        artifact_leases.release(lease)
+        _unmark_manual_adjustment(thread_id)
 
 
-@app.post("/threads/{thread_id}/debug-review", response_model=DebugReviewResponse)
-def debug_review_artifacts(thread_id: str, payload: DebugReviewRequest) -> DebugReviewResponse:
-    thread_store = get_thread_store()
-    thread = thread_store.get(thread_id)
-    run = _find_run_for_thread(thread, payload.run_id)
+@app.post("/threads/{thread_id}/manual-adjust", response_model=ManualAdjustmentResponse)
+async def manual_adjust_artifacts(thread_id: str, payload: ManualAdjustmentRequest) -> ManualAdjustmentResponse:
+    thread = get_thread_store().get(thread_id)
+    run = _find_attached_run_for_thread(thread, payload.run_id)
     if run is None or not run.artifact_dir:
         raise HTTPException(status_code=404, detail="No artifact-backed run found for this thread.")
-
-    service = DebugReviewService(
-        artifact_store=artifact_store,
-        thread=thread,
-        run=run,
+    lease = artifact_leases.try_acquire(
+        run.artifact_dir,
+        owner_id=f"manual-adjust:{thread_id}:{secrets.token_hex(8)}",
+        operation="manual adjustment",
     )
+    if lease is None:
+        raise _artifact_conflict(run.artifact_dir)
+    if not _try_mark_manual_adjustment(thread_id):
+        artifact_leases.release(lease)
+        raise HTTPException(
+            status_code=409,
+            detail="This thread already has a conversion or manual adjustment in progress.",
+        )
     try:
-        return service.execute(payload)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        future = manual_adjustment_executor.submit(
+            _execute_manual_adjustment,
+            thread_id,
+            payload,
+            thread,
+            run,
+            lease,
+        )
+    except Exception as exc:
+        artifact_leases.release(lease)
+        _unmark_manual_adjustment(thread_id)
+        response_status = 429 if isinstance(exc, QueueFullError) else 503
+        raise HTTPException(
+            status_code=response_status,
+            detail=str(exc) or "Manual adjustment could not be queued.",
+        ) from exc
+    return await asyncio.shield(asyncio.wrap_future(future))
 
 
 @app.post("/invoke", response_model=RunStartResponse)
@@ -1019,20 +1524,37 @@ def invoke_agent(payload: AgentRequest) -> RunStartResponse:
     settings = get_settings()
     resolved_message = settings.resolved_user_input(payload.message)
     payload = payload.model_copy(update={"message": resolved_message})
+    payload, resolved_api_key = _freeze_run_request_settings(payload)
     if not payload.image_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="`image_path` is required for conversion runs.",
         )
     thread = thread_store.get_or_create(payload.thread_id)
-    if thread.current_run is not None and thread.current_run.status in {"queued", "running"}:
+    run_dir = artifact_store.create_run_dir()
+    run_id = run_dir.name
+    project_name = payload.project_name.strip() if payload.project_name and payload.project_name.strip() else run_id
+    with _thread_operation_lock:
+        started_thread = None if thread.thread_id in _manual_adjustment_thread_ids else thread_store.try_begin_run(
+            thread.thread_id,
+            mode="invoke",
+            stage="queued",
+            title="Run accepted",
+            detail="The request has been queued and will start shortly.",
+            project_name=project_name,
+            artifact_dir=str(run_dir),
+            run_id=run_id,
+        )
+    if started_thread is None:
+        try:
+            artifact_store.delete_run_dir(str(run_dir))
+        except (FileNotFoundError, OSError):
+            pass
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This thread already has an active run in progress.",
+            detail="This thread already has a conversion or manual adjustment in progress.",
         )
-
-    project_name = derive_project_name_from_image(payload.project_name, payload.image_path, payload.message)
-    run_dir = artifact_store.create_run_dir(project_name)
+    thread = started_thread
     thread = thread_store.append_message(
         thread.thread_id,
         ChatMessage(
@@ -1040,18 +1562,60 @@ def invoke_agent(payload: AgentRequest) -> RunStartResponse:
             content=payload.message,
         ),
     )
-    thread = thread_store.begin_run(
-        thread.thread_id,
-        mode="invoke",
-        stage="queued",
-        title="Run accepted",
-        detail="The request has been queued and will start shortly.",
-        project_name=project_name,
-        artifact_dir=str(run_dir),
-    )
     artifact_store.write_metadata(thread)
     _mark_active_run(thread.current_run.run_id if thread.current_run else None)
-    executor.submit(_run_agent_in_background, thread.thread_id, payload, str(run_dir))
+    run_id = thread.current_run.run_id if thread.current_run else ""
+    cancellation_event = _register_cancel_event(run_id)
+    lease = artifact_leases.try_acquire(
+        run_dir,
+        owner_id=run_id,
+        operation="conversion",
+    )
+    if lease is None:
+        _unmark_active_run(run_id)
+        _remove_cancel_event(run_id)
+        thread_store.finish_run(
+            thread.thread_id,
+            status="failed",
+            stage="lease-conflict",
+            title="Run could not acquire its project",
+            detail="The project directory is already in use by another operation.",
+            level="error",
+            error="The project directory is already in use by another operation.",
+        )
+        raise _artifact_conflict(run_dir)
+    try:
+        future = executor.submit(
+            _run_agent_in_background,
+            thread.thread_id,
+            run_id,
+            payload,
+            str(run_dir),
+            resolved_api_key,
+            lease,
+            cancellation_event,
+        )
+        _register_run_future(
+            run_id,
+            future,
+            thread_id=thread.thread_id,
+            lease=lease,
+        )
+    except Exception as exc:
+        artifact_leases.release(lease)
+        _unmark_active_run(run_id)
+        _remove_cancel_event(run_id)
+        thread_store.finish_run(
+            thread.thread_id,
+            status="failed",
+            stage="queue-failed",
+            title="Run could not be queued",
+            detail=str(exc),
+            level="error",
+            error=str(exc),
+        )
+        response_status = 429 if isinstance(exc, QueueFullError) else 503
+        raise HTTPException(status_code=response_status, detail=str(exc) or "Run could not be queued.") from exc
     return RunStartResponse(thread_id=thread.thread_id, run=thread.current_run, messages=thread.messages)
 
 
@@ -1066,7 +1630,7 @@ def resume_agent(payload: ApprovalDecision) -> ResumeResponse:
 @app.post("/runs/resume", response_model=RunStartResponse)
 def resume_conversion_run(payload: ResumeRunRequest) -> RunStartResponse:
     thread_store = get_thread_store()
-    run_dir = Path(payload.run_dir)
+    thread, source_run, run_dir = _resolve_owned_resume_target(payload.thread_id, payload.run_id)
     plan = build_resume_plan(run_dir)
     if not plan.available:
         raise HTTPException(status_code=400, detail=plan.reason or "This run cannot be resumed.")
@@ -1079,20 +1643,63 @@ def resume_conversion_run(payload: ResumeRunRequest) -> RunStartResponse:
         else:
             request = request.model_copy(update={"max_budget": max(current_limit, plan.budget.used + payload.extra_budget)})
 
-    thread = thread_store.get_or_create(payload.thread_id or request.thread_id or plan.run_dir)
-    if thread.current_run is not None and thread.current_run.status in {"queued", "running"}:
-        raise HTTPException(status_code=409, detail="A run is already in progress for this thread.")
-
-    thread = thread_store.begin_run(
-        thread.thread_id,
-        mode="resume",
-        stage="queued",
-        title="Resume accepted",
-        detail=f"Continuing the prior run from {plan.resume_stage or 'the latest checkpoint'}.",
-        project_name=thread.current_run.project_name if thread.current_run else run_dir.name,
-        artifact_dir=str(run_dir),
+    request, resolved_api_key = _freeze_run_request_settings(request)
+    lease = artifact_leases.try_acquire(
+        run_dir,
+        owner_id=f"resume:{payload.thread_id}:{payload.run_id}:{secrets.token_hex(8)}",
+        operation="resume",
     )
+    if lease is None:
+        raise _artifact_conflict(run_dir)
+    with _thread_operation_lock:
+        started_thread = None if thread.thread_id in _manual_adjustment_thread_ids else thread_store.resume_bound_run(
+            thread.thread_id,
+            payload.run_id,
+            stage="queued",
+            title="Resume accepted",
+            detail=f"Continuing the prior run from {plan.resume_stage or 'the latest checkpoint'}.",
+        )
+    if started_thread is None:
+        artifact_leases.release(lease)
+        raise HTTPException(
+            status_code=409,
+            detail="This thread already has a conversion or manual adjustment in progress.",
+        )
+    thread = started_thread
     artifact_store.write_metadata(thread)
     _mark_active_run(thread.current_run.run_id if thread.current_run else None)
-    executor.submit(_resume_conversion_in_background, thread.thread_id, request, str(run_dir))
+    run_id = thread.current_run.run_id if thread.current_run else ""
+    cancellation_event = _register_cancel_event(run_id)
+    try:
+        future = executor.submit(
+            _resume_conversion_in_background,
+            thread.thread_id,
+            run_id,
+            request,
+            str(run_dir),
+            resolved_api_key,
+            lease,
+            cancellation_event,
+        )
+        _register_run_future(
+            run_id,
+            future,
+            thread_id=thread.thread_id,
+            lease=lease,
+        )
+    except Exception as exc:
+        artifact_leases.release(lease)
+        _unmark_active_run(run_id)
+        _remove_cancel_event(run_id)
+        thread_store.finish_run(
+            thread.thread_id,
+            status="failed",
+            stage="queue-failed",
+            title="Resume could not be queued",
+            detail=str(exc),
+            level="error",
+            error=str(exc),
+        )
+        response_status = 429 if isinstance(exc, QueueFullError) else 503
+        raise HTTPException(status_code=response_status, detail=str(exc) or "Resume could not be queued.") from exc
     return RunStartResponse(thread_id=thread.thread_id, run=thread.current_run, messages=thread.messages)

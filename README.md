@@ -1,115 +1,93 @@
 # Shape Studio
 
-Shape Studio is a desktop/web application prototype for converting raster images into editable SVG. This README is the main project entrypoint: use it to understand what the project does, then follow the link that matches your role.
+Shape Studio is a desktop/web application for converting raster images into editable SVG assets.
 
-The current project has a working Windows installer loop: product users can download the Windows installer from the repository's Releases page, install the app without a developer environment, and later update by running a newer release installer. User data is preserved by default during updates.
+This file is the single project entrypoint. Use it to understand what the project does, which user path is currently supported, and which detailed document is authoritative for each topic.
 
-## Quick Navigation
+## Current Product Path
 
-| Your Role | Read This | What You Will Do |
-| --- | --- | --- |
-| Product user on Windows | "How Product Users Use It" below | Download the Windows installer from the repository's Releases page, install the app, configure API settings, upload images, update, or uninstall |
-| Product user on macOS/Linux | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | Start the backend service from source deployment scripts; packaged product installers are not ready yet |
-| Developer | [README.developer.md](./README.developer.md) and [docs.development.md](./docs.development.md) | Run the web/desktop development app from source and debug backend/frontend behavior |
-| Release maintainer | [packaging/README.packaging.md](./packaging/README.packaging.md) and [docs.installer.md](./docs.installer.md) | Build versioned installers and release updates that overwrite older installs |
-| Desktop shell debugging | [desktop/README.desktop.md](./desktop/README.desktop.md) | Debug Electron startup, URL resolution, and desktop-specific issues |
-| Source-bundle deployment | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | Create a source deployment bundle, move it to another machine, and start the service |
-
-## Project Overview
-
-The project converts raster images into SVG structures that are easier to edit, reuse, and inspect.
-
-Typical flow:
+The supported product-user path is Windows:
 
 ```text
-upload a raster image
--> model recognizes objects, regions, and geometric relationships
--> backend creates structured conversion results
--> frontend shows preview, process information, and SVG artifacts
--> user exports or continues editing the SVG
+Windows installer -> Electron desktop app -> bundled local FastAPI backend -> editable SVG output
 ```
 
-Current application pieces:
-
-- FastAPI backend
-- Web frontend
-- Electron desktop shell
-- Windows installer distributed through the repository's Releases page
-
-## How Product Users Use It
-
-Windows product users do not need Python, Node.js, or a developer environment. macOS and Linux do not yet have a packaged product-user installer in the current project state; those platforms still use the backend startup flow described in [quick-start/README.quick-start.md](./quick-start/README.quick-start.md).
-
-### Windows: First Install
-
-Open the repository's Releases page, download the latest Windows installer, and double-click it. For a hosted Git repository, this is usually:
-
-```text
-https://github.com/<owner>/<repo>/releases
-```
-
-Download the file whose name looks like:
+Windows users install Shape Studio from the repository's Releases page by downloading:
 
 ```text
 Shape Studio Setup <version>.exe
 ```
 
-You can choose an install directory during setup, or keep the default directory.
+The installed app starts its bundled backend automatically. Product users do not need Python, Node.js, Conda, or a terminal.
 
-After installation, open:
+macOS and Linux do not yet have supported product-user installers. Use the source deployment path in [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) for those platforms.
 
-```text
-Shape Studio
-```
+## What The App Does
 
-from the Start Menu or desktop shortcut.
-
-### Windows: Basic Usage
-
-1. Open Shape Studio.
-2. Fill in the minimum API settings in the app UI: API Key, Base URL, API Provider, API Format, Coordinator Model, and Worker Model.
-3. Upload the image you want to convert.
-4. Start conversion.
-5. Review the generated result, logs, and SVG artifacts.
-
-Minimum settings most users should care about:
-
-| Setting | What To Put |
-| --- | --- |
-| API Key | Secret key for your model provider |
-| Base URL | OpenAI-compatible endpoint, usually ending in `/v1` |
-| API Provider | Keep `openai_compatible` unless the code adds another provider |
-| API Format | Use `openai_chat_completions` for OpenAI-compatible chat APIs, or `openai_responses` when your endpoint supports the Responses API |
-| Coordinator Model | Main planning/conversion model name supported by your endpoint |
-| Worker Model | Worker/subtask model name supported by your endpoint; it can be the same as the coordinator model |
-
-The installed Windows app starts its bundled backend automatically. Windows users do not need to open a terminal or manually run a service.
-
-### Windows: Update To A New Version
-
-If an older Windows version is already installed:
-
-1. Close Shape Studio if it is running.
-2. Download the latest Windows installer from the repository's Releases page.
-3. Double-click the new installer.
-4. Finish the installer wizard.
-5. Reopen the app.
-
-The new installer replaces old program files. User configuration, API settings, generated results, and logs are preserved by default.
-
-### Windows: Uninstall
-
-Uninstall from Windows Settings or the Start Menu:
+Typical conversion flow:
 
 ```text
-Windows Settings -> Apps -> Installed apps -> Shape Studio
+upload a raster image
+-> model recognizes layout, regions, objects, and geometric relationships
+-> backend creates structured conversion artifacts
+-> desktop UI shows progress, previews, reports, and SVG files
+-> user exports or manually refines the SVG result
 ```
 
-During interactive uninstall, the uninstaller asks whether to remove user data. Keeping user data removes only program files. Removing user data also deletes saved settings, generated results, and logs.
+Current application pieces:
 
-### Windows: User Data Location
+- FastAPI backend
+- Shared static frontend modules
+- Electron desktop shell
+- Windows installer built with PyInstaller and electron-builder
 
-On Windows, user data is usually stored under:
+## Quick Navigation
+
+| Your Role | Read This | Purpose |
+| --- | --- | --- |
+| Product user on Windows | This README | Install, update, uninstall, and find user-data/log locations. |
+| Product user on macOS/Linux | [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) | Run from a source deployment bundle until product installers exist. |
+| Developer | [README.developer.md](./README.developer.md) | Start from source and find the detailed development manual. |
+| Release maintainer | [packaging/README.packaging.md](./packaging/README.packaging.md) | Build versioned installers and publish update artifacts. |
+| Desktop shell maintainer | [desktop/README.desktop.md](./desktop/README.desktop.md) | Debug Electron startup and frontend URL resolution. |
+| Architecture maintainer | [architecture-summary/README.md](./architecture-summary/README.md) | Understand current architecture, boundaries, and legacy areas. |
+
+## Windows User Basics
+
+### Install
+
+1. Open the repository's Releases page.
+2. Download `Shape Studio Setup <version>.exe`.
+3. Run the installer.
+4. Open `Shape Studio` from the Start Menu or desktop shortcut.
+
+### Configure And Run
+
+In the app settings, fill the model connection fields before running real conversions:
+
+- API Key
+- Base URL
+- API Provider
+- API Format
+- Coordinator Model
+- Worker Model
+
+Detailed configuration behavior is documented in [docs.development.md](./docs.development.md). Frontend label/value mappings are documented in [docs.settings-mapping.md](./docs.settings-mapping.md).
+
+### Update
+
+1. Close Shape Studio.
+2. Download the newer Windows installer.
+3. Run it over the existing installation.
+4. Reopen Shape Studio.
+
+Program files are replaced. User settings, generated artifacts, and logs are preserved by default.
+
+### Uninstall
+
+Uninstall from Windows Settings or the Start Menu uninstall shortcut. During interactive uninstall, the uninstaller asks whether to remove user data.
+
+Windows user data is usually stored under:
 
 ```text
 %APPDATA%\Shape Studio\
@@ -129,163 +107,34 @@ If the app fails to open, check:
 %APPDATA%\Shape Studio\logs\backend.log
 ```
 
-### macOS/Linux: Current User Path
-
-macOS and Linux users currently need to run the backend service from the project/deployment scripts instead of installing a packaged desktop app from the repository's Releases page.
-
-Use:
-
-- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) for deployment-style backend startup
-- [README.developer.md](./README.developer.md) for source-based development startup
-
-After the backend starts, open the web UI in a browser, usually:
-
-```text
-http://127.0.0.1:8120/
-```
-
-## How Developers Use It
-
-Developers can run the web app or desktop development app from source. See:
-
-- [README.developer.md](./README.developer.md)
-- [docs.development.md](./docs.development.md)
-
-Quickly start the web development app:
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
-```
-
-macOS/Linux:
-
-```bash
-chmod +x start-dev.sh
-./start-dev.sh
-```
-
-The frontend is usually available at:
-
-```text
-http://127.0.0.1:8120/
-```
-
-Quickly start the desktop development app:
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -Desktop
-```
-
-macOS/Linux:
-
-```bash
-./start-dev.sh --desktop
-```
-
-Development API settings live in the project-root `.env`. If `.env` does not exist, the startup scripts create it from `.env.example`.
-
-At minimum, review:
-
-```env
-API_KEY=your-real-api-key
-BASE_URL=https://your-openai-compatible-endpoint.example/v1
-API_PROVIDER=openai_compatible
-API_FORMAT=openai_chat_completions
-AGENT_MODEL=your-coordinator-model
-SUBAGENT_MODEL=your-worker-model
-```
-
-Without real API settings, the frontend can still open, but actual model-backed conversion will fail.
-
-## Build Installers
-
-Windows installers are generated by scripts under `packaging/`. See:
-
-- [packaging/README.packaging.md](./packaging/README.packaging.md)
-- [docs.installer.md](./docs.installer.md)
-
-Build an installer for the current version:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
-```
-
-Build a release installer:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
-```
-
-If Python backend dependencies changed:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
-```
-
-Output:
-
-```text
-dist/installers/
-```
-
 ## Platform Status
 
-Windows:
-
-- Minimal installer loop is complete
-- Custom install directory is supported
-- Uninstall is supported
-- Uninstall can optionally remove user data
-- New installers can overwrite older installations
-
-macOS/Linux:
-
-- Development startup scripts exist
-- Electron config already includes `dmg`, `AppImage`, and `deb` targets
-- Product-user installers are not ready yet; users should start the backend service and use the browser UI
-- Production desktop installers still need to be built, signed, tested, and released on their target OS
+| Platform | Product-user status |
+| --- | --- |
+| Windows | Supported installer/update/uninstall loop. |
+| macOS | Developer-side packaging scripts exist, but public installer distribution still needs signing, notarization, architecture testing, and clean-machine validation. |
+| Linux | Source/backend startup path only; no supported product installer yet. |
 
 ## Documentation Index
 
-All project-owned README files except this main README use semantic suffixes:
+Authoritative documents:
 
-- [README.developer.md](./README.developer.md): developer entrypoint
-- [packaging/README.packaging.md](./packaging/README.packaging.md): installer packaging, release builds, overwrite updates, and dependency-size notes
-- [desktop/README.desktop.md](./desktop/README.desktop.md): Electron desktop shell notes
+- [README.developer.md](./README.developer.md): developer entrypoint and reading order
+- [docs.development.md](./docs.development.md): development environment, startup modes, configuration, and troubleshooting
+- [packaging/README.packaging.md](./packaging/README.packaging.md): installer packaging, release builds, overwrite updates, dependency-size notes, and installed-app behavior
 - [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): source-bundle migration, deployment, and target-machine bootstrap
+- [desktop/README.desktop.md](./desktop/README.desktop.md): Electron shell startup, runtime URL resolution, and desktop-specific troubleshooting
+- [docs.settings-mapping.md](./docs.settings-mapping.md): frontend settings label/value mapping
+- [architecture-summary/README.md](./architecture-summary/README.md): Chinese architecture summary and maintenance boundaries
+- [RELEASE_NOTES.md](./RELEASE_NOTES.md): version-specific changes, artifacts, checksums, and verification
 
-Other detailed documents:
+Historical or transitional notes:
 
-- [docs.development.md](./docs.development.md): detailed development environment, startup modes, and troubleshooting
-- [docs.installer.md](./docs.installer.md): installer implementation and installed-mode behavior
+- [docs.installer.md](./docs.installer.md): archived installer note that points to the current packaging authority
 
-Directory naming:
+Directory roles:
 
 - `quick-start/`: source-bundle deployment and migration scripts
-- `packaging/`: installer/release build scripts
-- `desktop/`: Electron shell scripts and desktop assets
-
-## Recommended Reading Paths
-
-Product users:
-
-1. Read "How Product Users Use It" in this README.
-2. On Windows, download the latest installer from the repository's Releases page.
-3. On macOS/Linux, follow the backend startup path in [quick-start/README.quick-start.md](./quick-start/README.quick-start.md).
-4. Open the app or browser UI and fill API settings.
-
-Developers:
-
-1. Read [README.developer.md](./README.developer.md).
-2. Then read [docs.development.md](./docs.development.md).
-3. Start the development environment with the `start-dev` scripts.
-
-Release maintainers:
-
-1. Read [packaging/README.packaging.md](./packaging/README.packaging.md).
-2. Build a versioned installer with `build-release-windows.ps1`.
-3. Release the new installer so users can overwrite-update their existing install.
+- `packaging/`: installer and release build scripts
+- `desktop/`: Electron shell scripts, package metadata, and desktop assets
+- `architecture-summary/`: current architecture, workflow, runtime, state, deployment, and maintenance notes

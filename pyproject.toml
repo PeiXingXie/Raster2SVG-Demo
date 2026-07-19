@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepagents-template"
-version = "0.2.0"
-description = "A Raster-to-SVG Planner + ReAct demo built on Deep Agents."
+version = "0.3.0"
+description = "A raster-to-SVG conversion workflow with web and desktop interfaces."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,12 +19,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = [
-  "deepagents>=0.5.3",
-  "langchain>=1.0.0",
-  "langgraph>=1.0.0",
-  "langchain-openai>=1.0.0",
-]
 dev = [
   "pytest>=8.0.0",
   "ruff>=0.12.0",

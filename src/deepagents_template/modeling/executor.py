@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -10,6 +12,7 @@ from typing import Callable, TypeVar
 from pydantic import BaseModel
 from pydantic import ValidationError
 
+from deepagents_template.config import get_settings
 from deepagents_template.modeling.adapters import build_multimodal_adapter, extract_text_from_payload
 from deepagents_template.modeling.factory import build_openai_client
 
@@ -20,6 +23,11 @@ RETRYABLE_RESPONSE_ERROR_SNIPPETS = (
     "did not contain a complete json object",
     "did not contain a json payload",
 )
+try:
+    _MODEL_CALL_CONCURRENCY = max(1, int(os.getenv("SHAPE_STUDIO_MODEL_CALL_CONCURRENCY", "8")))
+except ValueError:
+    _MODEL_CALL_CONCURRENCY = 8
+_MODEL_CALL_SEMAPHORE = threading.BoundedSemaphore(_MODEL_CALL_CONCURRENCY)
 
 
 def _extract_provider_error_message(payload: dict) -> str | None:
@@ -321,7 +329,8 @@ class MultimodalJsonCaller:
         response_callback: Callable[[dict], None] | None = None,
         request_callback: Callable[[dict], None] | None = None,
         warning_callback: Callable[[dict], None] | None = None,
-        unexpected_response_retries: int = 2,
+        cancellation_check: Callable[[], None] | None = None,
+        response_validation_max_attempts: int | None = None,
     ) -> None:
         self.client = build_openai_client(
             api_key=api_key,
@@ -334,7 +343,10 @@ class MultimodalJsonCaller:
         self.response_callback = response_callback
         self.request_callback = request_callback
         self.warning_callback = warning_callback
-        self.unexpected_response_retries = max(0, unexpected_response_retries)
+        self.cancellation_check = cancellation_check
+        self.response_validation_max_attempts = get_settings().resolved_response_validation_max_attempts(
+            response_validation_max_attempts
+        )
         self.adapter = build_multimodal_adapter(
             client=self.client,
             model_name=model_name,
@@ -350,12 +362,22 @@ class MultimodalJsonCaller:
         image_paths: list[Path] | None = None,
         file_paths: list[Path] | None = None,
     ) -> str:
-        return self.adapter.call(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            image_paths=image_paths,
-            file_paths=file_paths,
-        )
+        if self.cancellation_check is not None:
+            self.cancellation_check()
+        while not _MODEL_CALL_SEMAPHORE.acquire(timeout=0.25):
+            if self.cancellation_check is not None:
+                self.cancellation_check()
+        try:
+            if self.cancellation_check is not None:
+                self.cancellation_check()
+            return self.adapter.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_paths=image_paths,
+                file_paths=file_paths,
+            )
+        finally:
+            _MODEL_CALL_SEMAPHORE.release()
 
     def call_json(
         self,
@@ -365,6 +387,7 @@ class MultimodalJsonCaller:
         user_prompt: str,
         image_paths: list[Path] | None = None,
         file_paths: list[Path] | None = None,
+        validation_context: dict[str, object] | None = None,
     ) -> tuple[ModelT, str]:
         started_at = time.perf_counter()
         raw_text = ""
@@ -379,7 +402,18 @@ class MultimodalJsonCaller:
             image_paths=image_paths,
             file_paths=file_paths,
         )
-        attempts_total = self.unexpected_response_retries + 1
+        if validation_context:
+            request_payload["validation_context"] = validation_context
+        attempts_total = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "response_validation_max_attempts",
+                    getattr(self, "unexpected_response_retries", 0) + 1,
+                )
+            ),
+        )
         for attempt in range(1, attempts_total + 1):
             try:
                 if self.request_callback is not None:
@@ -406,7 +440,7 @@ class MultimodalJsonCaller:
                         failure_kind="provider_empty_payload",
                     )
                 try:
-                    parsed = response_model.model_validate(payload)
+                    parsed = response_model.model_validate(payload, context=validation_context)
                 except ValidationError as exc:
                     raise InvalidModelResponseError(
                         f"{response_model.__name__} failed schema validation.",

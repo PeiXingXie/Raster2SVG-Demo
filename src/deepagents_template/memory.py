@@ -50,6 +50,30 @@ class ThreadStore:
                 self._threads[thread_id] = state
             return state.model_copy(deep=True)
 
+    def get_existing(self, thread_id: str) -> ThreadState | None:
+        with self._lock:
+            state = self._threads.get(thread_id)
+            return state.model_copy(deep=True) if state is not None else None
+
+    def attach_persisted_run(self, run: ExecutionRun) -> ThreadState:
+        if not run.owner_thread_id:
+            raise ValueError("Saved run has no owning workspace.")
+        with self._lock:
+            state = self._threads.get(run.owner_thread_id)
+            if state is None:
+                state = ThreadState(thread_id=run.owner_thread_id)
+            if state.bound_run_id not in {None, run.run_id}:
+                raise ValueError("The owning workspace is already bound to another run.")
+            if state.bound_run_id == run.run_id and state.current_run is not None:
+                return state.model_copy(deep=True)
+            state.bound_run_id = run.run_id
+            state.current_run = run.model_copy(deep=True)
+            state.recent_runs = [
+                item for item in state.recent_runs if item.run_id != run.run_id
+            ]
+            self._threads[state.thread_id] = state
+            return state.model_copy(deep=True)
+
     def append_message(self, thread_id: str, message: ChatMessage) -> ThreadState:
         with self._lock:
             state = self._threads.setdefault(thread_id, ThreadState(thread_id=thread_id))
@@ -75,12 +99,42 @@ class ThreadStore:
         detail: str | None,
         project_name: str,
         artifact_dir: str,
+        run_id: str | None = None,
     ) -> ThreadState:
+        state = self.try_begin_run(
+            thread_id,
+            mode=mode,
+            stage=stage,
+            title=title,
+            detail=detail,
+            project_name=project_name,
+            artifact_dir=artifact_dir,
+            run_id=run_id,
+        )
+        if state is None:
+            raise RuntimeError("A run is already in progress for this thread.")
+        return state
+
+    def try_begin_run(
+        self,
+        thread_id: str,
+        mode: str,
+        stage: str,
+        title: str,
+        detail: str | None,
+        project_name: str,
+        artifact_dir: str,
+        run_id: str | None = None,
+    ) -> ThreadState | None:
+        """Atomically start a run unless this thread already has live work."""
         with self._lock:
             state = self._threads.setdefault(thread_id, ThreadState(thread_id=thread_id))
+            if state.bound_run_id is not None:
+                return None
             now = utc_now()
             run = ExecutionRun(
-                run_id=str(uuid4()),
+                run_id=run_id or str(uuid4()),
+                owner_thread_id=thread_id,
                 mode=mode,
                 status="queued",
                 current_stage=stage,
@@ -101,6 +155,45 @@ class ThreadStore:
                 ],
             )
             state.current_run = run
+            state.bound_run_id = run.run_id
+            return state.model_copy(deep=True)
+
+    def resume_bound_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        stage: str,
+        title: str,
+        detail: str | None,
+    ) -> ThreadState | None:
+        with self._lock:
+            state = self._threads.get(thread_id)
+            if state is None or state.bound_run_id != run_id:
+                return None
+            run = state.current_run
+            if run is None or run.run_id != run_id or run.status in {"queued", "running"}:
+                return None
+            now = utc_now()
+            run.mode = "resume"
+            run.status = "queued"
+            run.current_stage = stage
+            run.current_stage_started_at = now
+            run.updated_at = now
+            run.finished_at = None
+            run.error = None
+            run.failure_stage = None
+            run.current_stage_duration_ms = 0
+            run.events.append(
+                ExecutionEvent(
+                    timestamp=now,
+                    stage=stage,
+                    title=title,
+                    detail=detail,
+                    stage_duration_ms=0,
+                )
+            )
+            state.recent_runs = [item for item in state.recent_runs if item.run_id != run_id]
             return state.model_copy(deep=True)
 
     def push_event(
@@ -121,6 +214,7 @@ class ThreadStore:
                 now = utc_now()
                 state.current_run = ExecutionRun(
                     run_id=str(uuid4()),
+                    owner_thread_id=thread_id,
                     mode="invoke",
                     status="queued",
                     current_stage=stage,
@@ -180,6 +274,7 @@ class ThreadStore:
                 now = utc_now()
                 state.current_run = ExecutionRun(
                     run_id=str(uuid4()),
+                    owner_thread_id=thread_id,
                     mode="invoke",
                     status=status,
                     current_stage=stage,
@@ -200,7 +295,7 @@ class ThreadStore:
                 run.current_stage_started_at = now
             run.updated_at = now
             run.current_stage_duration_ms = int((now - run.current_stage_started_at).total_seconds() * 1000)
-            run.finished_at = now if status in {"completed", "failed", "paused", "needs_approval"} else None
+            run.finished_at = now if status in {"completed", "failed", "paused", "needs_approval", "cancelled"} else None
             run.duration_ms = int((run.updated_at - run.started_at).total_seconds() * 1000)
             run.error = error
             run.failure_diagnostic = failure_diagnostic
@@ -221,7 +316,7 @@ class ThreadStore:
                 )
             )
 
-            if status in {"completed", "failed", "paused", "needs_approval"}:
+            if status in {"completed", "failed", "paused", "needs_approval", "cancelled"}:
                 state.recent_runs = ([run.model_copy(deep=True)] + state.recent_runs)[:8]
 
             return state.model_copy(deep=True)
@@ -245,5 +340,7 @@ class ThreadStore:
             if state.current_run is not None and state.current_run.run_id == run_id:
                 state.current_run = None
                 state.pending_approval = None
+            if state.bound_run_id == run_id:
+                state.bound_run_id = None
             state.recent_runs = [run for run in state.recent_runs if run.run_id != run_id]
             return state.model_copy(deep=True)

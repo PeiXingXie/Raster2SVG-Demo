@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from deepagents_template.taxonomy import ObjectIssueFamily
 
 
 OBJECT_TYPE_ALIASES = {
@@ -307,6 +309,7 @@ class ObjectFidelityHints(BaseModel):
     """Optional object-local visual fidelity goals derived during recognition."""
 
     verify_required: bool = Field(default=False)
+    target_elements: list[str] = Field(default_factory=list)
     fidelity_goals: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -316,12 +319,199 @@ class ObjectFidelityHints(BaseModel):
             return data
         if "fidelity_goals" not in data and "must_preserve" in data:
             data["fidelity_goals"] = data.get("must_preserve")
-        goals = data.get("fidelity_goals")
-        if isinstance(goals, str):
-            data["fidelity_goals"] = [goals]
-        elif not isinstance(goals, list):
-            data["fidelity_goals"] = []
+        for field_name in ("target_elements", "fidelity_goals"):
+            values = data.get(field_name)
+            if isinstance(values, str):
+                data[field_name] = [values]
+            elif not isinstance(values, list):
+                data[field_name] = []
         return data
+
+    @field_validator("target_elements", "fidelity_goals", mode="after")
+    @classmethod
+    def normalize_fidelity_lists(cls, values: list[str]) -> list[str]:
+        return list(
+            dict.fromkeys(
+                " ".join(str(value).strip().split())
+                for value in values
+                if str(value).strip()
+            )
+        )[:5]
+
+
+class RecognizedObjectStructure(BaseModel):
+    """Frozen object identity and semantic ownership from structure recognition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    object_id: str
+    object_type: Literal["background", "icon", "text", "container", "connector", "diagram", "fig"]
+    description: str
+    included_elements: list[str] = Field(default_factory=list)
+
+    @field_validator("object_id", "description", mode="before")
+    @classmethod
+    def normalize_required_structure_text(cls, value: object, info: ValidationInfo) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            raise ValueError(f"{info.field_name} must not be empty")
+        return text
+
+    @field_validator("object_type", mode="before")
+    @classmethod
+    def normalize_object_type(cls, value: str) -> str:
+        if isinstance(value, str):
+            return _normalize_object_type(value) or "fig"
+        return value
+
+    @field_validator("included_elements", mode="before")
+    @classmethod
+    def normalize_included_elements(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        return value if isinstance(value, list) else []
+
+
+class RegionStructureRecognitionResult(BaseModel):
+    """Stage-1 output containing only object structure and ownership."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region_id: str
+    observation: str
+    recognized_objects: list[RecognizedObjectStructure] = Field(default_factory=list)
+
+    @field_validator("region_id", mode="before")
+    @classmethod
+    def normalize_required_region_id(cls, value: object, info: ValidationInfo) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            raise ValueError(f"{info.field_name} must not be empty")
+        return text
+
+    @model_validator(mode="after")
+    def validate_recognition_contract(self, info: ValidationInfo) -> "RegionStructureRecognitionResult":
+        object_ids = [obj.object_id for obj in self.recognized_objects]
+        duplicate_ids = sorted({object_id for object_id in object_ids if object_ids.count(object_id) > 1})
+        if duplicate_ids:
+            raise ValueError(f"recognized object_id values must be unique: {', '.join(duplicate_ids)}")
+
+        context = info.context if isinstance(info.context, dict) else {}
+        expected_region_id = str(context.get("expected_region_id") or "").strip()
+        if expected_region_id and self.region_id != expected_region_id:
+            raise ValueError(
+                f'region_id must equal expected region_id "{expected_region_id}", got "{self.region_id}"'
+            )
+        if context.get("require_recognized_objects") and not self.recognized_objects:
+            raise ValueError("recognized_objects must not be empty for this visible region")
+        return self
+
+
+class ObjectContractDraft(BaseModel):
+    """Stage-2 generation contract draft for one frozen object."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    object_id: str
+    generation_focus: list[str]
+    relative_position: str
+    extent_hint: str
+    fidelity_hints: ObjectFidelityHints | None = None
+
+    @field_validator("generation_focus", mode="before")
+    @classmethod
+    def normalize_generation_focus(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value if isinstance(value, list) else []
+
+    @field_validator("relative_position", "extent_hint", mode="before")
+    @classmethod
+    def normalize_contract_text(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+
+class RegionContractEnrichmentResult(BaseModel):
+    """Stage-2 draft contracts for the frozen Stage-1 object set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region_id: str
+    object_updates: list[ObjectContractDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_frozen_object_contract(self, info: ValidationInfo) -> "RegionContractEnrichmentResult":
+        update_ids = [update.object_id for update in self.object_updates]
+        duplicate_ids = sorted({object_id for object_id in update_ids if update_ids.count(object_id) > 1})
+        if duplicate_ids:
+            raise ValueError(f"object_updates object_id values must be unique: {', '.join(duplicate_ids)}")
+
+        context = info.context if isinstance(info.context, dict) else {}
+        expected_region_id = str(context.get("expected_region_id") or "").strip()
+        if expected_region_id and self.region_id != expected_region_id:
+            raise ValueError(
+                f'region_id must equal expected region_id "{expected_region_id}", got "{self.region_id}"'
+            )
+
+        expected_object_ids = [
+            str(object_id).strip()
+            for object_id in (context.get("expected_object_ids") or [])
+            if str(object_id).strip()
+        ]
+        if expected_object_ids:
+            expected_set = set(expected_object_ids)
+            received_set = set(update_ids)
+            missing_ids = [object_id for object_id in expected_object_ids if object_id not in received_set]
+            unexpected_ids = sorted(received_set - expected_set)
+            if missing_ids or unexpected_ids:
+                details = []
+                if missing_ids:
+                    details.append(f"missing object_updates for: {', '.join(missing_ids)}")
+                if unexpected_ids:
+                    details.append(f"unexpected object_updates for: {', '.join(unexpected_ids)}")
+                raise ValueError("; ".join(details))
+        return self
+
+
+class ObjectContractPatch(BaseModel):
+    """Stage-3 patch containing only contract fields requested for repair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    object_id: str
+    generation_focus: list[str] | None = None
+    relative_position: str | None = None
+    extent_hint: str | None = None
+    fidelity_hints: ObjectFidelityHints | None = None
+
+    @field_validator("generation_focus", mode="before")
+    @classmethod
+    def normalize_generation_focus(cls, value: object) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        return value if isinstance(value, list) else []
+
+    @field_validator("relative_position", "extent_hint", mode="before")
+    @classmethod
+    def normalize_contract_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return " ".join(str(value).strip().split())
+
+
+class TargetedContractCompletionResult(BaseModel):
+    """Stage-3 field-level contract patches for audited objects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region_id: str
+    object_updates: list[ObjectContractPatch] = Field(default_factory=list)
 
 
 class ObjectCandidate(BaseModel):
@@ -389,6 +579,25 @@ class ObjectCandidate(BaseModel):
             return ""
         return " ".join(str(value).strip().split())
 
+    @model_validator(mode="after")
+    def validate_fidelity_hint_contract(self) -> "ObjectCandidate":
+        hints = self.fidelity_hints
+        if hints is None or not hints.verify_required:
+            return self
+        if not hints.target_elements:
+            raise ValueError(
+                f'Object "{self.object_id}" has verify_required=true but target_elements is empty.'
+            )
+        if not hints.fidelity_goals:
+            raise ValueError(
+                f'Object "{self.object_id}" has verify_required=true but fidelity_goals is empty.'
+            )
+        if self.object_type == "icon" and hints.target_elements != [self.object_id]:
+            raise ValueError(
+                f'Icon object "{self.object_id}" must use target_elements=["{self.object_id}"].'
+            )
+        return self
+
 
 class RegionTask(BaseModel):
     """An executable unit assigned to a ReAct worker."""
@@ -431,13 +640,7 @@ class LayoutDetectionResult(BaseModel):
 class RegionCheckItem(BaseModel):
     """A machine-readable region check result."""
 
-    issue_family: Literal[
-        "content_accuracy",
-        "shape_fidelity",
-        "internal_structure",
-        "style_appearance",
-        "containment_boundary",
-    ] = Field(default="style_appearance")
+    issue_family: ObjectIssueFamily
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
@@ -445,8 +648,10 @@ class RegionCheckItem(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def accept_legacy_item_id(cls, data: object) -> object:
-        if isinstance(data, dict) and "criterion" not in data and "item_id" in data:
-            data["criterion"] = data["item_id"]
+        if isinstance(data, dict):
+            data = dict(data)
+            if "criterion" not in data and "item_id" in data:
+                data["criterion"] = data["item_id"]
         return data
 
 
@@ -1028,13 +1233,7 @@ class RegionObjectIssue(BaseModel):
     """Region review issue scoped to a recognized object."""
 
     object_id: str
-    issue_family: Literal[
-        "content_accuracy",
-        "shape_fidelity",
-        "internal_structure",
-        "style_appearance",
-        "containment_boundary",
-    ] = Field(default="style_appearance")
+    issue_family: ObjectIssueFamily
     criterion: str
     reason: str
     severity: Literal["low", "medium", "high"] = Field(default="medium")
@@ -1042,24 +1241,30 @@ class RegionObjectIssue(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def accept_legacy_item_id(cls, data: object) -> object:
-        if isinstance(data, dict) and "criterion" not in data and "item_id" in data:
-            data["criterion"] = data["item_id"]
+        if isinstance(data, dict):
+            data = dict(data)
+            if "criterion" not in data and "item_id" in data:
+                data["criterion"] = data["item_id"]
         return data
+
+
+class SymbolFidelityChecks(BaseModel):
+    """Material symbol-fidelity acceptance checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    form: Literal["Y", "N"]
+    composition: Literal["Y", "N"]
+    style: Literal["Y", "N"]
+    integrity: Literal["Y", "N"]
 
 
 class RegionFidelityVerification(BaseModel):
     """Axis-based fidelity judgment for an object that must be checked."""
 
     object_id: str
-    checks: dict[str, str] = Field(default_factory=dict)
+    checks: SymbolFidelityChecks
     reason: str = ""
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_result(cls, data: object) -> object:
-        if isinstance(data, dict) and "reason" not in data and "result" in data:
-            data["reason"] = data.get("result")
-        return data
 
     @field_validator("object_id", "reason", mode="before")
     @classmethod
@@ -1076,7 +1281,10 @@ class RegionReviewResult(BaseModel):
     passed_items: list[str] = Field(default_factory=list)
     fidelity_verifications: list[RegionFidelityVerification] = Field(
         default_factory=list,
-        description="One concrete visual judgment per required fidelity object.",
+        description=(
+            "Structured four-axis judgments only for object IDs listed in "
+            "required_fidelity_checks."
+        ),
     )
     global_repairs: list[RegionReviewIssue] = Field(
         default_factory=list,
@@ -1546,6 +1754,8 @@ class AgentRequest(BaseModel):
         ge=0,
         description="Optional low-level API retry override for this run.",
     )
+    transport_max_attempts: int | None = Field(default=None, ge=1)
+    response_validation_max_attempts: int | None = Field(default=None, ge=1)
     image_path: str | None = Field(
         default=None,
         description="Optional local raster image path used for actual conversion.",
@@ -1581,6 +1791,9 @@ class AgentRequest(BaseModel):
         le=8,
         description="Early-stop threshold for recognition bbox global scan rounds when the issue set keeps repeating with low gain.",
     )
+    bbox_initial_localization_max_attempts: int | None = Field(default=None, ge=1)
+    bbox_refinement_max_rounds: int | None = Field(default=None, ge=0)
+    bbox_global_stagnation_max_rounds: int | None = Field(default=None, ge=1)
     workflow_mode: Literal["initial_only", "region", "region_object"] | None = Field(
         default=None,
         description=(
@@ -1590,7 +1803,7 @@ class AgentRequest(BaseModel):
     )
     project_name: str | None = Field(
         default=None,
-        description="Optional human-friendly project name used for run artifact directory naming.",
+        description="Optional human-friendly display name for the run.",
     )
     agent_model: str | None = Field(
         default=None,
@@ -1613,16 +1826,22 @@ class AgentRequest(BaseModel):
         ge=0,
         description="Optional per-task repair retry override for this run.",
     )
+    region_repair_max_attempts: int | None = Field(default=None, ge=0)
+    object_repair_max_attempts: int | None = Field(default=None, ge=0)
+    fidelity_verification_max_attempts: int | None = Field(default=None, ge=1)
+    fidelity_verification_independent_budget: bool | None = Field(default=None)
     fusion_max_retry: int | None = Field(
         default=None,
         ge=0,
         description="Optional maximum number of merge-time fusion repair passes for this run.",
     )
+    fusion_repair_max_attempts: int | None = Field(default=None, ge=0)
     max_budget: int | None = Field(
         default=None,
         ge=0,
         description="Optional total model-call budget override for this run.",
     )
+    run_model_call_budget: int | None = Field(default=None, ge=0)
     supervisor_memory_enabled: bool | None = Field(
         default=None,
         description="Whether supervisor memory is injected into prompts and allowed to affect supervisor or policy decisions.",
@@ -1769,8 +1988,12 @@ class ExecutionRun(BaseModel):
     """Execution metadata for the current or recent run."""
 
     run_id: str = Field(description="Unique run identifier.")
+    owner_thread_id: str | None = Field(
+        default=None,
+        description="Thread that owns this run and is allowed to mutate its artifacts.",
+    )
     mode: Literal["invoke", "resume"] = Field(description="How the run was started.")
-    status: Literal["queued", "running", "needs_approval", "paused", "completed", "failed"] = Field(
+    status: Literal["queued", "running", "needs_approval", "paused", "completed", "failed", "cancelled"] = Field(
         description="Current run status.",
     )
     current_stage: str = Field(description="Current execution stage.")
@@ -1794,6 +2017,10 @@ class ThreadState(BaseModel):
     """Short-term memory snapshot for a conversation thread."""
 
     thread_id: str = Field(description="Conversation thread id.")
+    bound_run_id: str | None = Field(
+        default=None,
+        description="The single conversion run bound to this workspace.",
+    )
     messages: list[ChatMessage] = Field(default_factory=list)
     pending_approval: ApprovalRequest | None = Field(default=None)
     current_run: ExecutionRun | None = Field(default=None)
@@ -1825,11 +2052,39 @@ class RunStartResponse(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
+class RunListResponse(BaseModel):
+    """Global saved-project list used by the History page."""
+
+    runs: list[ExecutionRun] = Field(default_factory=list)
+    total: int | None = Field(default=None, ge=0)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=6, ge=1)
+    total_pages: int | None = Field(default=None, ge=1)
+    has_more: bool = Field(default=False)
+
+
+class RunOpenResponse(BaseModel):
+    """Persisted run attached to its owning workspace."""
+
+    thread_id: str
+    run: ExecutionRun
+    snapshot: "AgentResponse"
+
+
+class HistoryPreviewResponse(BaseModel):
+    """Read-only URLs for existing files shown on a History card."""
+
+    run_id: str
+    input_preview_url: str | None = None
+    output_preview_url: str | None = None
+
+
 class AgentResponse(BaseModel):
     """Snapshot response for the current thread state."""
 
     thread_id: str = Field(description="The active conversation thread id.")
-    status: Literal["queued", "running", "needs_approval", "paused", "completed", "failed"] = Field(
+    bound_run_id: str | None = Field(default=None)
+    status: Literal["queued", "running", "needs_approval", "paused", "completed", "failed", "cancelled"] = Field(
         description="Current thread execution status.",
     )
     content: str | None = Field(
@@ -1846,6 +2101,7 @@ class AgentResponse(BaseModel):
     )
     current_run: ExecutionRun | None = Field(default=None)
     recent_runs: list[ExecutionRun] = Field(default_factory=list)
+    project_runs: list[ExecutionRun] = Field(default_factory=list)
 
 
 class ResumeResponse(RunStartResponse):
@@ -1863,19 +2119,30 @@ class FrontendDefaultsResponse(BaseModel):
     api_provider: str = Field(default="openai_compatible")
     api_format: str = Field(default="openai_responses")
     max_retries: int = Field(default=0)
+    transport_max_attempts: int = Field(default=1)
+    response_validation_max_attempts: int = Field(default=1)
     region_processing_mode: str = Field(default="serial")
     region_concurrency: int = Field(default=1)
     bbox_issue_concurrency: int = Field(default=1)
     bbox_issue_stagnation_rounds: int = Field(default=1)
     bbox_global_stagnation_rounds: int = Field(default=1)
+    bbox_initial_localization_max_attempts: int = Field(default=1)
+    bbox_refinement_max_rounds: int = Field(default=0)
+    bbox_global_stagnation_max_rounds: int = Field(default=1)
     workflow_mode: str = Field(default="region_object")
     agent_model: str = Field(default="")
     subagent_model: str = Field(default="")
     agent_name: str = Field(default="")
     use_previous_response_id: bool = Field(default=False)
     max_retry: int = Field(default=0)
+    region_repair_max_attempts: int = Field(default=0)
+    object_repair_max_attempts: int = Field(default=0)
+    fidelity_verification_max_attempts: int = Field(default=1)
+    fidelity_verification_independent_budget: bool = Field(default=False)
     fusion_max_retry: int = Field(default=3)
+    fusion_repair_max_attempts: int = Field(default=0)
     max_budget: int = Field(default=0)
+    run_model_call_budget: int = Field(default=0)
     supervisor_memory_enabled: bool = Field(default=False)
     supervisor_memory_persist_enabled: bool = Field(default=True)
     strategy_enabled: bool = Field(default=True)
@@ -1901,6 +2168,8 @@ class FrontendHostInfoResponse(BaseModel):
 class RuntimeOverridesPayload(BaseModel):
     """Persisted global runtime overrides shared by invoke and manual adjustment."""
 
+    model_config = ConfigDict(extra="forbid")
+
     api_key: str | None = Field(default=None)
     api_key_configured: bool | None = Field(
         default=None,
@@ -1913,20 +2182,18 @@ class RuntimeOverridesPayload(BaseModel):
     base_url: str | None = Field(default=None)
     api_provider: str | None = Field(default=None)
     api_format: str | None = Field(default=None)
-    max_retries: int | None = Field(default=None, ge=0)
     workflow_mode: Literal["initial_only", "region", "region_object"] | None = Field(default=None)
     region_processing_mode: Literal["serial", "parallel"] | None = Field(default=None)
     region_concurrency: int | None = Field(default=None, ge=1, le=16)
-    bbox_issue_concurrency: int | None = Field(default=None, ge=1, le=8)
-    bbox_issue_stagnation_rounds: int | None = Field(default=None, ge=1, le=8)
-    bbox_global_stagnation_rounds: int | None = Field(default=None, ge=1, le=8)
+    bbox_refinement_max_rounds: int | None = Field(default=None, ge=0)
     agent_model: str | None = Field(default=None)
     subagent_model: str | None = Field(default=None)
     agent_name: str | None = Field(default=None)
     use_previous_response_id: bool | None = Field(default=None)
-    max_retry: int | None = Field(default=None, ge=0)
-    fusion_max_retry: int | None = Field(default=None, ge=0)
-    max_budget: int | None = Field(default=None, ge=0)
+    region_repair_max_attempts: int | None = Field(default=None, ge=0)
+    object_repair_max_attempts: int | None = Field(default=None, ge=0)
+    fusion_repair_max_attempts: int | None = Field(default=None, ge=0)
+    run_model_call_budget: int | None = Field(default=None, ge=1)
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
     strategy_enabled: bool | None = Field(default=None)
@@ -1965,6 +2232,7 @@ class RetrySnapshot(BaseModel):
     """Persisted retry counters for resumable conversion runs."""
 
     max_retry: int = Field(default=0, ge=0)
+    limits: dict[str, int | bool] = Field(default_factory=dict)
     counts: dict[str, int] = Field(default_factory=dict)
     exhausted_tasks: list[str] = Field(default_factory=list)
 
@@ -2006,7 +2274,7 @@ class RunState(BaseModel):
     run_id: str
     thread_id: str | None = Field(default=None)
     project_name: str = Field(default="agent-run")
-    status: Literal["queued", "running", "paused", "completed", "failed"] = Field(default="queued")
+    status: Literal["queued", "running", "paused", "completed", "failed", "cancelled"] = Field(default="queued")
     pause_reason: str | None = Field(default=None)
     current_stage: str = Field(default="queued")
     resume_token: str | None = Field(default=None)
@@ -2036,8 +2304,8 @@ class ResumePlan(BaseModel):
 class ResumeRunRequest(BaseModel):
     """Request body for resuming a previous raster-to-SVG run from artifacts."""
 
-    run_dir: str = Field(description="Existing artifact run directory to continue.")
-    thread_id: str | None = Field(default=None, description="Optional thread to attach the resumed run to.")
+    run_id: str = Field(description="Owned run identifier to continue.")
+    thread_id: str = Field(description="Workspace thread that owns the run.")
     extra_budget: int | None = Field(default=None, ge=0, description="Optional additional model-call budget.")
     budget_mode: Literal["carry_forward", "top_up"] = Field(default="top_up")
 
@@ -2088,11 +2356,16 @@ class ArtifactRequestSummary(BaseModel):
     base_url: str | None = Field(default=None)
     api_format: str | None = Field(default=None)
     max_retries: int | None = Field(default=None)
+    transport_max_attempts: int | None = Field(default=None)
+    response_validation_max_attempts: int | None = Field(default=None)
     region_processing_mode: str | None = Field(default=None)
     region_concurrency: int | None = Field(default=None)
     bbox_issue_concurrency: int | None = Field(default=None)
     bbox_issue_stagnation_rounds: int | None = Field(default=None)
     bbox_global_stagnation_rounds: int | None = Field(default=None)
+    bbox_initial_localization_max_attempts: int | None = Field(default=None)
+    bbox_refinement_max_rounds: int | None = Field(default=None)
+    bbox_global_stagnation_max_rounds: int | None = Field(default=None)
     workflow_mode: str | None = Field(default=None)
     project_name: str | None = Field(default=None)
     agent_model: str | None = Field(default=None)
@@ -2100,8 +2373,14 @@ class ArtifactRequestSummary(BaseModel):
     agent_name: str | None = Field(default=None)
     use_previous_response_id: bool | None = Field(default=None)
     max_retry: int | None = Field(default=None)
+    region_repair_max_attempts: int | None = Field(default=None)
+    object_repair_max_attempts: int | None = Field(default=None)
+    fidelity_verification_max_attempts: int | None = Field(default=None)
+    fidelity_verification_independent_budget: bool | None = Field(default=None)
     fusion_max_retry: int | None = Field(default=None)
+    fusion_repair_max_attempts: int | None = Field(default=None)
     max_budget: int | None = Field(default=None)
+    run_model_call_budget: int | None = Field(default=None)
     supervisor_memory_enabled: bool | None = Field(default=None)
     supervisor_memory_persist_enabled: bool | None = Field(default=None)
     strategy_enabled: bool | None = Field(default=None)
@@ -2224,6 +2503,8 @@ class WorkflowTraceSummary(BaseModel):
 class WorkflowTrace(BaseModel):
     """Frontend-facing workflow trace tree."""
 
+    run_id: str | None = Field(default=None)
+    artifact_dir: str | None = Field(default=None)
     summary: WorkflowTraceSummary = Field(default_factory=WorkflowTraceSummary)
     nodes: list[WorkflowTraceNode] = Field(default_factory=list)
 
@@ -2377,37 +2658,3 @@ class ManualAdjustmentResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
     edit_strategy: str | None = Field(default=None)
     artifact_snapshot: ArtifactSnapshot
-
-
-class DebugReviewRequest(BaseModel):
-    """Request body for explicitly running standalone debug review tools."""
-
-    thread_id: str
-    run_id: str | None = Field(default=None)
-    scope: Literal["region", "object", "fusion"]
-    region_id: str | None = Field(default=None)
-    object_id: str | None = Field(default=None)
-
-
-class DebugReviewArtifacts(BaseModel):
-    """Artifact paths captured for one debug review invocation."""
-
-    source_image_path: str | None = Field(default=None)
-    crop_path: str | None = Field(default=None)
-    rendered_preview_path: str | None = Field(default=None)
-    svg_file_path: str | None = Field(default=None)
-    review_json_path: str | None = Field(default=None)
-    review_raw_path: str | None = Field(default=None)
-
-
-class DebugReviewResponse(BaseModel):
-    """Response returned by an explicit debug review invocation."""
-
-    ok: bool = Field(default=True)
-    run_id: str
-    scope: Literal["region", "object", "fusion"]
-    region_id: str | None = Field(default=None)
-    object_id: str | None = Field(default=None)
-    artifacts: DebugReviewArtifacts = Field(default_factory=DebugReviewArtifacts)
-    review: dict = Field(default_factory=dict)
-    raw_text: str = Field(default="")

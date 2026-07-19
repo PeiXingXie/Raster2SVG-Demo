@@ -34,6 +34,37 @@ async function parseJsonResponse(response) {
 }
 
 export async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
-  return parseJsonResponse(response);
+  const {
+    timeoutMs = 0,
+    signal: upstreamSignal,
+    ...fetchOptions
+  } = options;
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromUpstream = () => controller.abort(upstreamSignal?.reason);
+  if (upstreamSignal?.aborted) {
+    abortFromUpstream();
+  } else {
+    upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
+  }
+  const timeoutId = timeoutMs > 0
+    ? window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs)
+    : null;
+  try {
+    const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+    return await parseJsonResponse(response);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(timedOut ? `Request timed out after ${timeoutMs} ms` : "Request cancelled");
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
 }

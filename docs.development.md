@@ -1,6 +1,6 @@
 # Development Guide
 
-This document contains the detailed local development guide for the project.
+This document is the authoritative guide for local development environment setup, source startup, API configuration, development-mode port handling, and development troubleshooting.
 
 Use this document when your main goal is:
 
@@ -12,12 +12,14 @@ Use this document when your main goal is:
 
 For the project overview and documentation index, use [README.md](./README.md).
 For the shorter developer entrypoint, use [README.developer.md](./README.developer.md).
+For installer packaging and release builds, use [packaging/README.packaging.md](./packaging/README.packaging.md).
 
 ## Frontend Strategy
 
-- Web frontend remains the primary development and monitoring surface.
-- Desktop client reuses the same frontend instead of maintaining a second UI codebase.
-- SAM-based bbox refinement is wired as an optional refinement mode after region recognition, with local and remote provider interfaces reserved for future implementation.
+- Electron desktop is the current product validation surface.
+- The FastAPI-served browser page remains useful for development diagnostics, but it should not be treated as equivalent to the desktop product shell unless the project explicitly restores that path.
+- Desktop client reuses the same backend and shared frontend modules instead of maintaining a second conversion implementation.
+- SAM-based bbox refinement is legacy/transitioning functionality. Current lifecycle details are tracked in [architecture-summary/06-maintenance-and-evolution.md](./architecture-summary/06-maintenance-and-evolution.md).
 
 ## Backend, Frontend, and Desktop
 
@@ -34,6 +36,8 @@ python -m uvicorn deepagents_template.api:app --host 127.0.0.1 --port 8120 --rel
 ```
 
 you are starting the backend.
+
+Run this application with one Uvicorn worker. Conversion state, cooperative cancellation events, and the bounded execution queues are process-local; `--workers 2` or a multi-worker Gunicorn configuration is not supported. Parallel conversions are executed by the conversion worker pool inside the single API process. Manual refinements use a separate bounded pool configured by `SHAPE_STUDIO_MANUAL_ADJUSTMENT_WORKERS` and `SHAPE_STUDIO_MAX_QUEUED_MANUAL_ADJUSTMENTS`.
 
 ## Requirements
 
@@ -267,7 +271,7 @@ Useful variants:
 powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -Python py
 powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -UseActivePython
 powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -ForceBootstrap
-powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -ListenHost 0.0.0.0 -Port 8120
+powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -ListenHost 127.0.0.1 -Port 8120
 powershell -ExecutionPolicy Bypass -File .\start-dev.ps1 -Desktop -SkipBootstrap
 ```
 
@@ -297,7 +301,7 @@ Useful variants:
 PYTHON_BIN=python3 ./start-dev.sh
 USE_ACTIVE_PYTHON=true ./start-dev.sh
 FORCE_BOOTSTRAP=true ./start-dev.sh
-APP_HOST=0.0.0.0 APP_PORT=8120 ./start-dev.sh
+APP_HOST=127.0.0.1 APP_PORT=8120 ./start-dev.sh
 SKIP_BOOTSTRAP=true ./start-dev.sh
 ```
 
@@ -327,7 +331,7 @@ Useful variants:
 PYTHON_BIN=python3 ./start-dev.sh
 USE_ACTIVE_PYTHON=true ./start-dev.sh
 FORCE_BOOTSTRAP=true ./start-dev.sh
-APP_HOST=0.0.0.0 APP_PORT=8120 ./start-dev.sh
+APP_HOST=127.0.0.1 APP_PORT=8120 ./start-dev.sh
 SKIP_BOOTSTRAP=true ./start-dev.sh
 ```
 
@@ -592,10 +596,7 @@ The startup summary now explicitly prints:
 
 ## Default Access URLs
 
-After backend startup, the shared frontend is usually available at:
-
-- `http://127.0.0.1:8120/`
-- `http://<server-ip>:8120/` when listening on `0.0.0.0`
+After backend startup, the shared frontend is available only from the same computer, usually at `http://127.0.0.1:8120/`.
 
 Useful endpoints:
 
@@ -631,3 +632,6 @@ Current intent:
 - [README.developer.md](./README.developer.md)
 - [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)
 - [desktop/README.desktop.md](./desktop/README.desktop.md)
+- [packaging/README.packaging.md](./packaging/README.packaging.md)
+- [docs.settings-mapping.md](./docs.settings-mapping.md)
+- [architecture-summary/README.md](./architecture-summary/README.md)

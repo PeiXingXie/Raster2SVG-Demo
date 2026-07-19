@@ -1,5 +1,5 @@
-import { fetchJson } from "./api-client.js";
-import { elements } from "./dom.js?v=refine-activity-feed-1";
+import { fetchJson } from "./api-client.js?v=workspace-session-isolation-5";
+import { elements } from "./dom.js?v=workspace-tabs-1";
 import {
   applyFrontendDefaults,
   applyRuntimeOverrides,
@@ -11,13 +11,15 @@ import {
   getMessageEffectiveValue,
   MESSAGE_PRESET_TEXT,
   pickLocalFileFromHost,
+  resetInputImageSelection,
+  syncUploadPreviewFromState,
   updateEffectiveValues,
   updateMessagePresetSelection,
   uploadLocalFile,
-} from "./form.js?v=run-start-state-boundary-1";
-import { appState, resetRenderState, resetUiSelections } from "./state.js?v=run-start-state-boundary-1";
+} from "./form.js?v=desktop-retry-settings-1";
+import { appState, renderState, resetRenderState, resetUiSelections } from "./state.js?v=workspace-session-isolation-5";
 import { applySettingsLabelMappings } from "./settings-labels.js?v=desktop-history-jump-1";
-import { renderApproval } from "./renderers/conversation.js?v=run-start-state-boundary-1";
+import { renderApproval } from "./renderers/conversation.js?v=workspace-session-isolation-5";
 import {
   clearArtifactPanel,
   createOverlayPreview,
@@ -27,15 +29,986 @@ import {
   renderManualRecentActivity,
   renderManualWorkflowTrace,
   renderArtifactSummary,
+  renderWorkspaceRecentActivity,
   renderWorkspaceArtifactLoadingState,
   updateWorkflowTraceTimers,
-} from "./renderers/artifacts.js?v=refine-activity-feed-1";
-import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=run-start-state-boundary-1";
+} from "./renderers/artifacts.js?v=workspace-scroll-stability-1";
+import { renderRecentRuns, renderRunSummary, renderTimeline } from "./renderers/monitor.js?v=workspace-session-isolation-5";
 import { arrayBufferToBase64, formatElapsedDuration, scrollIntoContainerView, stableStringify } from "./utils.js";
 
 const UI_MODE_STORAGE_KEY = "raster-svg-demo-ui-mode";
+const WORKSPACE_TABS_STORAGE_KEY = "shape-studio-workspace-tabs-v1";
+const WORKSPACE_BACKGROUND_POLL_MS = 5000;
+const WORKSPACE_BACKGROUND_REQUEST_TIMEOUT_MS = 12000;
+const WORKSPACE_LIVE_REQUEST_TIMEOUT_MS = 15000;
+const MAX_RETAINED_WORKSPACE_SESSIONS = 50;
 let sendButtonLockedByRuntime = false;
-let sendRequestInFlight = false;
+let workspaceRequestSequence = 0;
+let workspaceSelectionSequence = 0;
+let newWorkspaceRequestPromise = null;
+let conversionSubmissionInFlight = false;
+const historyManagementRunIds = new Set();
+
+const WORKSPACE_STATE_KEYS = [
+  "artifactCache",
+  "latestArtifactSnapshot",
+  "linkedMessageIndex",
+  "localUpload",
+  "manualAdjustmentBaseRunId",
+  "manualAdjustmentRequestInFlight",
+  "manualConfirmedTarget",
+  "manualConfirmedReferenceSelection",
+  "manualCustomReferenceConfirmed",
+  "manualReferenceAutoOpenedForTarget",
+  "manualReferenceMode",
+  "manualReferenceUploads",
+  "manualReferenceSelectionMode",
+  "manualReferenceSelectionShape",
+  "manualSelectionBox",
+  "manualSelectionMode",
+  "manualSelectionShape",
+  "messagePreset",
+  "pendingApproval",
+  "refinePanelUnlocked",
+  "selectedEventIndex",
+  "selectedManualAdjustmentId",
+  "outputFrameFollowMode",
+  "outputFrameAutoFollow",
+  "selectedOutputFrameId",
+  "selectedOutputFrameIndex",
+  "selectedOverlay",
+  "selectedRunId",
+  "snapshot",
+  "snapshotRequestGeneration",
+  "snapshotRequestInFlight",
+  "artifactRequestGeneration",
+  "artifactRequestInFlight",
+  "threadId",
+  "deletedRunArtifactDirs",
+  "deletedRunIds",
+  "dismissedFailureDialogs",
+];
+
+const RUN_MANUAL_STATE_KEYS = [
+  "manualAdjustmentBaseRunId",
+  "manualAdjustmentRequestInFlight",
+  "manualConfirmedTarget",
+  "manualConfirmedReferenceSelection",
+  "manualCustomReferenceConfirmed",
+  "manualReferenceAutoOpenedForTarget",
+  "manualReferenceMode",
+  "manualReferenceUploads",
+  "manualReferenceSelectionMode",
+  "manualReferenceSelectionShape",
+  "manualSelectionBox",
+  "manualSelectionMode",
+  "manualSelectionShape",
+  "refinePanelUnlocked",
+  "selectedManualAdjustmentId",
+];
+
+function createEmptyWorkspaceState(threadId) {
+  return {
+    artifactCache: new Map(),
+    latestArtifactSnapshot: null,
+    linkedMessageIndex: null,
+    localUpload: null,
+    manualAdjustmentBaseRunId: null,
+    manualAdjustmentRequestInFlight: false,
+    manualConfirmedTarget: null,
+    manualConfirmedReferenceSelection: null,
+    manualCustomReferenceConfirmed: false,
+    manualReferenceAutoOpenedForTarget: false,
+    manualReferenceMode: "default",
+    manualReferenceUploads: [],
+    manualReferenceSelectionMode: "select",
+    manualReferenceSelectionShape: null,
+    manualSelectionBox: null,
+    manualSelectionMode: "select",
+    manualSelectionShape: null,
+    messagePreset: "default",
+    pendingApproval: null,
+    refinePanelUnlocked: false,
+    selectedEventIndex: null,
+    selectedManualAdjustmentId: null,
+    outputFrameFollowMode: "auto",
+    outputFrameAutoFollow: true,
+    selectedOutputFrameId: null,
+    selectedOutputFrameIndex: 0,
+    selectedOverlay: { type: "region", regionId: null, objectId: null },
+    selectedRunId: null,
+    snapshot: null,
+    snapshotRequestGeneration: 0,
+    snapshotRequestInFlight: false,
+    artifactRequestGeneration: 0,
+    artifactRequestInFlight: false,
+    threadId,
+    deletedRunArtifactDirs: new Set(),
+    deletedRunIds: new Set(),
+    dismissedFailureDialogs: new Set(),
+  };
+}
+
+function createEmptyWorkspaceDraft() {
+  return {
+    message: MESSAGE_PRESET_TEXT.default,
+    imagePath: "",
+    projectName: "",
+    workflowMode: "",
+    regionProcessingMode: "",
+    regionConcurrency: "",
+    messagePreset: "default",
+  };
+}
+
+function createEmptyManualDraft() {
+  return {
+    userIntroduction: "",
+    targetDescription: "",
+    mode: "worker",
+    agentBudget: "",
+    regionId: "",
+    objectIds: "",
+    referencePaths: "",
+    referenceMode: "default",
+    useReferenceImages: true,
+    includeDefaultCrop: true,
+  };
+}
+
+function readManualDraft() {
+  return {
+    userIntroduction: elements.manualUserIntroduction?.value || "",
+    targetDescription: elements.manualTargetDescription?.value || "",
+    mode: elements.manualMode?.value || "worker",
+    agentBudget: elements.manualAgentBudget?.value || "",
+    regionId: elements.manualRegionId?.value || "",
+    objectIds: elements.manualObjectIds?.value || "",
+    referencePaths: elements.manualReferencePaths?.value || "",
+    referenceMode: appState.manualReferenceMode || "default",
+    useReferenceImages: Boolean(elements.manualUseReferenceImages?.checked),
+    includeDefaultCrop: Boolean(elements.manualIncludeDefaultCrop?.checked),
+  };
+}
+
+function applyManualDraft(session) {
+  const draft = { ...createEmptyManualDraft(), ...(session?.manualDraft || {}) };
+  elements.manualUserIntroduction.value = draft.userIntroduction;
+  elements.manualTargetDescription.value = draft.targetDescription;
+  elements.manualMode.value = draft.mode;
+  elements.manualAgentBudget.value = draft.agentBudget;
+  elements.manualRegionId.value = draft.regionId;
+  elements.manualObjectIds.value = draft.objectIds;
+  elements.manualReferencePaths.value = draft.referencePaths;
+  appState.manualReferenceMode = draft.referenceMode;
+  if (session?.state) {
+    session.state.manualReferenceMode = draft.referenceMode;
+  }
+  elements.manualUseReferenceImages.checked = draft.useReferenceImages;
+  elements.manualIncludeDefaultCrop.checked = draft.includeDefaultCrop;
+  writeManualSelectionBox(session?.state?.manualSelectionBox || null);
+}
+
+function releaseWorkspaceSessionResources(session) {
+  const urls = new Set();
+  if (session?.state?.localUpload?.previewObjectUrl) {
+    urls.add(session.state.localUpload.previewObjectUrl);
+  }
+  for (const upload of session?.state?.manualReferenceUploads || []) {
+    if (upload?.previewObjectUrl) {
+      urls.add(upload.previewObjectUrl);
+    }
+  }
+  for (const url of urls) {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function resetWorkspaceManualState(session) {
+  if (!session?.state) {
+    return;
+  }
+  for (const upload of session.state.manualReferenceUploads || []) {
+    if (upload?.previewObjectUrl) {
+      URL.revokeObjectURL(upload.previewObjectUrl);
+    }
+  }
+  for (const kind of ["manual-adjust", "manual-reference-upload"]) {
+    if (session.operations?.[kind] != null) {
+      session.operations[kind] = ++workspaceRequestSequence;
+    }
+    if (session.operationInFlight) {
+      session.operationInFlight[kind] = false;
+    }
+  }
+  const emptyState = createEmptyWorkspaceState(session.threadId);
+  for (const key of RUN_MANUAL_STATE_KEYS) {
+    session.state[key] = emptyState[key];
+  }
+  session.manualDraft = createEmptyManualDraft();
+  if (session.tabId === appState.activeWorkspaceTabId && session.threadId === appState.threadId) {
+    for (const key of RUN_MANUAL_STATE_KEYS) {
+      appState[key] = session.state[key];
+    }
+    applyManualDraft(session);
+  }
+}
+
+function pruneWorkspaceSessions() {
+  const removable = appState.workspaceTabOrder
+    .map((tabId) => appState.workspaceSessions.get(tabId))
+    .filter((session) => (
+      session
+      && session.tabId !== appState.activeWorkspaceTabId
+      && session.open === false
+      && !["queued", "running", "needs_approval"].includes(getWorkspaceSessionStatus(session))
+    ))
+    .sort((left, right) => (left.updatedAt || 0) - (right.updatedAt || 0));
+  while (appState.workspaceSessions.size > MAX_RETAINED_WORKSPACE_SESSIONS && removable.length) {
+    const session = removable.shift();
+    releaseWorkspaceSessionResources(session);
+    appState.workspaceSessions.delete(session.tabId);
+    appState.workspaceTabOrder = appState.workspaceTabOrder.filter((tabId) => tabId !== session.tabId);
+  }
+}
+
+function readWorkspaceDraft() {
+  return {
+    message: elements.messageInput?.value || MESSAGE_PRESET_TEXT.default,
+    imagePath: elements.imagePath?.value || "",
+    projectName: elements.projectName?.value || "",
+    workflowMode: elements.workflowMode?.value || "",
+    regionProcessingMode: elements.regionProcessingMode?.value || "",
+    regionConcurrency: elements.regionConcurrency?.value || "",
+    messagePreset: appState.messagePreset || "default",
+  };
+}
+
+function applyWorkspaceDraft(session) {
+  const draft = session?.draft || createEmptyWorkspaceDraft();
+  elements.messageInput.value = draft.message || MESSAGE_PRESET_TEXT.default;
+  elements.imagePath.value = draft.imagePath || "";
+  elements.projectName.value = draft.projectName || "";
+  elements.workflowMode.value = draft.workflowMode || "";
+  elements.regionProcessingMode.value = draft.regionProcessingMode || "";
+  elements.regionConcurrency.value = draft.regionConcurrency || "";
+  appState.messagePreset = draft.messagePreset || "default";
+  elements.messageInput.dataset.messagePreset = appState.messagePreset;
+  applyManualDraft(session);
+  syncUploadPreviewFromState();
+  updateEffectiveValues();
+  updateMessagePresetSelection();
+  updateStartRuntimeHint();
+}
+
+function beginWorkspaceOperation(kind) {
+  const session = appState.workspaceSessions.get(appState.activeWorkspaceTabId) || null;
+  const operation = {
+    id: ++workspaceRequestSequence,
+    kind,
+    tabId: session?.tabId || null,
+    threadId: appState.threadId,
+  };
+  if (session) {
+    session.manualDraft = readManualDraft();
+    session.operations = session.operations || {};
+    session.operations[kind] = operation.id;
+    session.operationInFlight = session.operationInFlight || {};
+    session.operationInFlight[kind] = true;
+    session.lastError = null;
+    session.hasUnreadError = false;
+  }
+  return operation;
+}
+
+function finishWorkspaceOperation(operation) {
+  const session = getOperationSession(operation);
+  if (session) {
+    session.operationInFlight = session.operationInFlight || {};
+    session.operationInFlight[operation.kind] = false;
+  }
+  return session;
+}
+
+function recordWorkspaceOperationError(operation, error, fallbackMessage) {
+  const session = getOperationSession(operation);
+  if (!session) {
+    return null;
+  }
+  const message = error?.message || fallbackMessage;
+  session.lastError = {
+    kind: operation.kind,
+    message,
+    timestamp: Date.now(),
+  };
+  session.hasUnreadError = !isOperationActive(operation);
+  renderWorkspaceTabs();
+  persistWorkspaceTabs();
+  if (isOperationActive(operation)) {
+    setStatus(message);
+  }
+  return session;
+}
+
+function isActiveWorkspaceOperationInFlight(kind) {
+  const session = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  return Boolean(session?.operationInFlight?.[kind]);
+}
+
+function getOperationSession(operation) {
+  const session = operation?.tabId ? appState.workspaceSessions.get(operation.tabId) : null;
+  if (!session || session.threadId !== operation.threadId || session.operations?.[operation.kind] !== operation.id) {
+    return null;
+  }
+  return session;
+}
+
+function isOperationActive(operation) {
+  return Boolean(
+    getOperationSession(operation)
+    && appState.activeWorkspaceTabId === operation.tabId
+    && appState.threadId === operation.threadId
+  );
+}
+
+function getWorkspaceSessionRun(session) {
+  if (!session?.boundRunId) {
+    return null;
+  }
+  const snapshot = session.tabId === appState.activeWorkspaceTabId
+    ? appState.snapshot
+    : session.state?.snapshot;
+  return snapshot?.current_run?.run_id === session.boundRunId
+    ? snapshot.current_run
+    : null;
+}
+
+function getWorkspaceSessionStatus(session) {
+  const snapshot = session?.tabId === appState.activeWorkspaceTabId ? appState.snapshot : session?.state?.snapshot;
+  if (!session?.boundRunId) {
+    return "draft";
+  }
+  return String(snapshot?.current_run?.status || snapshot?.status || session?.status || "draft").toLowerCase();
+}
+
+function getWorkspaceSessionTitle(session) {
+  return getWorkspaceSessionRun(session)?.project_name || session?.title || "New conversion";
+}
+
+function captureActiveWorkspaceSession() {
+  const tabId = appState.activeWorkspaceTabId;
+  const session = tabId ? appState.workspaceSessions.get(tabId) : null;
+  if (!session) {
+    return;
+  }
+  for (const key of WORKSPACE_STATE_KEYS) {
+    session.state[key] = appState[key];
+  }
+  session.draft = readWorkspaceDraft();
+  session.manualDraft = readManualDraft();
+  session.state.snapshot = appState.snapshot;
+  session.state.latestArtifactSnapshot = appState.latestArtifactSnapshot;
+  const currentRun = appState.snapshot?.current_run;
+  session.title = currentRun?.project_name || getWorkspaceSessionTitle(session);
+  session.status = currentRun?.status || appState.snapshot?.status || session.status || "draft";
+  session.loaded = true;
+  session.updatedAt = Date.now();
+}
+
+function persistWorkspaceTabs() {
+  try {
+    pruneWorkspaceSessions();
+    const sessions = appState.workspaceTabOrder
+      .map((tabId) => appState.workspaceSessions.get(tabId))
+      .filter((session) => session?.boundRunId && session.open !== false)
+      .map((session) => ({
+        tabId: session.tabId,
+        threadId: session.threadId,
+        boundRunId: session.boundRunId,
+        source: session.source,
+        title: getWorkspaceSessionTitle(session),
+        open: session.open !== false,
+        hasStarted: Boolean(session.hasStarted),
+        draft: session.draft || createEmptyWorkspaceDraft(),
+        manualDraft: session.manualDraft || createEmptyManualDraft(),
+        lastError: session.lastError || null,
+      }));
+    window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify({
+      activeTabId: appState.activeWorkspaceTabId,
+      sessions,
+    }));
+  } catch {
+    // Session restoration is optional when browser storage is unavailable.
+  }
+}
+
+function restoreWorkspaceTabs() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(WORKSPACE_TABS_STORAGE_KEY) || "null");
+    if (!stored || !Array.isArray(stored.sessions) || !stored.sessions.length) {
+      return false;
+    }
+    for (const item of stored.sessions) {
+      const boundRunId = item?.boundRunId || null;
+      if (item?.open === false || !item?.threadId || !boundRunId || appState.workspaceSessions.has(boundRunId)) {
+        continue;
+      }
+      appState.workspaceSessions.set(boundRunId, {
+        tabId: boundRunId,
+        threadId: item.threadId,
+        boundRunId,
+        source: item.source || "history",
+        title: item.title || "Saved conversion",
+        status: "draft",
+        hasStarted: Boolean(item.hasStarted),
+        draft: { ...createEmptyWorkspaceDraft(), ...(item.draft || {}) },
+        manualDraft: { ...createEmptyManualDraft(), ...(item.manualDraft || {}) },
+        open: true,
+        loaded: false,
+        lastError: item.lastError || null,
+        hasUnreadError: Boolean(item.lastError),
+        state: createEmptyWorkspaceState(item.threadId),
+      });
+      appState.workspaceTabOrder.push(boundRunId);
+    }
+    const fallback = appState.workspaceTabOrder.find((tabId) => appState.workspaceSessions.get(tabId)?.open !== false)
+      || appState.workspaceTabOrder[0];
+    const requested = appState.workspaceSessions.has(stored.activeTabId) ? stored.activeTabId : fallback;
+    const session = appState.workspaceSessions.get(requested);
+    if (!session) {
+      return false;
+    }
+    session.open = true;
+    appState.activeWorkspaceTabId = requested;
+    for (const key of WORKSPACE_STATE_KEYS) {
+      appState[key] = session.state[key];
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function restorePersistedWorkspaceSessions() {
+  const sessions = appState.workspaceTabOrder
+    .map((tabId) => appState.workspaceSessions.get(tabId))
+    .filter((session) => session?.boundRunId);
+  const results = await Promise.allSettled(
+    sessions.map(async (session) => {
+      const data = await fetchJson(`/runs/${encodeURIComponent(session.boundRunId)}/open`, {
+        method: "POST",
+        timeoutMs: WORKSPACE_LIVE_REQUEST_TIMEOUT_MS,
+      });
+      session.threadId = data.thread_id;
+      session.title = data.run.project_name || session.title;
+      session.status = data.run.status || session.status;
+      session.loaded = true;
+      session.state = createEmptyWorkspaceState(data.thread_id);
+      session.state.snapshot = data.snapshot;
+      return session;
+    }),
+  );
+  for (const [index, result] of results.entries()) {
+    if (result.status === "fulfilled") {
+      continue;
+    }
+    const session = sessions[index];
+    session.open = false;
+    session.lastError = {
+      kind: "restore",
+      message: result.reason?.message || "Saved workspace could not be restored.",
+      timestamp: Date.now(),
+    };
+  }
+  const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (!activeSession?.open) {
+    appState.activeWorkspaceTabId = appState.workspaceTabOrder.find(
+      (tabId) => appState.workspaceSessions.get(tabId)?.open,
+    ) || null;
+  }
+  const selected = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (selected) {
+    for (const key of WORKSPACE_STATE_KEYS) {
+      appState[key] = selected.state[key];
+    }
+  }
+}
+
+function registerCurrentWorkspaceSession(title = "New conversion") {
+  if (!appState.threadId) {
+    return null;
+  }
+  const tabId = appState.threadId;
+  let session = appState.workspaceSessions.get(tabId);
+  if (!session) {
+    session = {
+      tabId,
+      threadId: appState.threadId,
+      boundRunId: null,
+      source: "draft",
+      title,
+      status: "draft",
+      hasStarted: title !== "New conversion",
+      draft: readWorkspaceDraft(),
+      manualDraft: readManualDraft(),
+      open: true,
+      loaded: true,
+      state: createEmptyWorkspaceState(appState.threadId),
+    };
+    appState.workspaceSessions.set(tabId, session);
+    appState.workspaceTabOrder.push(tabId);
+  }
+  session.open = true;
+  if (title !== "New conversion") {
+    session.hasStarted = true;
+  }
+  appState.activeWorkspaceTabId = tabId;
+  captureActiveWorkspaceSession();
+  renderWorkspaceTabs();
+  persistWorkspaceTabs();
+  return session;
+}
+
+function createWorkspaceStatusDot(status) {
+  const dot = document.createElement("span");
+  dot.className = "workspace-tab-status";
+  dot.setAttribute("aria-hidden", "true");
+  dot.dataset.status = status;
+  return dot;
+}
+
+function revealActiveWorkspaceTab() {
+  window.requestAnimationFrame(() => {
+    if (document.body.dataset.desktopPage !== "workspace") {
+      return;
+    }
+    const tabList = elements.workspaceTabList;
+    if (!(tabList instanceof HTMLElement)) {
+      return;
+    }
+    const activeTab = elements.workspaceTabList?.querySelector(".workspace-tab.is-active");
+    if (!(activeTab instanceof HTMLElement)) {
+      return;
+    }
+    const listRect = tabList.getBoundingClientRect();
+    const tabRect = activeTab.getBoundingClientRect();
+    const overflowStart = tabRect.left - listRect.left;
+    const overflowEnd = tabRect.right - listRect.right;
+    if (overflowStart >= 0 && overflowEnd <= 0) {
+      return;
+    }
+    const nextLeft = tabList.scrollLeft + (overflowStart < 0 ? overflowStart : overflowEnd);
+    tabList.scrollTo({
+      left: Math.max(0, nextLeft),
+      behavior: "smooth",
+    });
+  });
+}
+
+function renderWorkspaceTabs() {
+  if (!elements.workspaceTabList) {
+    return;
+  }
+  const openSessions = appState.workspaceTabOrder
+    .map((tabId) => appState.workspaceSessions.get(tabId))
+    .filter((session) => session?.boundRunId && session.open !== false);
+  elements.workspaceTabList.replaceChildren();
+  for (const session of openSessions) {
+    const status = getWorkspaceSessionStatus(session);
+    const displayStatus = session.hasUnreadError ? "failed" : status;
+    const title = getWorkspaceSessionTitle(session);
+    const tab = document.createElement("div");
+    tab.className = "workspace-tab";
+    tab.dataset.tabId = session.tabId;
+    tab.dataset.status = displayStatus;
+    tab.classList.toggle("is-active", session.tabId === appState.activeWorkspaceTabId);
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "workspace-tab-select";
+    select.setAttribute("role", "tab");
+    select.setAttribute("aria-selected", session.tabId === appState.activeWorkspaceTabId ? "true" : "false");
+    select.tabIndex = session.tabId === appState.activeWorkspaceTabId ? 0 : -1;
+    select.title = session.hasUnreadError
+      ? `${title} - ${session.lastError?.message || "operation failed"}`
+      : `${title} - ${status.replace("_", " ")}`;
+    select.append(createWorkspaceStatusDot(displayStatus));
+    const label = document.createElement("span");
+    label.className = "workspace-tab-title";
+    label.textContent = title;
+    select.append(label);
+    select.addEventListener("click", () => void selectWorkspaceTab(session.tabId));
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "workspace-tab-close";
+    close.setAttribute("aria-label", `Close ${title}`);
+    close.title = "Close tab";
+    close.textContent = "\u00d7";
+    close.addEventListener("click", () => void closeWorkspaceTab(session.tabId));
+    tab.append(select, close);
+    elements.workspaceTabList.append(tab);
+  }
+
+  const running = openSessions.filter((session) => getWorkspaceSessionStatus(session) === "running").length;
+  const queued = openSessions.filter((session) => getWorkspaceSessionStatus(session) === "queued").length;
+  if (elements.workspaceTabSummary) {
+    elements.workspaceTabSummary.textContent = running || queued
+      ? `Running ${running} \u00b7 Queued ${queued}`
+      : openSessions.length
+        ? `${openSessions.length} project${openSessions.length === 1 ? "" : "s"}`
+        : "No active projects";
+  }
+  if (elements.workspaceTabMenu) {
+    elements.workspaceTabMenu.replaceChildren();
+    for (const session of openSessions) {
+      const status = getWorkspaceSessionStatus(session);
+      const displayStatus = session.hasUnreadError ? "failed" : status;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "workspace-tab-menu-item";
+      item.classList.toggle("is-active", session.tabId === appState.activeWorkspaceTabId);
+      item.setAttribute("role", "menuitem");
+      item.append(createWorkspaceStatusDot(displayStatus));
+      const title = document.createElement("span");
+      title.className = "workspace-tab-menu-title";
+      title.textContent = getWorkspaceSessionTitle(session);
+      const state = document.createElement("span");
+      state.className = "workspace-tab-menu-state";
+      state.textContent = session.hasUnreadError ? "operation failed" : status.replace("_", " ");
+      item.append(title, state);
+      item.addEventListener("click", () => {
+        elements.workspaceTabMenu.hidden = true;
+        elements.workspaceTabOverflow?.setAttribute("aria-expanded", "false");
+        session.open = true;
+        void selectWorkspaceTab(session.tabId);
+      });
+      elements.workspaceTabMenu.append(item);
+    }
+  }
+  revealActiveWorkspaceTab();
+}
+
+async function selectWorkspaceTab(tabId, { refresh = true, navigate = true } = {}) {
+  const selectionId = ++workspaceSelectionSequence;
+  const session = appState.workspaceSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+  if (tabId !== appState.activeWorkspaceTabId) {
+    captureActiveWorkspaceSession();
+    stopSnapshotPolling();
+    stopArtifactPolling();
+    stopManualAdjustmentPolling();
+    invalidateLiveRequests();
+    appState.activeWorkspaceTabId = tabId;
+    session.open = true;
+    document.body.dataset.workspaceEmpty = session.boundRunId ? "false" : "true";
+    for (const key of WORKSPACE_STATE_KEYS) {
+      appState[key] = session.state[key];
+    }
+    appState.snapshotTimer = null;
+    appState.artifactTimer = null;
+    appState.manualAdjustmentPollTimer = null;
+    invalidateLiveRequests();
+    applyWorkspaceDraft(session);
+    resetRenderState();
+    elements.threadId.textContent = appState.threadId;
+    renderViews();
+    if (appState.latestArtifactSnapshot) {
+      renderArtifactViews(appState.latestArtifactSnapshot);
+    } else {
+      clearArtifactPanel();
+      if (elements.artifactStatus) {
+        elements.artifactStatus.textContent = "No artifact is available for this conversion yet.";
+      }
+      if (elements.compareInputMessage) {
+        elements.compareInputMessage.textContent = "No instruction yet.";
+      }
+      renderWorkspaceActivityForSnapshot(null, { clearWhenEmpty: true });
+      renderManualAdjustmentPanel(null);
+      updateWorkflowTraceSummary(null);
+      updateWorkspaceActionAvailability(null);
+    }
+  }
+  renderWorkspaceTabs();
+  persistWorkspaceTabs();
+  if (navigate) {
+    document.querySelector('[data-desktop-page-target="workspace"]')?.click();
+  }
+  if (refresh) {
+    try {
+      await refreshSnapshot({ silent: true, force: true });
+      session.monitorError = null;
+    } catch (error) {
+      session.monitorError = error?.message || "Workspace refresh failed";
+      if (selectionId === workspaceSelectionSequence && appState.activeWorkspaceTabId === tabId) {
+        setStatus(session.monitorError);
+      }
+    }
+  }
+  if (selectionId !== workspaceSelectionSequence || appState.activeWorkspaceTabId !== tabId) {
+    return;
+  }
+  if (appState.manualAdjustmentRequestInFlight) {
+    startManualAdjustmentPolling();
+  }
+  updateStartRuntimeHint();
+  if (session.hasUnreadError && session.lastError?.message) {
+    session.hasUnreadError = false;
+    setStatus(session.lastError.message);
+    showDesktopToast(`${getWorkspaceSessionTitle(session)}: ${session.lastError.message}`);
+    renderWorkspaceTabs();
+    persistWorkspaceTabs();
+  }
+}
+
+function renderDefaultWorkspaceSkeleton() {
+  document.body.dataset.workspaceEmpty = "true";
+  appState.latestArtifactSnapshot = null;
+  appState.selectedRunId = null;
+  clearArtifactPanel();
+  if (elements.artifactStatus) {
+    elements.artifactStatus.textContent = "No active project. Workspace is ready for a conversion.";
+  }
+  if (elements.compareInputMessage) {
+    elements.compareInputMessage.textContent = "No project selected.";
+  }
+  renderWorkspaceActivityForSnapshot(null, { clearWhenEmpty: true });
+  renderManualAdjustmentPanel(null);
+  updateWorkflowTraceSummary(null);
+  updateWorkspaceActionAvailability(null);
+  if (elements.resumeRun) {
+    elements.resumeRun.disabled = true;
+  }
+  if (elements.desktopStopRun) {
+    elements.desktopStopRun.disabled = true;
+  }
+}
+
+async function ensureWorkspaceDisplayState() {
+  const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (activeSession?.boundRunId && activeSession.open !== false) {
+    document.body.dataset.workspaceEmpty = "false";
+    return;
+  }
+  if (activeSession && !activeSession.boundRunId) {
+    renderDefaultWorkspaceSkeleton();
+    return;
+  }
+  const fallbackTabId = appState.workspaceTabOrder.find(
+    (tabId) => appState.workspaceSessions.get(tabId)?.boundRunId
+      && appState.workspaceSessions.get(tabId)?.open !== false,
+  );
+  if (fallbackTabId) {
+    await selectWorkspaceTab(fallbackTabId, { navigate: false });
+    return;
+  }
+  renderDefaultWorkspaceSkeleton();
+}
+
+async function closeWorkspaceTab(tabId) {
+  const session = appState.workspaceSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+  const status = getWorkspaceSessionStatus(session);
+  if (["queued", "running"].includes(status)) {
+    const confirmed = await confirmDesktopAction({
+      title: "Close Running Tab",
+      message: "This conversion will continue in the background. You can reopen it from History.",
+      confirmLabel: "Close Tab",
+      cancelLabel: "Keep Open",
+    });
+    if (!confirmed) {
+      return;
+    }
+  }
+  const wasActive = tabId === appState.activeWorkspaceTabId;
+  session.open = false;
+  if (wasActive) {
+    captureActiveWorkspaceSession();
+    stopSnapshotPolling();
+    stopArtifactPolling();
+    stopManualAdjustmentPolling();
+    invalidateLiveRequests();
+  }
+  releaseWorkspaceSessionResources(session);
+  appState.workspaceSessions.delete(tabId);
+  appState.workspaceTabOrder = appState.workspaceTabOrder.filter((candidate) => candidate !== tabId);
+
+  if (wasActive) {
+    appState.activeWorkspaceTabId = null;
+    const nextTabId = appState.workspaceTabOrder.find(
+      (candidate) => appState.workspaceSessions.get(candidate)?.boundRunId,
+    );
+    if (nextTabId) {
+      await selectWorkspaceTab(nextTabId);
+    } else {
+      appState.activeWorkspaceTabId = null;
+      appState.threadId = null;
+      appState.snapshot = null;
+      appState.latestArtifactSnapshot = null;
+      renderDefaultWorkspaceSkeleton();
+    }
+  }
+  renderWorkspaceTabs();
+  persistWorkspaceTabs();
+}
+
+async function startNewWorkspaceSession({
+  navigate = true,
+  initialDraft = null,
+  initialUpload = null,
+} = {}) {
+  if (newWorkspaceRequestPromise) {
+    return newWorkspaceRequestPromise;
+  }
+  captureActiveWorkspaceSession();
+  const previousSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (previousSession && ["queued", "running"].includes(getWorkspaceSessionStatus(previousSession))) {
+    previousSession.loaded = false;
+  }
+  elements.workspaceNewTab.disabled = true;
+  elements.newThread.disabled = true;
+  const request = (async () => {
+    const data = await fetchJson("/threads", { method: "POST" });
+    const state = createEmptyWorkspaceState(data.thread_id);
+    if (initialUpload) {
+      state.localUpload = initialUpload;
+    }
+    const session = {
+      tabId: data.thread_id,
+      threadId: data.thread_id,
+      boundRunId: null,
+      source: "draft",
+      title: "New conversion",
+      status: "draft",
+      hasStarted: false,
+      open: true,
+      loaded: true,
+      draft: initialDraft ? { ...initialDraft } : createEmptyWorkspaceDraft(),
+      manualDraft: createEmptyManualDraft(),
+      state,
+    };
+    if (initialDraft && previousSession) {
+      previousSession.draft = createEmptyWorkspaceDraft();
+      if (previousSession.state.localUpload === initialUpload) {
+        previousSession.state.localUpload = null;
+      }
+    }
+    appState.workspaceSessions.set(session.tabId, session);
+    appState.workspaceTabOrder.push(session.tabId);
+    appState.activeWorkspaceTabId = session.tabId;
+    for (const key of WORKSPACE_STATE_KEYS) {
+      appState[key] = session.state[key];
+    }
+    applyWorkspaceDraft(session);
+    captureActiveWorkspaceSession();
+    if (navigate) {
+      document.querySelector('[data-desktop-page-target="start"]')?.click();
+    }
+    setStatus("New conversion ready");
+    return session;
+  })();
+  newWorkspaceRequestPromise = request;
+  updateStartRuntimeHint();
+  try {
+    return await request;
+  } catch (error) {
+    setStatus(error.message || "Unable to create a new conversion");
+    throw error;
+  } finally {
+    if (newWorkspaceRequestPromise === request) {
+      newWorkspaceRequestPromise = null;
+    }
+    elements.workspaceNewTab.disabled = false;
+    elements.newThread.disabled = false;
+    updateStartRuntimeHint();
+  }
+}
+
+async function ensureStartDraftWorkspace({ draft = null, localUpload = null } = {}) {
+  let activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (!activeSession || activeSession.boundRunId) {
+    activeSession = await startNewWorkspaceSession({
+      navigate: false,
+      initialDraft: draft,
+      initialUpload: localUpload,
+    });
+  }
+  if (!activeSession || activeSession.boundRunId) {
+    throw new Error("Unable to prepare a new conversion workspace.");
+  }
+  return activeSession;
+}
+
+function stopWorkspaceBackgroundMonitor() {
+  if (appState.workspaceMonitorTimer) {
+    window.clearTimeout(appState.workspaceMonitorTimer);
+    appState.workspaceMonitorTimer = null;
+  }
+}
+
+function scheduleWorkspaceBackgroundMonitor() {
+  stopWorkspaceBackgroundMonitor();
+  if (document.hidden) {
+    return;
+  }
+  appState.workspaceMonitorTimer = window.setTimeout(() => {
+    const sessions = appState.workspaceTabOrder
+      .map((tabId) => appState.workspaceSessions.get(tabId))
+      .filter((session) => session?.boundRunId && session.tabId !== appState.activeWorkspaceTabId)
+      .filter((session) => !session.loaded || ["queued", "running", "needs_approval"].includes(getWorkspaceSessionStatus(session)));
+    for (const session of sessions) {
+      if (session.backgroundPollInFlight) {
+        continue;
+      }
+      const requestId = ++workspaceRequestSequence;
+      session.backgroundPollInFlight = true;
+      session.backgroundPollRequestId = requestId;
+      const previousStatus = getWorkspaceSessionStatus(session);
+      void fetchJson(`/threads/${encodeURIComponent(session.threadId)}/snapshot`, {
+        timeoutMs: WORKSPACE_BACKGROUND_REQUEST_TIMEOUT_MS,
+      }).then((snapshot) => {
+        if (
+          session.backgroundPollRequestId !== requestId
+          || appState.workspaceSessions.get(session.tabId) !== session
+          || session.tabId === appState.activeWorkspaceTabId
+        ) {
+          return;
+        }
+        session.state.snapshot = filterDeletedRunsFromSnapshot(
+          snapshot,
+          session.state.deletedRunIds,
+          session.state.deletedRunArtifactDirs,
+        );
+        if (session.state.snapshot?.current_run) {
+          session.hasStarted = true;
+        }
+        session.status = session.state.snapshot?.current_run?.status || session.state.snapshot?.status || "draft";
+        session.loaded = true;
+        session.title = getWorkspaceSessionTitle(session);
+        session.monitorError = null;
+        const nextStatus = getWorkspaceSessionStatus(session);
+        if (["queued", "running"].includes(previousStatus) && ["completed", "failed", "paused", "cancelled"].includes(nextStatus)) {
+          showDesktopToast(`${session.title}: ${nextStatus}`);
+        }
+      }).catch((error) => {
+        if (session.backgroundPollRequestId === requestId) {
+          session.monitorError = error?.message || "Background refresh failed";
+        }
+      }).finally(() => {
+        if (session.backgroundPollRequestId === requestId) {
+          session.backgroundPollInFlight = false;
+          renderWorkspaceTabs();
+          persistWorkspaceTabs();
+        }
+      });
+    }
+    scheduleWorkspaceBackgroundMonitor();
+  }, WORKSPACE_BACKGROUND_POLL_MS);
+}
 
 const PIPELINE_ROUTE_LABELS = {
   layout_detection: "Analyzing source structure",
@@ -138,6 +1111,7 @@ function showDesktopToast(message) {
 
 function updateStartRuntimeHint() {
   const readiness = getStartRuntimeReadiness();
+  const sendRequestInFlight = isActiveWorkspaceOperationInFlight("invoke");
   sendButtonLockedByRuntime = !readiness.ready;
   if (elements.startSettingsHint) {
     elements.startSettingsHint.dataset.runtimeReady = readiness.ready ? "true" : "false";
@@ -149,10 +1123,13 @@ function updateStartRuntimeHint() {
     elements.startSettingsBody.textContent = readiness.body;
   }
   if (elements.sendBtn) {
-    elements.sendBtn.disabled = sendButtonLockedByRuntime || sendRequestInFlight;
+    elements.sendBtn.disabled = sendButtonLockedByRuntime
+      || sendRequestInFlight
+      || conversionSubmissionInFlight
+      || Boolean(newWorkspaceRequestPromise);
     elements.sendBtn.title = sendButtonLockedByRuntime
       ? "Complete runtime settings before starting a conversion."
-      : sendRequestInFlight
+      : sendRequestInFlight || conversionSubmissionInFlight || newWorkspaceRequestPromise
         ? "Conversion request is being submitted."
       : "";
   }
@@ -168,18 +1145,17 @@ const SETTINGS_FIELD_HELP = {
   "settings-workflow-mode": "How deeply the app refines the SVG after the first draft. Full Detail is slower but usually more accurate.",
   "settings-region-processing-mode": "Whether detected areas are processed one at a time or in parallel.",
   "settings-region-concurrency": "Maximum number of regions that may run at the same time.",
-  "max-budget": "Total model-call budget allowed for one conversion run.",
-  "max-repair-retry": "Maximum repair attempts for SVG or local path issues.",
-  "max-retries": "Low-level retry count for transient API request failures.",
+  "run-model-call-budget": "Total model-call budget allowed for one conversion run.",
+  "bbox-refinement-max-rounds": "Maximum boundary-refinement rounds after initial object localization.",
+  "region-repair-max-attempts": "Maximum focused SVG repair attempts for each detected region.",
+  "object-repair-max-attempts": "Maximum focused SVG repair attempts for each recognized object.",
+  "fusion-repair-max-attempts": "Maximum repair attempts after all generated regions are integrated.",
   "use-previous-response-id": "Reuse previous response state when the provider supports it.",
   "recognition-bbox-refine-mode": "Method used to improve detected object boxes before SVG generation.",
   "sam-enabled": "Enable SAM-assisted bbox refinement when available.",
   "sam-provider-mode": "Choose whether segmentation assistance runs on this computer or through a remote service.",
   "sam-remote-url": "Remote SAM service endpoint used when provider mode is remote.",
   "sam-fallback-to-llm": "Use LLM refinement if SAM refinement is unavailable or fails.",
-  "bbox-issue-concurrency": "Maximum bbox issue refinements that may run in parallel.",
-  "bbox-issue-stagnation-rounds": "Stop one bbox issue when repeated rounds stop improving.",
-  "bbox-global-stagnation-rounds": "Stop global bbox refinement when issue sets keep repeating.",
   "agent-name": "Runtime name used for the coordinator agent instance.",
   "supervisor-memory-enabled": "Allow the supervisor to use memory during workflow decisions.",
   "supervisor-memory-persist-enabled": "Persist supervisor memory artifacts for later inspection or reuse.",
@@ -798,7 +1774,7 @@ function getGuideContent() {
 function getManualGuidanceContent() {
   const journey = deriveJourneyState();
   const readiness = getManualReadinessState();
-  if (readiness.canOpenRefine) {
+  if (readiness.canUseCurrentOutput) {
     if (readiness.hasManualResult) {
       return {
         title: "Refined result ready.",
@@ -1062,9 +2038,10 @@ function isMainFlowComplete(snapshot = appState.latestArtifactSnapshot) {
   return true;
 }
 
-function getManualGoalText() {
-  return elements.manualUserIntroduction?.value?.trim()
-    || elements.manualTargetDescription?.value?.trim()
+function getManualGoalText(manualDraft = null) {
+  const draft = manualDraft || readManualDraft();
+  return draft.userIntroduction.trim()
+    || draft.targetDescription.trim()
     || "";
 }
 
@@ -1083,17 +2060,36 @@ function refreshManualRefineReadiness(snapshot = appState.latestArtifactSnapshot
 }
 
 function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
+  const selectedRun = getSelectedRun();
+  const ownsSelectedRun = Boolean(
+    !selectedRun
+    || (selectedRun.owner_thread_id && selectedRun.owner_thread_id === appState.threadId)
+  );
   const hasOutput = hasUsableArtifactOutput(snapshot);
   const mainFlowDone = isMainFlowComplete(snapshot);
   const hasTarget = hasManualRefineTarget();
   const hasGoal = Boolean(getManualGoalText());
   const hasManualResult = Boolean(getLatestManualAdjustment(snapshot));
-  const canOpenRefine = Boolean(mainFlowDone && hasOutput);
-  const readyToApply = Boolean(canOpenRefine && hasTarget && hasGoal);
-  const title = canOpenRefine
+  const canUseCurrentOutput = Boolean(ownsSelectedRun && mainFlowDone && hasOutput);
+  const hasCompletedRun = getThreadRunList(appState.snapshot).some(
+    (run) => run.owner_thread_id === appState.threadId && String(run?.status || "").toLowerCase() === "completed",
+  );
+  if (
+    hasCompletedRun
+    || snapshot?.available
+    || String(snapshot?.status || "").toLowerCase() === "completed"
+    || canUseCurrentOutput
+  ) {
+    appState.refinePanelUnlocked = true;
+  }
+  const canOpenRefine = Boolean(ownsSelectedRun && (appState.refinePanelUnlocked || canUseCurrentOutput));
+  const readyToApply = Boolean(canUseCurrentOutput && hasTarget && hasGoal);
+  const title = !ownsSelectedRun
+    ? "This project is read-only here. Open its owning Workspace before refining."
+    : canOpenRefine
     ? "Open local refinement tools."
     : mainFlowDone
-      ? "Refine unlocks when the finished run has a usable output."
+      ? "Refine panel unlocks after the first completed main flow."
       : "Refine unlocks after the main flow finishes.";
   return {
     mainFlowDone,
@@ -1101,11 +2097,14 @@ function getRefineReadinessState(snapshot = appState.latestArtifactSnapshot) {
     hasTarget,
     hasGoal,
     hasManualResult,
+    ownsSelectedRun,
     canOpenRefine,
-    canSelectTarget: canOpenRefine,
+    canOpenRefinePanel: canOpenRefine,
+    canUseCurrentOutput,
+    canSelectTarget: canUseCurrentOutput,
     canApply: readyToApply,
     readyToApply,
-    label: !canOpenRefine ? "Locked" : readyToApply ? "Ready" : "Available",
+    label: !canOpenRefine ? "Locked" : readyToApply ? "Ready" : canUseCurrentOutput ? "Available" : "Open",
     title,
   };
 }
@@ -1118,7 +2117,7 @@ function syncRefineActionButton(button, readiness, { readyLabel = "Open Refine",
   if (!(button instanceof HTMLButtonElement)) {
     return;
   }
-  const enabled = Boolean(readiness.canOpenRefine);
+  const enabled = Boolean(readiness.canOpenRefinePanel);
   button.disabled = !enabled;
   button.classList.toggle("is-ready", enabled);
   button.title = readiness.title;
@@ -1128,11 +2127,36 @@ function syncRefineActionButton(button, readiness, { readyLabel = "Open Refine",
   }
 }
 
+function renderWorkspaceRefineGuide(snapshot, readiness = getRefineReadinessState(snapshot)) {
+  if (!elements.workspaceRefineGuideTitle || !elements.workspaceRefineGuideBody) {
+    return;
+  }
+  const canRefineCurrentOutput = Boolean(readiness.canUseCurrentOutput);
+  elements.workspaceRefineGuideTitle.textContent = !readiness.ownsSelectedRun
+    ? "Read-only history project"
+    : canRefineCurrentOutput
+    ? "Need a finer adjustment?"
+    : "Refine unavailable";
+  elements.workspaceRefineGuideBody.textContent = !readiness.ownsSelectedRun
+    ? "Open this project in its owning Workspace before making changes."
+    : canRefineCurrentOutput
+    ? "Open Refine, select a target area, then describe the change."
+    : "Complete or select an output before refining a local area.";
+  elements.workspaceRefineGuide?.classList.toggle("is-ready", canRefineCurrentOutput);
+  if (elements.workspaceRefineOpen instanceof HTMLButtonElement) {
+    elements.workspaceRefineOpen.disabled = !canRefineCurrentOutput;
+    elements.workspaceRefineOpen.classList.toggle("is-ready", canRefineCurrentOutput);
+    elements.workspaceRefineOpen.textContent = canRefineCurrentOutput ? "Open Refine" : readiness.ownsSelectedRun ? "Unavailable" : "Read only";
+    elements.workspaceRefineOpen.title = readiness.title;
+    elements.workspaceRefineOpen.setAttribute("aria-disabled", canRefineCurrentOutput ? "false" : "true");
+  }
+}
+
 function updateSimpleArtifactsReadiness(snapshot) {
   const hasInput = Boolean(snapshot?.previews?.input_image_url);
   const hasBbox = Boolean(snapshot?.regions?.length);
   const hasOutput = hasUsableArtifactOutput(snapshot);
-  const localReady = getRefineReadinessState(snapshot).canOpenRefine;
+  const localReady = getRefineReadinessState(snapshot).canUseCurrentOutput;
   const stage = (snapshot?.current_stage || "").toLowerCase();
 
   setReadinessChip(elements.artifactReadinessInput, {
@@ -1245,18 +2269,32 @@ function updateWorkflowTraceSummary(snapshot) {
   }
 }
 
+function snapshotHasWorkflowTraceNodes(snapshot) {
+  return Array.isArray(snapshot?.workflow_trace?.nodes) && snapshot.workflow_trace.nodes.length > 0;
+}
+
+function renderWorkspaceActivityForSnapshot(snapshot, { clearWhenEmpty = false } = {}) {
+  if (!elements.workspaceRecentActivity) {
+    return;
+  }
+  if (snapshotHasWorkflowTraceNodes(snapshot) || clearWhenEmpty) {
+    renderWorkspaceRecentActivity(elements.workspaceRecentActivity, snapshot);
+  }
+}
+
 function updateWorkspaceActionAvailability(snapshot) {
   const readiness = getRefineReadinessState(snapshot);
-  const refineReady = readiness.canOpenRefine;
+  const refineReady = readiness.canOpenRefinePanel;
   document.body.dataset.refineLocked = refineReady ? "false" : "true";
-  const refineToggle = document.getElementById("desktop-refine-toggle");
-  syncRefineActionButton(refineToggle, readiness);
-  const traceRefineButton = document.querySelector(".trace-refine-guide-btn");
-  syncRefineActionButton(traceRefineButton, readiness, { updateLabel: true });
-  if (elements.refineStatus) {
-    elements.refineStatus.textContent = readiness.label;
-    elements.refineStatus.title = readiness.title;
-    elements.refineStatus.classList.toggle("is-ready", refineReady);
+  renderWorkspaceActivityForSnapshot(snapshot);
+  renderWorkspaceRefineGuide(snapshot, readiness);
+  if (elements.desktopStopRun) {
+    const selectedRun = getSelectedRun();
+    const running = Boolean(selectedRun && ["queued", "running"].includes(String(selectedRun.status || "").toLowerCase()));
+    elements.desktopStopRun.disabled = !running;
+    elements.desktopStopRun.title = running
+      ? "Request cooperative cancellation at the next safe pipeline boundary."
+      : "Stop is available only while a conversion is running.";
   }
   if (
     !refineReady
@@ -1264,7 +2302,6 @@ function updateWorkspaceActionAvailability(snapshot) {
     && document.body.dataset.workspaceSidebarActivePanel === "refine"
   ) {
     document.querySelector('[data-workspace-sidebar-tab="trace"]')?.click();
-    refineToggle?.setAttribute("aria-expanded", "false");
   }
 }
 
@@ -1276,20 +2313,22 @@ function updateManualSimpleModeVisibility(snapshot) {
     return;
   }
 
-  const { canOpenRefine, hasTarget, hasGoal, readyToApply } = getRefineReadinessState(snapshot);
+  const { canOpenRefinePanel, canUseCurrentOutput, hasTarget, hasGoal, readyToApply } = getRefineReadinessState(snapshot);
 
   [elements.manualEntryOutput, elements.manualEntryTarget, elements.manualEntryGoal].forEach((chip) => {
     chip?.classList.add("hidden");
   });
   setReadinessChip(elements.manualEntryReady, {
-    label: !canOpenRefine ? "Locked" : readyToApply ? "Ready" : "Available",
-    ready: canOpenRefine,
-    active: readyToApply || !canOpenRefine,
+    label: !canOpenRefinePanel ? "Locked" : readyToApply ? "Ready" : canUseCurrentOutput ? "Available" : "Open",
+    ready: canOpenRefinePanel,
+    active: readyToApply || !canOpenRefinePanel,
   });
 
   if (elements.manualEntryText) {
-    if (!canOpenRefine) {
-      elements.manualEntryText.textContent = "Refine is locked until the main flow finishes with a usable output.";
+    if (!canOpenRefinePanel) {
+      elements.manualEntryText.textContent = "Refine panel unlocks after the first completed main flow.";
+    } else if (!canUseCurrentOutput) {
+      elements.manualEntryText.textContent = "Refine panel is unlocked. Select a completed output to apply changes.";
     } else if (!hasTarget) {
       elements.manualEntryText.textContent = "Refine is available. Select a target to continue.";
     } else if (!hasGoal) {
@@ -1299,8 +2338,10 @@ function updateManualSimpleModeVisibility(snapshot) {
     }
   }
   if (elements.manualSubmitStatus && !appState.manualAdjustmentRequestInFlight) {
-    if (!canOpenRefine) {
-      elements.manualSubmitStatus.textContent = "Refine unlocks after the main flow finishes with a usable output.";
+    if (!canOpenRefinePanel) {
+      elements.manualSubmitStatus.textContent = "Refine panel unlocks after the first completed main flow.";
+    } else if (!canUseCurrentOutput) {
+      elements.manualSubmitStatus.textContent = "Select a completed output before applying refinement.";
     } else if (!hasTarget) {
       elements.manualSubmitStatus.textContent = "Select a target before applying refinement.";
     } else if (!hasGoal) {
@@ -1310,8 +2351,8 @@ function updateManualSimpleModeVisibility(snapshot) {
     }
   }
 
-  const collapseWorkflow = !canOpenRefine;
-  const collapseEditCore = !canOpenRefine;
+  const collapseWorkflow = !canOpenRefinePanel;
+  const collapseEditCore = !canOpenRefinePanel;
   elements.manualWorkflowBar?.classList.toggle("manual-section-collapsed", collapseWorkflow);
   elements.manualEditCore?.classList.toggle("manual-section-collapsed", collapseEditCore);
 
@@ -1442,7 +2483,7 @@ function getRunList(snapshot) {
   if (snapshot.current_run) {
     runs.push(snapshot.current_run);
   }
-  for (const run of snapshot.recent_runs || []) {
+  for (const run of snapshot.project_runs || snapshot.recent_runs || []) {
     if (!runs.some((item) => item.run_id === run.run_id)) {
       runs.push(run);
     }
@@ -1454,31 +2495,78 @@ function getRunList(snapshot) {
   });
 }
 
-function isDeletedRun(run) {
+function getThreadRunList(snapshot) {
+  if (!snapshot) {
+    return [];
+  }
+  const runs = [];
+  if (snapshot.current_run) {
+    runs.push(snapshot.current_run);
+  }
+  for (const run of snapshot.recent_runs || []) {
+    if (!runs.some((item) => item.run_id === run.run_id)) {
+      runs.push(run);
+    }
+  }
+  return runs;
+}
+
+function isDeletedRun(
+  run,
+  deletedRunIds = appState.deletedRunIds,
+  deletedRunArtifactDirs = appState.deletedRunArtifactDirs,
+) {
   if (!run) {
     return false;
   }
   return Boolean(
-    (run.run_id && appState.deletedRunIds.has(run.run_id))
-    || (run.artifact_dir && appState.deletedRunArtifactDirs.has(run.artifact_dir))
+    (run.run_id && deletedRunIds.has(run.run_id))
+    || (run.artifact_dir && deletedRunArtifactDirs.has(run.artifact_dir))
   );
 }
 
-function filterDeletedRunsFromSnapshot(snapshot) {
+function filterDeletedRunsFromSnapshot(
+  snapshot,
+  deletedRunIds = appState.deletedRunIds,
+  deletedRunArtifactDirs = appState.deletedRunArtifactDirs,
+) {
   if (!snapshot) {
     return snapshot;
   }
-  const currentRun = isDeletedRun(snapshot.current_run) ? null : snapshot.current_run;
+  const currentRun = isDeletedRun(snapshot.current_run, deletedRunIds, deletedRunArtifactDirs) ? null : snapshot.current_run;
   return {
     ...snapshot,
     current_run: currentRun,
-    recent_runs: (snapshot.recent_runs || []).filter((run) => !isDeletedRun(run)),
+    recent_runs: (snapshot.recent_runs || []).filter(
+      (run) => !isDeletedRun(run, deletedRunIds, deletedRunArtifactDirs),
+    ),
+    project_runs: (snapshot.project_runs || []).filter(
+      (run) => !isDeletedRun(run, deletedRunIds, deletedRunArtifactDirs),
+    ),
     status: currentRun ? snapshot.status : (snapshot.approval_request ? "needs_approval" : "completed"),
   };
 }
 
 function getSelectedRun(snapshot = appState.snapshot) {
-  const runs = getRunList(snapshot);
+  const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (
+    document.body.classList.contains("desktop-body")
+    && document.body.dataset.desktopPage !== "history"
+    && activeSession?.boundRunId
+  ) {
+    return getWorkspaceSessionRun(activeSession);
+  }
+  if (
+    document.body.classList.contains("desktop-body")
+    && document.body.dataset.desktopPage !== "history"
+    && activeSession
+    && !activeSession.hasStarted
+    && !snapshot?.current_run
+  ) {
+    return null;
+  }
+  const threadRuns = getThreadRunList(snapshot);
+  const runs = appState.selectedRunId ? getRunList(snapshot) : threadRuns;
   if (!runs.length) {
     return null;
   }
@@ -1496,13 +2584,16 @@ function isLiveRunSelected(snapshot = appState.snapshot) {
   return Boolean(selectedRun && snapshot?.current_run && selectedRun.run_id === snapshot.current_run.run_id);
 }
 
-function removeRunFromSnapshot(runId, artifactDir = null) {
-  if (!appState.snapshot || !runId) {
+function removeRunFromWorkspaceState(state, runId, artifactDir = null) {
+  if (!runId) {
     return;
   }
-  appState.deletedRunIds.add(runId);
+  state.deletedRunIds.add(runId);
   if (artifactDir) {
-    appState.deletedRunArtifactDirs.add(artifactDir);
+    state.deletedRunArtifactDirs.add(artifactDir);
+  }
+  if (!state.snapshot) {
+    return;
   }
   const matchesDeletedRun = (run) => {
     if (!run) {
@@ -1514,32 +2605,33 @@ function removeRunFromSnapshot(runId, artifactDir = null) {
     return Boolean(artifactDir && run.artifact_dir === artifactDir);
   };
   const nextSnapshot = {
-    ...appState.snapshot,
-    current_run: matchesDeletedRun(appState.snapshot.current_run) ? null : appState.snapshot.current_run,
-    recent_runs: (appState.snapshot.recent_runs || []).filter((run) => !matchesDeletedRun(run)),
+    ...state.snapshot,
+    current_run: matchesDeletedRun(state.snapshot.current_run) ? null : state.snapshot.current_run,
+    recent_runs: (state.snapshot.recent_runs || []).filter((run) => !matchesDeletedRun(run)),
+    project_runs: (state.snapshot.project_runs || []).filter((run) => !matchesDeletedRun(run)),
   };
-  if (matchesDeletedRun(appState.snapshot.current_run)) {
+  if (matchesDeletedRun(state.snapshot.current_run)) {
     nextSnapshot.status = nextSnapshot.approval_request ? "needs_approval" : "completed";
   }
-  appState.snapshot = nextSnapshot;
-  appState.artifactCache.delete(runId);
+  state.snapshot = nextSnapshot;
+  state.artifactCache.delete(runId);
   if (artifactDir) {
-    for (const [cacheKey, cached] of appState.artifactCache.entries()) {
+    for (const [cacheKey, cached] of state.artifactCache.entries()) {
       if (cached?.snapshot?.artifact_dir === artifactDir) {
-        appState.artifactCache.delete(cacheKey);
+        state.artifactCache.delete(cacheKey);
       }
     }
   }
-  if (matchesDeletedRun(appState.latestArtifactSnapshot)) {
-    appState.latestArtifactSnapshot = null;
+  if (matchesDeletedRun(state.latestArtifactSnapshot)) {
+    state.latestArtifactSnapshot = null;
   }
-  if (appState.selectedRunId === runId || matchesDeletedRun(getSelectedRun(nextSnapshot))) {
-    appState.selectedRunId = null;
+  if (state.selectedRunId === runId || matchesDeletedRun(getRunList(nextSnapshot).find((run) => run.run_id === state.selectedRunId))) {
+    state.selectedRunId = null;
   }
 }
 
-function updateRunProjectNameInSnapshot(updatedRun) {
-  if (!updatedRun?.run_id || !appState.snapshot) {
+function updateRunProjectNameInWorkspaceState(state, updatedRun) {
+  if (!updatedRun?.run_id || !state.snapshot) {
     return;
   }
   const matchesUpdatedRun = (run) => run && (
@@ -1547,24 +2639,93 @@ function updateRunProjectNameInSnapshot(updatedRun) {
     || (updatedRun.artifact_dir && run.artifact_dir === updatedRun.artifact_dir)
   );
   const mergeRun = (run) => (matchesUpdatedRun(run) ? { ...run, ...updatedRun } : run);
-  appState.snapshot = {
-    ...appState.snapshot,
-    current_run: mergeRun(appState.snapshot.current_run),
-    recent_runs: (appState.snapshot.recent_runs || []).map(mergeRun),
+  const recentRuns = (state.snapshot.recent_runs || []).map(mergeRun);
+  state.snapshot = {
+    ...state.snapshot,
+    current_run: mergeRun(state.snapshot.current_run),
+    recent_runs: recentRuns,
+    project_runs: (state.snapshot.project_runs || []).map(mergeRun),
   };
-  if (matchesUpdatedRun(appState.latestArtifactSnapshot)) {
-    appState.latestArtifactSnapshot = {
-      ...appState.latestArtifactSnapshot,
+  if (matchesUpdatedRun(state.latestArtifactSnapshot)) {
+    state.latestArtifactSnapshot = {
+      ...state.latestArtifactSnapshot,
       project_name: updatedRun.project_name,
-      updated_at: updatedRun.updated_at || appState.latestArtifactSnapshot.updated_at,
+      updated_at: updatedRun.updated_at || state.latestArtifactSnapshot.updated_at,
+    };
+  }
+  for (const [cacheKey, cached] of state.artifactCache.entries()) {
+    if (matchesUpdatedRun(cached?.snapshot)) {
+      state.artifactCache.set(cacheKey, {
+        ...cached,
+        snapshot: {
+          ...cached.snapshot,
+          project_name: updatedRun.project_name,
+          updated_at: updatedRun.updated_at || cached.snapshot.updated_at,
+        },
+      });
+    }
+  }
+}
+
+function updateVisibleRunProjectName(updatedRun) {
+  if (!updatedRun?.run_id || !updatedRun.project_name) {
+    return;
+  }
+  for (const card of document.querySelectorAll(".run-chip")) {
+    if (card instanceof HTMLElement && card.dataset.runId === updatedRun.run_id) {
+      const projectName = card.querySelector(".run-chip-project");
+      if (projectName) {
+        projectName.textContent = updatedRun.project_name;
+      }
+    }
+  }
+}
+
+function updateRunInHistoryState(updatedRun) {
+  if (!updatedRun?.run_id) {
+    return;
+  }
+  const mergeRun = (run) => run?.run_id === updatedRun.run_id ? { ...run, ...updatedRun } : run;
+  appState.historyRuns = appState.historyRuns.map(mergeRun);
+  for (const cached of appState.historyPageCache.values()) {
+    if (!cached?.data?.runs) {
+      continue;
+    }
+    cached.data = {
+      ...cached.data,
+      runs: cached.data.runs.map(mergeRun),
     };
   }
 }
 
-async function renameRunProject(run) {
-  if (!appState.threadId || !run?.run_id) {
+function removeRunFromHistoryState(runId) {
+  if (!runId) {
     return;
   }
+  appState.historyRuns = appState.historyRuns.filter((run) => run?.run_id !== runId);
+  appState.historyPageCache.clear();
+}
+
+function updateRunAcrossWorkspaceSessions(updatedRun) {
+  for (const session of appState.workspaceSessions.values()) {
+    updateRunProjectNameInWorkspaceState(session.state, updatedRun);
+    if (session.boundRunId === updatedRun.run_id) {
+      session.title = updatedRun.project_name || session.title;
+      session.status = updatedRun.status || session.status;
+    }
+  }
+  updateRunProjectNameInWorkspaceState(appState, updatedRun);
+}
+
+async function renameRunProject(run) {
+  const ownerThreadId = run?.owner_thread_id;
+  if (!ownerThreadId || !run?.run_id || historyManagementRunIds.has(run.run_id)) {
+    if (run?.run_id && !ownerThreadId) {
+      setStatus("This saved project has no owning Workspace and cannot be renamed.");
+    }
+    return;
+  }
+  historyManagementRunIds.add(run.run_id);
   const currentName = run.project_name || "Untitled project";
   const nextName = await promptDesktopText({
     title: "Rename Project",
@@ -1575,35 +2736,60 @@ async function renameRunProject(run) {
     cancelLabel: "Cancel",
   });
   if (nextName == null) {
+    historyManagementRunIds.delete(run.run_id);
     return;
   }
   const normalizedName = nextName.trim().replace(/\s+/g, " ");
   if (!normalizedName || normalizedName === currentName) {
+    historyManagementRunIds.delete(run.run_id);
     return;
   }
   setStatus("Renaming project...");
+  let updatedRun = null;
   try {
-    const updatedRun = await fetchJson(`/threads/${encodeURIComponent(appState.threadId)}/runs/${encodeURIComponent(run.run_id)}`, {
+    updatedRun = await fetchJson(`/threads/${encodeURIComponent(ownerThreadId)}/runs/${encodeURIComponent(run.run_id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project_name: normalizedName }),
     });
-    updateRunProjectNameInSnapshot(updatedRun);
+  } catch (error) {
+    setStatus(error.message || "Rename failed");
+    showDesktopToast(error.message || "Rename failed");
+    historyManagementRunIds.delete(run.run_id);
+    return;
+  }
+  try {
+    updateRunInHistoryState(updatedRun);
+    updateRunAcrossWorkspaceSessions(updatedRun);
+    updateVisibleRunProjectName(updatedRun);
+    renderWorkspaceTabs();
+    persistWorkspaceTabs();
     renderState.recentRunsSig = null;
     renderViews();
     const successMessage = `Renamed to "${normalizedName}"`;
     setStatus(successMessage);
     showDesktopToast(successMessage);
-    await refreshSnapshot({ silent: true });
-  } catch (error) {
-    setStatus(error.message || "Rename failed");
+    appState.historyPageCache.clear();
+    try {
+      await refreshHistory({ force: true });
+    } catch (error) {
+      console.warn("Rename succeeded, but History refresh was delayed", error);
+      setStatus(`${successMessage}; History refresh delayed`);
+    }
+  } finally {
+    historyManagementRunIds.delete(run.run_id);
   }
 }
 
 async function deleteRunProject(run) {
-  if (!appState.threadId || !run?.run_id) {
+  const ownerThreadId = run?.owner_thread_id;
+  if (!ownerThreadId || !run?.run_id || historyManagementRunIds.has(run.run_id)) {
+    if (run?.run_id && !ownerThreadId) {
+      setStatus("This saved project has no owning Workspace and cannot be deleted.");
+    }
     return;
   }
+  historyManagementRunIds.add(run.run_id);
   const projectName = run.project_name || "Untitled project";
   const confirmed = await confirmDesktopAction({
     title: "Delete Project",
@@ -1612,30 +2798,69 @@ async function deleteRunProject(run) {
     cancelLabel: "Cancel",
   });
   if (!confirmed) {
+    historyManagementRunIds.delete(run.run_id);
     return;
   }
   setStatus("Deleting project...");
+  let deleted = null;
   try {
     const artifactQuery = run.artifact_dir ? `?artifact_dir=${encodeURIComponent(run.artifact_dir)}` : "";
-    const deleted = await fetchJson(`/threads/${encodeURIComponent(appState.threadId)}/runs/${encodeURIComponent(run.run_id)}${artifactQuery}`, {
+    deleted = await fetchJson(`/threads/${encodeURIComponent(ownerThreadId)}/runs/${encodeURIComponent(run.run_id)}${artifactQuery}`, {
       method: "DELETE",
     });
+  } catch (error) {
+    setStatus(error.message || "Delete failed");
+    showDesktopToast(error.message || "Delete failed");
+    historyManagementRunIds.delete(run.run_id);
+    return;
+  }
+  try {
     const deletedRunId = deleted.run_id || run.run_id;
-    removeRunFromSnapshot(deletedRunId, deleted.artifact_dir || run.artifact_dir || null);
-    const remainingRuns = getRunList(appState.snapshot);
-    const pageSize = appState.desktopHistoryPageSize || 6;
-    const maxPage = Math.max(1, Math.ceil(remainingRuns.length / pageSize));
-    appState.desktopHistoryPage = Math.min(appState.desktopHistoryPage || 1, maxPage);
-    renderState.recentRunsSig = null;
-    renderViews();
+    const deletedArtifactDir = deleted.artifact_dir || run.artifact_dir || null;
+    removeRunFromHistoryState(deletedRunId);
+    for (const session of appState.workspaceSessions.values()) {
+      removeRunFromWorkspaceState(session.state, deletedRunId, deletedArtifactDir);
+    }
+    removeRunFromWorkspaceState(appState, deletedRunId, deletedArtifactDir);
+
+    const deletedSession = appState.workspaceSessions.get(deletedRunId);
+    const deletedActiveSession = appState.activeWorkspaceTabId === deletedRunId;
+    if (deletedSession) {
+      releaseWorkspaceSessionResources(deletedSession);
+      appState.workspaceSessions.delete(deletedRunId);
+      appState.workspaceTabOrder = appState.workspaceTabOrder.filter((tabId) => tabId !== deletedRunId);
+    }
+
+    if (deletedActiveSession) {
+      const nextTabId = appState.workspaceTabOrder.find(
+        (tabId) => appState.workspaceSessions.get(tabId)?.boundRunId
+          && appState.workspaceSessions.get(tabId)?.open !== false,
+      );
+      if (nextTabId) {
+        await selectWorkspaceTab(nextTabId, { refresh: false, navigate: false });
+      } else {
+        appState.activeWorkspaceTabId = null;
+        appState.threadId = null;
+        appState.snapshot = null;
+        appState.latestArtifactSnapshot = null;
+        renderDefaultWorkspaceSkeleton();
+      }
+    }
+
+    renderWorkspaceTabs();
+    persistWorkspaceTabs();
     const deletedName = deleted.project_name || projectName;
     const successMessage = `Deleted "${deletedName}"`;
     setStatus(successMessage);
     showDesktopToast(successMessage);
-    await refreshSnapshot({ silent: true });
-    await refreshArtifactsForSelection({ silent: true, force: true });
-  } catch (error) {
-    setStatus(error.message || "Delete failed");
+    try {
+      await refreshHistory({ force: true });
+    } catch (error) {
+      console.warn("Delete succeeded, but History refresh was delayed", error);
+      setStatus(`${successMessage}; History refresh delayed`);
+    }
+  } finally {
+    historyManagementRunIds.delete(run.run_id);
   }
 }
 
@@ -1649,9 +2874,9 @@ function renderViews() {
     renderViews();
   });
   renderRecentRuns(
-    getRunList(appState.snapshot),
-    appState.selectedRunId,
-    (runId) => setSelectedRun(runId),
+    document.body.classList.contains("desktop-body") ? appState.historyRuns : getRunList(appState.snapshot),
+    document.body.classList.contains("desktop-body") ? null : appState.selectedRunId,
+    (runId) => document.body.classList.contains("desktop-body") ? openHistoryRun(runId) : setSelectedRun(runId),
     async (run) => {
       setSelectedRun(run.run_id);
       await resumeRunForRun(run);
@@ -1659,20 +2884,28 @@ function renderViews() {
     () => setSelectedRun(null),
     document.body.classList.contains("desktop-body")
       ? {
-        loading: !appState.snapshot && appState.snapshotRequestInFlight,
+        loading: appState.historyRequestInFlight && !appState.historyPageLoaded,
         pagination: {
           enabled: true,
+          serverPaginated: true,
           filterStatus: appState.desktopHistoryFilter,
           page: appState.desktopHistoryPage,
           pageSize: appState.desktopHistoryPageSize,
           search: appState.desktopHistorySearch,
           sort: appState.desktopHistorySort,
+          totalRuns: appState.historyTotal,
+          totalPages: appState.historyTotalPages,
+          hasMore: appState.historyHasMore,
           onPageResolved: (page) => {
             appState.desktopHistoryPage = page;
           },
         },
-        onRenameRun: renameRunProject,
-        onDeleteRun: deleteRunProject,
+        onRenameRun: async (run) => {
+          await renameRunProject(run);
+        },
+        onDeleteRun: async (run) => {
+          await deleteRunProject(run);
+        },
       }
       : {},
   );
@@ -1684,6 +2917,119 @@ function renderViews() {
     syncRecentRunsHeight();
     window.requestAnimationFrame(syncRecentRunsHeight);
   });
+}
+
+function getHistoryPageCacheKey() {
+  return [
+    appState.desktopHistoryFilter,
+    appState.desktopHistorySearch.trim().toLowerCase(),
+    appState.desktopHistorySort,
+    appState.desktopHistoryPage,
+    appState.desktopHistoryPageSize,
+  ].join(":");
+}
+
+function applyHistoryPage(data) {
+  appState.historyRuns = Array.isArray(data?.runs) ? data.runs : [];
+  appState.historyTotal = Number.isFinite(data?.total) ? data.total : null;
+  appState.historyTotalPages = Number.isFinite(data?.total_pages) ? data.total_pages : null;
+  appState.historyHasMore = Boolean(data?.has_more);
+  appState.historyPageLoaded = true;
+  appState.historyLastLoadedAt = Date.now();
+}
+
+async function refreshHistory({ force = false } = {}) {
+  const cacheKey = getHistoryPageCacheKey();
+  const cached = appState.historyPageCache.get(cacheKey);
+  if (cached && !force) {
+    applyHistoryPage(cached.data);
+    renderState.recentRunsSig = null;
+    renderViews();
+    if (Date.now() - cached.loadedAt < 10_000) {
+      return;
+    }
+  } else if (!cached) {
+    appState.historyRuns = [];
+    appState.historyPageLoaded = false;
+  }
+
+  appState.historyAbortController?.abort();
+  const controller = new AbortController();
+  appState.historyAbortController = controller;
+  const requestGeneration = ++appState.historyRequestGeneration;
+  appState.historyRequestInFlight = true;
+  appState.historyError = null;
+  renderState.recentRunsSig = null;
+  renderViews();
+  try {
+    const query = new URLSearchParams({
+      page: String(appState.desktopHistoryPage),
+      page_size: String(appState.desktopHistoryPageSize),
+      status: appState.desktopHistoryFilter,
+      search: appState.desktopHistorySearch,
+      sort: appState.desktopHistorySort,
+    });
+    const data = await fetchJson(`/runs?${query}`, {
+      timeoutMs: WORKSPACE_LIVE_REQUEST_TIMEOUT_MS,
+      signal: controller.signal,
+    });
+    if (requestGeneration !== appState.historyRequestGeneration || cacheKey !== getHistoryPageCacheKey()) {
+      return;
+    }
+    if (Number.isFinite(data?.total_pages) && appState.desktopHistoryPage > data.total_pages) {
+      appState.desktopHistoryPage = Math.max(1, data.total_pages);
+      return await refreshHistory({ force: true });
+    }
+    applyHistoryPage(data);
+    appState.historyPageCache.set(cacheKey, { data, loadedAt: Date.now() });
+  } catch (error) {
+    if (error?.message === "Request cancelled" && requestGeneration !== appState.historyRequestGeneration) {
+      return;
+    }
+    appState.historyError = error?.message || "Project history could not be loaded.";
+    throw error;
+  } finally {
+    if (requestGeneration === appState.historyRequestGeneration) {
+      appState.historyRequestInFlight = false;
+      if (appState.historyAbortController === controller) {
+        appState.historyAbortController = null;
+      }
+      renderState.recentRunsSig = null;
+      renderViews();
+    }
+  }
+}
+
+async function openHistoryRun(runId) {
+  if (!runId) {
+    return null;
+  }
+  const existing = appState.workspaceSessions.get(runId);
+  if (existing) {
+    existing.open = true;
+    await selectWorkspaceTab(existing.tabId);
+    return existing;
+  }
+  const data = await fetchJson(`/runs/${encodeURIComponent(runId)}/open`, { method: "POST" });
+  const session = {
+    tabId: data.run.run_id,
+    threadId: data.thread_id,
+    boundRunId: data.run.run_id,
+    source: "history",
+    title: data.run.project_name || "Saved conversion",
+    status: data.run.status || "completed",
+    hasStarted: true,
+    open: true,
+    loaded: true,
+    draft: createEmptyWorkspaceDraft(),
+    manualDraft: createEmptyManualDraft(),
+    state: createEmptyWorkspaceState(data.thread_id),
+  };
+  session.state.snapshot = data.snapshot;
+  appState.workspaceSessions.set(session.tabId, session);
+  appState.workspaceTabOrder.push(session.tabId);
+  await selectWorkspaceTab(session.tabId, { refresh: true });
+  return session;
 }
 
 function readManualSelectionBoxFromInputs() {
@@ -1909,22 +3255,24 @@ function confirmManualReferenceSelection(snapshot) {
   elements.manualIncludeDefaultCrop.checked = false;
 }
 
-function getManualReferencePaths() {
+function getManualReferencePaths(manualDraft = null, referenceUploads = appState.manualReferenceUploads) {
+  const draft = manualDraft || readManualDraft();
   const inlinePaths = appState.uiMode === "pro"
-    ? elements.manualReferencePaths.value
+    ? draft.referencePaths
       .split(/\r?\n/)
       .map((item) => item.trim())
       .filter(Boolean)
     : [];
-  const uploadedPaths = appState.manualReferenceUploads.map((item) => item.image_path);
+  const uploadedPaths = referenceUploads.map((item) => item.image_path);
   return [...uploadedPaths, ...inlinePaths];
 }
 
-function getManualReferenceMode() {
-  return appState.manualReferenceMode || (
-    !elements.manualUseReferenceImages.checked
+function getManualReferenceMode(manualDraft = null) {
+  const draft = manualDraft || readManualDraft();
+  return draft.referenceMode || (
+    !draft.useReferenceImages
       ? "none"
-      : elements.manualIncludeDefaultCrop.checked
+      : draft.includeDefaultCrop
         ? "default"
         : "add"
   );
@@ -1990,6 +3338,11 @@ function setManualReferenceMode(mode, { openUpload = false, render = true } = {}
     if (elements.manualReferenceUploadPanel) {
       elements.manualReferenceUploadPanel.open = false;
     }
+  }
+  const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (activeSession?.threadId === appState.threadId) {
+    activeSession.state.manualReferenceMode = mode;
+    activeSession.manualDraft = readManualDraft();
   }
   updateManualReferenceModeControls();
   if (render) {
@@ -2386,10 +3739,7 @@ function renderManualRecentActivityPanel(snapshot) {
 
 function renderManualAdjustmentPanel(snapshot) {
   const selectedOverlay = appState.selectedOverlay || { type: "region", regionId: null, objectId: null };
-  const selectionBox = readManualSelectionBoxFromInputs() || appState.manualSelectionBox;
-  if (selectionBox && stableStringify(selectionBox) !== stableStringify(appState.manualSelectionBox)) {
-    appState.manualSelectionBox = selectionBox;
-  }
+  const selectionBox = appState.manualSelectionBox;
   const selectedRegion = snapshot?.regions?.find((region) => region.region_id === selectedOverlay.regionId) || null;
   const selectedObject = selectedRegion?.objects?.find((item) => item.object_id === selectedOverlay.objectId) || null;
 
@@ -2420,7 +3770,7 @@ function renderManualAdjustmentPanel(snapshot) {
   const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
   elements.manualBaseFrame.value = activeFrame ? `${activeFrame.title} (${activeFrame.frame_id})` : "";
   const readiness = getRefineReadinessState(snapshot);
-  const canConfigureReferences = Boolean(readiness.canOpenRefine);
+  const canConfigureReferences = Boolean(readiness.canUseCurrentOutput);
   const referenceImagesEnabled = Boolean(canConfigureReferences && elements.manualUseReferenceImages.checked);
   elements.manualApplyButton.disabled = !readiness.canApply || appState.manualAdjustmentRequestInFlight;
   elements.manualConfirmSelection.disabled = !readiness.canSelectTarget;
@@ -2489,29 +3839,76 @@ function startManualAdjustmentPolling() {
   }, 1200);
 }
 
-async function uploadManualReferenceFiles(files) {
+async function uploadManualReferenceFiles(files, existingOperation = null) {
   if (!files?.length) {
     return;
   }
-  setStatus("Uploading manual references...");
-  appState.manualCustomReferenceConfirmed = false;
-  appState.manualReferenceMode = "add";
-  elements.manualUseReferenceImages.checked = true;
-  elements.manualIncludeDefaultCrop.checked = false;
-  for (const file of files) {
-    const buffer = await file.arrayBuffer();
-    const data = await fetchJson("/uploads", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filename: file.name,
-        content_base64: arrayBufferToBase64(buffer),
-      }),
-    });
-    appState.manualReferenceUploads = [...appState.manualReferenceUploads, { ...data, previewObjectUrl: URL.createObjectURL(file) }];
+  const ownsOperation = !existingOperation;
+  const operation = existingOperation || beginWorkspaceOperation("manual-reference-upload");
+  const initialSession = getOperationSession(operation);
+  if (!initialSession) {
+    return { ok: false, active: false };
   }
-  renderManualReferenceUploads();
-  setStatus("Manual references uploaded");
+  initialSession.state.manualCustomReferenceConfirmed = false;
+  initialSession.state.manualReferenceMode = "add";
+  initialSession.manualDraft = {
+    ...initialSession.manualDraft,
+    referenceMode: "add",
+    useReferenceImages: true,
+    includeDefaultCrop: false,
+  };
+  if (isOperationActive(operation)) {
+    setStatus("Uploading manual references...");
+    appState.manualCustomReferenceConfirmed = false;
+    appState.manualReferenceMode = "add";
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = false;
+  }
+  const uploadedReferences = [];
+  try {
+    for (const file of files) {
+      const buffer = await file.arrayBuffer();
+      const data = await fetchJson("/uploads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          content_base64: arrayBufferToBase64(buffer),
+        }),
+      });
+      uploadedReferences.push({ ...data, previewObjectUrl: URL.createObjectURL(file) });
+    }
+    const originSession = getOperationSession(operation);
+    if (!originSession) {
+      for (const upload of uploadedReferences) {
+        URL.revokeObjectURL(upload.previewObjectUrl);
+      }
+      return;
+    }
+    originSession.state.manualReferenceUploads = [
+      ...(originSession.state.manualReferenceUploads || []),
+      ...uploadedReferences,
+    ];
+    originSession.state.manualCustomReferenceConfirmed = false;
+    originSession.state.manualReferenceMode = "add";
+    if (!isOperationActive(operation)) {
+      return { ok: true, active: false };
+    }
+    appState.manualReferenceUploads = originSession.state.manualReferenceUploads;
+    renderManualReferenceUploads();
+    setStatus("Manual references uploaded");
+    return { ok: true, active: true };
+  } catch (error) {
+    for (const upload of uploadedReferences) {
+      URL.revokeObjectURL(upload.previewObjectUrl);
+    }
+    recordWorkspaceOperationError(operation, error, "Reference upload failed");
+    return { ok: false, active: isOperationActive(operation), error };
+  } finally {
+    if (ownsOperation) {
+      finishWorkspaceOperation(operation);
+    }
+  }
 }
 
 function loadImageElement(src) {
@@ -2523,99 +3920,135 @@ function loadImageElement(src) {
   });
 }
 
-async function captureReferenceImageFromInput(snapshot) {
-  if (!getRefineReadinessState(snapshot).canOpenRefine || !snapshot?.previews?.input_image_url) {
-    throw new Error("Input preview is not ready yet.");
-  }
-  const selection =
-    appState.manualReferenceSelectionShape?.bbox
-    || appState.manualConfirmedReferenceSelection?.selectionBox
-    || null;
-  if (!selection) {
-    throw new Error("Draw or confirm a reference area on the Input image first.");
-  }
+async function captureReferenceImageFromInput(snapshot, existingOperation = null) {
+  const ownsOperation = !existingOperation;
+  const operation = existingOperation || beginWorkspaceOperation("manual-reference-upload");
+  try {
+    const initialSession = getOperationSession(operation);
+    if (!initialSession) {
+      return { ok: false, active: false };
+    }
+    if (!getRefineReadinessState(snapshot).canUseCurrentOutput || !snapshot?.previews?.input_image_url) {
+      throw new Error("Input preview is not ready yet.");
+    }
+    const selection =
+      initialSession.state.manualReferenceSelectionShape?.bbox
+      || initialSession.state.manualConfirmedReferenceSelection?.selectionBox
+      || null;
+    if (!selection) {
+      throw new Error("Draw or confirm a reference area on the Input image first.");
+    }
 
-  const sourceImage = await loadImageElement(snapshot.previews.input_image_url);
-  const canvasWidth = Math.max(snapshot.canvas_width || sourceImage.naturalWidth || 0, 1);
-  const canvasHeight = Math.max(snapshot.canvas_height || sourceImage.naturalHeight || 0, 1);
-  const scaleX = (sourceImage.naturalWidth || canvasWidth) / canvasWidth;
-  const scaleY = (sourceImage.naturalHeight || canvasHeight) / canvasHeight;
-  const sx = Math.max(0, Math.round(selection.x * scaleX));
-  const sy = Math.max(0, Math.round(selection.y * scaleY));
-  const sw = Math.max(1, Math.round(selection.width * scaleX));
-  const sh = Math.max(1, Math.round(selection.height * scaleY));
+    const sourceImage = await loadImageElement(snapshot.previews.input_image_url);
+    const canvasWidth = Math.max(snapshot.canvas_width || sourceImage.naturalWidth || 0, 1);
+    const canvasHeight = Math.max(snapshot.canvas_height || sourceImage.naturalHeight || 0, 1);
+    const scaleX = (sourceImage.naturalWidth || canvasWidth) / canvasWidth;
+    const scaleY = (sourceImage.naturalHeight || canvasHeight) / canvasHeight;
+    const sx = Math.max(0, Math.round(selection.x * scaleX));
+    const sy = Math.max(0, Math.round(selection.y * scaleY));
+    const sw = Math.max(1, Math.round(selection.width * scaleX));
+    const sh = Math.max(1, Math.round(selection.height * scaleY));
 
-  const canvas = document.createElement("canvas");
-  canvas.width = sw;
-  canvas.height = sh;
-  const context = canvas.getContext("2d");
-  if (!context) {
-    throw new Error("Canvas cropping is unavailable in this browser.");
+    const canvas = document.createElement("canvas");
+    canvas.width = sw;
+    canvas.height = sh;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Canvas cropping is unavailable in this browser.");
+    }
+    context.drawImage(sourceImage, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, "image/png");
+    });
+    if (!blob) {
+      throw new Error("Failed to export the captured reference image.");
+    }
+
+    const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+    const file = new File([blob], `input-crop-reference-${timestamp}.png`, {
+      type: "image/png",
+      lastModified: Date.now(),
+    });
+    const uploadResult = await uploadManualReferenceFiles([file], operation);
+    if (!uploadResult?.ok) {
+      if (uploadResult?.active) {
+        throw uploadResult.error || new Error("Reference upload failed");
+      }
+      return uploadResult;
+    }
+    const originSession = getOperationSession(operation);
+    if (!originSession) {
+      return { ok: true, active: false };
+    }
+    originSession.state.manualCustomReferenceConfirmed = true;
+    originSession.state.manualReferenceMode = "add";
+    originSession.manualDraft = {
+      ...originSession.manualDraft,
+      referenceMode: "add",
+      useReferenceImages: true,
+      includeDefaultCrop: false,
+    };
+    if (!isOperationActive(operation)) {
+      return { ok: true, active: false };
+    }
+    appState.manualCustomReferenceConfirmed = true;
+    appState.manualReferenceMode = "add";
+    elements.manualUseReferenceImages.checked = true;
+    elements.manualIncludeDefaultCrop.checked = false;
+    elements.manualUploadStatus.textContent = "Input crop captured and confirmed as a reference image.";
+    setStatus("Reference crop captured");
+    return { ok: true, active: true };
+  } finally {
+    if (ownsOperation) {
+      finishWorkspaceOperation(operation);
+    }
   }
-  context.drawImage(sourceImage, sx, sy, sw, sh, 0, 0, sw, sh);
-
-  const blob = await new Promise((resolve) => {
-    canvas.toBlob(resolve, "image/png");
-  });
-  if (!blob) {
-    throw new Error("Failed to export the captured reference image.");
-  }
-
-  const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
-  const file = new File([blob], `input-crop-reference-${timestamp}.png`, {
-    type: "image/png",
-    lastModified: Date.now(),
-  });
-  await uploadManualReferenceFiles([file]);
-  appState.manualCustomReferenceConfirmed = true;
-  appState.manualReferenceMode = "add";
-  elements.manualUseReferenceImages.checked = true;
-  elements.manualIncludeDefaultCrop.checked = false;
-  elements.manualUploadStatus.textContent = "Input crop captured and confirmed as a reference image.";
-  setStatus("Reference crop captured");
 }
 
-function buildManualAdjustmentPayload(snapshot) {
-  const targetObjectIds = elements.manualObjectIds.value
+function buildManualAdjustmentPayload(snapshot, manualDraft, workspaceState) {
+  const targetObjectIds = manualDraft.objectIds
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-  let targetRegionId = elements.manualRegionId.value.trim() || null;
-  const activeFrame = snapshot.output_frames?.[appState.selectedOutputFrameIndex] || null;
-  const confirmedTarget = appState.manualConfirmedTarget;
+  let targetRegionId = manualDraft.regionId.trim() || null;
+  const activeFrame = snapshot.output_frames?.[workspaceState.selectedOutputFrameIndex] || null;
+  const confirmedTarget = workspaceState.manualConfirmedTarget;
   if (!targetObjectIds.length && !targetRegionId) {
     if (confirmedTarget?.objectIds?.length) {
       targetObjectIds.push(...confirmedTarget.objectIds);
     } else if (confirmedTarget?.regionId) {
       targetRegionId = confirmedTarget.regionId;
-    } else if (appState.selectedOverlay.objectId) {
-      targetObjectIds.push(appState.selectedOverlay.objectId);
-    } else if (appState.selectedOverlay.regionId) {
-      targetRegionId = appState.selectedOverlay.regionId;
+    } else if (workspaceState.selectedOverlay.objectId) {
+      targetObjectIds.push(workspaceState.selectedOverlay.objectId);
+    } else if (workspaceState.selectedOverlay.regionId) {
+      targetRegionId = workspaceState.selectedOverlay.regionId;
     }
   }
 
-  const referenceMode = getManualReferenceMode();
+  const referenceMode = getManualReferenceMode(manualDraft);
   const useReferenceImages = referenceMode !== "none";
-  const addImageReferencePaths = referenceMode === "add" ? getManualReferencePaths() : [];
+  const addImageReferencePaths = referenceMode === "add"
+    ? getManualReferencePaths(manualDraft, workspaceState.manualReferenceUploads)
+    : [];
   const captureReferenceBox = referenceMode === "capture"
-    ? (appState.manualConfirmedReferenceSelection?.selectionBox || null)
+    ? (workspaceState.manualConfirmedReferenceSelection?.selectionBox || null)
     : null;
   const payload = {
-    thread_id: appState.threadId,
+    thread_id: workspaceState.threadId,
     run_id: snapshot.run_id,
     base_frame_id: confirmedTarget?.baseFrameId || activeFrame?.frame_id || null,
-    mode: elements.manualMode.value || "worker",
+    mode: manualDraft.mode || "worker",
     target_object_ids: targetObjectIds,
     target_region_id: targetRegionId,
-    target_description: elements.manualTargetDescription?.value?.trim() || null,
-    user_introduction: elements.manualUserIntroduction?.value?.trim() || getManualGoalText(),
+    target_description: manualDraft.targetDescription.trim() || null,
+    user_introduction: manualDraft.userIntroduction.trim() || getManualGoalText(manualDraft),
     use_reference_images: useReferenceImages,
     reference_image_paths: useReferenceImages ? addImageReferencePaths : [],
     include_default_crop: useReferenceImages && (referenceMode === "default" || (referenceMode === "capture" && !captureReferenceBox)),
     include_no_image: !useReferenceImages,
   };
-  const selectionBox = confirmedTarget?.selectionBox || readManualSelectionBoxFromInputs() || appState.manualSelectionBox;
+  const selectionBox = confirmedTarget?.selectionBox || workspaceState.manualSelectionBox;
   if (selectionBox) {
     payload.selection_bbox = selectionBox;
   }
@@ -2626,7 +4059,7 @@ function buildManualAdjustmentPayload(snapshot) {
     payload.reference_selection_bbox = captureReferenceBox;
   }
   if (payload.mode === "agent") {
-    const agentBudget = Number.parseInt(elements.manualAgentBudget.value.trim(), 10);
+    const agentBudget = Number.parseInt(manualDraft.agentBudget.trim(), 10);
     if (!Number.isNaN(agentBudget)) {
       payload.agent_budget = agentBudget;
     }
@@ -2637,10 +4070,12 @@ function buildManualAdjustmentPayload(snapshot) {
 async function applyManualAdjustment() {
   const snapshot = appState.latestArtifactSnapshot;
   const readiness = getRefineReadinessState(snapshot);
-  if (!appState.threadId || !readiness.canOpenRefine || !snapshot?.run_id) {
+  if (!appState.threadId || !readiness.canUseCurrentOutput || !snapshot?.run_id) {
     setStatus(readiness.title || "Output is not ready for refinement.");
     if (elements.manualSubmitStatus) {
-      elements.manualSubmitStatus.textContent = readiness.title || "Refine is locked.";
+      elements.manualSubmitStatus.textContent = readiness.canOpenRefinePanel
+        ? "Select a completed output before applying refinement."
+        : readiness.title || "Refine is locked.";
     }
     return;
   }
@@ -2657,6 +4092,13 @@ async function applyManualAdjustment() {
   }
 
   const baseRunId = snapshot.run_id;
+  const operation = beginWorkspaceOperation("manual-adjust");
+  const originSession = getOperationSession(operation);
+  if (!originSession) {
+    return;
+  }
+  const manualDraft = { ...originSession.manualDraft };
+  const payload = buildManualAdjustmentPayload(snapshot, manualDraft, originSession.state);
   appState.manualAdjustmentBaseRunId = baseRunId;
   appState.selectedRunId = baseRunId;
   appState.manualAdjustmentRequestInFlight = true;
@@ -2666,32 +4108,68 @@ async function applyManualAdjustment() {
   setStatus("Running refinement...");
   startManualAdjustmentPolling();
   try {
-    const payload = buildManualAdjustmentPayload(snapshot);
-    const response = await fetchJson(`/threads/${appState.threadId}/manual-adjust`, {
+    const response = await fetchJson(`/threads/${operation.threadId}/manual-adjust`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    appState.artifactCache.set(snapshot.run_id, {
+    const responseSession = getOperationSession(operation);
+    if (!responseSession) {
+      return;
+    }
+    const cacheEntry = {
       signature: stableStringify({
         runId: response.artifact_snapshot.run_id,
         status: response.artifact_snapshot.status,
-        updatedAt: getSelectedRun()?.updated_at,
+        updatedAt: responseSession.state.snapshot?.current_run?.updated_at,
         currentStage: response.artifact_snapshot.current_stage,
       }),
       snapshot: response.artifact_snapshot,
-    });
-    appState.latestArtifactSnapshot = response.artifact_snapshot;
+    };
+    responseSession.state.artifactCache.set(snapshot.run_id, cacheEntry);
+    responseSession.state.latestArtifactSnapshot = response.artifact_snapshot;
     const latestManualAdjustment = (response.artifact_snapshot.manual_adjustments || []).at(-1) || null;
+    responseSession.state.selectedManualAdjustmentId = latestManualAdjustment?.adjustment_id || null;
+    if (!isOperationActive(operation)) {
+      try {
+        const refreshedSnapshot = await fetchJson(`/threads/${operation.threadId}/snapshot`);
+        responseSession.state.snapshot = filterDeletedRunsFromSnapshot(
+          refreshedSnapshot,
+          responseSession.state.deletedRunIds,
+          responseSession.state.deletedRunArtifactDirs,
+        );
+      } catch {
+        // The artifact response is still authoritative when the follow-up snapshot fails.
+      }
+      renderWorkspaceTabs();
+      persistWorkspaceTabs();
+      return;
+    }
+    appState.artifactCache.set(snapshot.run_id, cacheEntry);
+    appState.latestArtifactSnapshot = response.artifact_snapshot;
     appState.selectedManualAdjustmentId = latestManualAdjustment?.adjustment_id || null;
     elements.manualSubmitStatus.textContent = response.notes?.length
       ? `${response.edit_strategy ? `[${response.edit_strategy}] ` : ""}${response.notes.join(" | ")}`
       : "Refinement applied.";
-    await refreshSnapshot({ silent: true });
+    try {
+      await refreshSnapshot({ silent: true });
+    } catch (error) {
+      console.warn("Refinement completed, but snapshot refresh was delayed", error);
+    }
+    if (!isOperationActive(operation)) {
+      return;
+    }
     renderArtifactViews(response.artifact_snapshot);
     setStatus("Refinement complete");
   } catch (error) {
+    const errorSession = recordWorkspaceOperationError(operation, error, "Refinement failed");
     const responseData = error.responseData || {};
+    if (errorSession && responseData.artifact_snapshot) {
+      errorSession.state.latestArtifactSnapshot = responseData.artifact_snapshot;
+    }
+    if (!isOperationActive(operation)) {
+      return;
+    }
     if (responseData.artifact_snapshot) {
       appState.latestArtifactSnapshot = responseData.artifact_snapshot;
       renderArtifactViews(responseData.artifact_snapshot);
@@ -2700,17 +4178,37 @@ async function applyManualAdjustment() {
     elements.manualSubmitStatus.textContent = `${errorLabel}${error.message || "Refinement failed."}`;
     setStatus(error.message || "Refinement failed");
   } finally {
-    appState.manualAdjustmentRequestInFlight = false;
-    appState.manualAdjustmentBaseRunId = null;
-    appState.selectedRunId = baseRunId;
-    stopManualAdjustmentPolling();
-    elements.manualApplyButton.disabled = !getRefineReadinessState(appState.latestArtifactSnapshot).canApply;
+    const finalSession = getOperationSession(operation);
+    if (finalSession) {
+      finalSession.state.manualAdjustmentRequestInFlight = false;
+      finalSession.state.manualAdjustmentBaseRunId = null;
+      finalSession.state.selectedRunId = baseRunId;
+    }
+    if (isOperationActive(operation)) {
+      appState.manualAdjustmentRequestInFlight = false;
+      appState.manualAdjustmentBaseRunId = null;
+      appState.selectedRunId = baseRunId;
+      stopManualAdjustmentPolling();
+      elements.manualApplyButton.disabled = !getRefineReadinessState(appState.latestArtifactSnapshot).canApply;
+    }
+    finishWorkspaceOperation(operation);
   }
 }
 
 function setSelectedRun(runId = null) {
   const previousRunId = getSelectedRun()?.run_id || null;
   appState.selectedRunId = runId;
+  if (runId) {
+    const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+    const selectedFromHistory = getRunList(appState.snapshot).find((run) => run.run_id === runId) || null;
+    if (activeSession && selectedFromHistory) {
+      activeSession.hasStarted = true;
+      activeSession.title = selectedFromHistory.project_name || activeSession.title;
+      activeSession.status = selectedFromHistory.status || activeSession.status;
+      renderWorkspaceTabs();
+      persistWorkspaceTabs();
+    }
+  }
   const nextRunId = getSelectedRun()?.run_id || null;
   if (previousRunId !== nextRunId) {
     appState.selectedEventIndex = null;
@@ -2785,6 +4283,18 @@ function applySnapshot(snapshot) {
   appState.threadId = filteredSnapshot.thread_id;
   elements.threadId.textContent = appState.threadId;
   appState.pendingApproval = filteredSnapshot.approval_request || null;
+  const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (activeSession) {
+    activeSession.state.snapshot = filteredSnapshot;
+    if (filteredSnapshot.current_run) {
+      activeSession.hasStarted = true;
+    }
+    const displayRun = filteredSnapshot.current_run
+      || null;
+    activeSession.title = displayRun?.project_name || activeSession.title;
+    activeSession.status = filteredSnapshot.current_run?.status || filteredSnapshot.status || "draft";
+    activeSession.loaded = true;
+  }
   const currentRunRevision = filteredSnapshot.current_run?.artifact_revision || null;
   if (currentRunRevision) {
     const cached = appState.artifactCache.get(filteredSnapshot.current_run.run_id);
@@ -2793,12 +4303,19 @@ function applySnapshot(snapshot) {
     }
   }
 
-  if (appState.selectedRunId && !getRunList(filteredSnapshot).some((run) => run.run_id === appState.selectedRunId)) {
+  if (
+    !document.body.classList.contains("desktop-body")
+    && appState.selectedRunId
+    && !getRunList(filteredSnapshot).some((run) => run.run_id === appState.selectedRunId)
+  ) {
     appState.selectedRunId = null;
   }
 
   renderViews();
   maybeShowRunFailureDialog(filteredSnapshot);
+  captureActiveWorkspaceSession();
+  renderWorkspaceTabs();
+  persistWorkspaceTabs();
   schedulePolling();
 }
 
@@ -2851,8 +4368,9 @@ function stopArtifactPolling() {
 }
 
 function invalidateLiveRequests() {
-  appState.snapshotRequestGeneration += 1;
-  appState.artifactRequestGeneration += 1;
+  const generation = ++workspaceRequestSequence;
+  appState.snapshotRequestGeneration = generation;
+  appState.artifactRequestGeneration = generation;
   appState.snapshotRequestInFlight = false;
   appState.artifactRequestInFlight = false;
 }
@@ -2968,6 +4486,16 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
   if (!selectedRun || !selectedRun.artifact_dir) {
     appState.latestArtifactSnapshot = null;
     clearArtifactPanel();
+    const activeSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+    if (activeSession && !activeSession.hasStarted) {
+      if (elements.artifactStatus) {
+        elements.artifactStatus.textContent = "No artifact is available for this conversion yet.";
+      }
+      if (elements.compareInputMessage) {
+        elements.compareInputMessage.textContent = "No instruction yet.";
+      }
+    }
+    renderWorkspaceActivityForSnapshot(null, { clearWhenEmpty: true });
     renderManualAdjustmentPanel(null);
     updateWorkflowTraceSummary(null);
     updateWorkspaceActionAvailability(null);
@@ -2992,7 +4520,13 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
     return;
   }
 
-  const requestGeneration = appState.artifactRequestGeneration;
+  const requestGeneration = ++workspaceRequestSequence;
+  appState.artifactRequestGeneration = requestGeneration;
+  const requestSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (requestSession) {
+    requestSession.state.artifactRequestGeneration = requestGeneration;
+    requestSession.state.artifactRequestInFlight = true;
+  }
   const requestThreadId = appState.threadId;
   const requestRunId = selectedRun.run_id || null;
   appState.artifactRequestInFlight = true;
@@ -3013,7 +4547,9 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
   }
   try {
     const runQuery = selectedRun.run_id ? `?run_id=${encodeURIComponent(selectedRun.run_id)}` : "";
-    const data = await fetchJson(`/threads/${requestThreadId}/artifacts${runQuery}`);
+    const data = await fetchJson(`/threads/${requestThreadId}/artifacts${runQuery}`, {
+      timeoutMs: WORKSPACE_LIVE_REQUEST_TIMEOUT_MS,
+    });
     if (
       requestGeneration !== appState.artifactRequestGeneration
       || requestThreadId !== appState.threadId
@@ -3030,6 +4566,9 @@ async function refreshArtifactsForSelection({ silent = false, force = false, sho
   } finally {
     if (requestGeneration === appState.artifactRequestGeneration) {
       appState.artifactRequestInFlight = false;
+      if (requestSession?.state.artifactRequestGeneration === requestGeneration) {
+        requestSession.state.artifactRequestInFlight = false;
+      }
       scheduleArtifactPolling();
     }
   }
@@ -3186,6 +4725,7 @@ function renderArtifactViews(snapshot) {
       scrollIntoContainerView(elements.timeline, `[data-event-index="${node.event_index}"]`);
     }
   );
+  renderWorkspaceActivityForSnapshot(snapshot, { clearWhenEmpty: true });
   updateSimpleArtifactsReadiness(snapshot);
   updateWorkflowTraceSummary(snapshot);
   updateWorkspaceActionAvailability(snapshot);
@@ -3199,14 +4739,22 @@ async function refreshSnapshot({ silent = false, force = false } = {}) {
   if (!appState.threadId || (appState.snapshotRequestInFlight && !force)) {
     return;
   }
-  const requestGeneration = appState.snapshotRequestGeneration;
+  const requestGeneration = ++workspaceRequestSequence;
+  appState.snapshotRequestGeneration = requestGeneration;
+  const requestSession = appState.workspaceSessions.get(appState.activeWorkspaceTabId);
+  if (requestSession) {
+    requestSession.state.snapshotRequestGeneration = requestGeneration;
+    requestSession.state.snapshotRequestInFlight = true;
+  }
   const requestThreadId = appState.threadId;
   appState.snapshotRequestInFlight = true;
   if (!appState.snapshot) {
     renderViews();
   }
   try {
-    const data = await fetchJson(`/threads/${requestThreadId}/snapshot`);
+    const data = await fetchJson(`/threads/${requestThreadId}/snapshot`, {
+      timeoutMs: WORKSPACE_LIVE_REQUEST_TIMEOUT_MS,
+    });
     if (requestGeneration !== appState.snapshotRequestGeneration || requestThreadId !== appState.threadId) {
       return;
     }
@@ -3218,6 +4766,9 @@ async function refreshSnapshot({ silent = false, force = false } = {}) {
   } finally {
     if (requestGeneration === appState.snapshotRequestGeneration) {
       appState.snapshotRequestInFlight = false;
+      if (requestSession?.state.snapshotRequestGeneration === requestGeneration) {
+        requestSession.state.snapshotRequestInFlight = false;
+      }
       if (!appState.snapshot) {
         renderViews();
       }
@@ -3241,20 +4792,67 @@ function applyRunStartSnapshot(data) {
       data.run,
       ...(appState.snapshot?.recent_runs || []).filter((run) => run?.run_id !== data.run.run_id),
     ],
+    project_runs: appState.snapshot?.project_runs || [],
   };
   applySnapshot(optimisticSnapshot);
 }
 
+function applyRunStartToWorkspaceSession(session, data) {
+  if (!session || !data?.run) {
+    return;
+  }
+  resetWorkspaceManualState(session);
+  const previousSnapshot = session.state.snapshot;
+  session.state.snapshot = {
+    thread_id: data.thread_id,
+    status: data.run.status || "queued",
+    content: null,
+    approval_request: null,
+    messages: data.messages || previousSnapshot?.messages || [],
+    current_run: data.run,
+    recent_runs: [
+      data.run,
+      ...(previousSnapshot?.recent_runs || []).filter((run) => run?.run_id !== data.run.run_id),
+    ],
+    project_runs: previousSnapshot?.project_runs || [],
+  };
+  session.state.latestArtifactSnapshot = null;
+  session.state.artifactCache = new Map();
+  session.state.selectedRunId = null;
+  session.boundRunId = data.run.run_id;
+  session.source = session.source === "history" ? "history" : "convert";
+  session.hasStarted = true;
+  session.status = data.run.status || "queued";
+  session.title = data.run.project_name || session.title;
+  if (session.state.localUpload?.previewObjectUrl) {
+    URL.revokeObjectURL(session.state.localUpload.previewObjectUrl);
+  }
+  session.state.localUpload = null;
+  session.draft = {
+    ...(session.draft || createEmptyWorkspaceDraft()),
+    imagePath: "",
+  };
+  session.loaded = true;
+}
+
 async function createThread() {
   const data = await fetchJson("/threads", { method: "POST" });
-  appState.threadId = data.thread_id;
+  const emptyState = createEmptyWorkspaceState(data.thread_id);
+  for (const key of WORKSPACE_STATE_KEYS) {
+    appState[key] = emptyState[key];
+  }
+  invalidateLiveRequests();
   elements.threadId.textContent = appState.threadId;
-  appState.artifactCache.clear();
-  releaseManualReferenceUploads();
-  clearUploadPreview();
   resetUiSelections();
   resetRenderState();
   clearArtifactPanel();
+  if (elements.artifactStatus) {
+    elements.artifactStatus.textContent = "No artifact is available for this conversion yet.";
+  }
+  if (elements.compareInputMessage) {
+    elements.compareInputMessage.textContent = "No instruction yet.";
+  }
+  renderWorkspaceActivityForSnapshot(null, { clearWhenEmpty: true });
   renderManualAdjustmentPanel(null);
   updateWorkflowTraceSummary(null);
   updateWorkspaceActionAvailability(null);
@@ -3262,6 +4860,17 @@ async function createThread() {
 }
 
 async function sendMessage() {
+  if (
+    conversionSubmissionInFlight
+    || newWorkspaceRequestPromise
+    || isActiveWorkspaceOperationInFlight("invoke")
+  ) {
+    return;
+  }
+  if (isActiveWorkspaceOperationInFlight("manual-adjust")) {
+    setStatus("Wait for the current refinement to finish before starting a new conversion in this tab.");
+    return;
+  }
   const readiness = getStartRuntimeReadiness();
   if (!readiness.ready) {
     updateStartRuntimeHint();
@@ -3269,18 +4878,55 @@ async function sendMessage() {
     return;
   }
 
-  sendRequestInFlight = true;
+  const pendingDraft = readWorkspaceDraft();
+  const pendingUpload = appState.localUpload;
+  const payload = buildInvokePayload(null, pendingDraft);
+  if (!payload.image_path) {
+    setStatus("Please select an input image.");
+    return;
+  }
+
+  let operation = null;
+  conversionSubmissionInFlight = true;
   updateStartRuntimeHint();
   setStatus("Request accepted. Processing...");
   try {
-    if (!appState.threadId) {
-      await createThread();
+    const session = await ensureStartDraftWorkspace({
+      draft: pendingDraft,
+      localUpload: pendingUpload,
+    });
+    operation = beginWorkspaceOperation("invoke");
+    if (operation.tabId !== session.tabId || operation.threadId !== session.threadId) {
+      throw new Error("Conversion workspace changed before submission.");
     }
+    updateStartRuntimeHint();
+    payload.thread_id = operation.threadId;
     const data = await fetchJson("/invoke", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildInvokePayload(appState.threadId)),
+      body: JSON.stringify(payload),
     });
+    const originSession = getOperationSession(operation);
+    if (!originSession) {
+      return;
+    }
+    applyRunStartToWorkspaceSession(originSession, data);
+    const oldTabId = originSession.tabId;
+    const newTabId = data.run.run_id;
+    originSession.tabId = newTabId;
+    appState.workspaceSessions.delete(oldTabId);
+    appState.workspaceSessions.set(newTabId, originSession);
+    appState.workspaceTabOrder = appState.workspaceTabOrder.map((tabId) => tabId === oldTabId ? newTabId : tabId);
+    if (appState.activeWorkspaceTabId === oldTabId) {
+      appState.activeWorkspaceTabId = newTabId;
+    }
+    operation.tabId = newTabId;
+    if (!isOperationActive(operation)) {
+      renderWorkspaceTabs();
+      persistWorkspaceTabs();
+      return;
+    }
+    resetInputImageSelection();
     stopSnapshotPolling();
     stopArtifactPolling();
     invalidateLiveRequests();
@@ -3291,21 +4937,60 @@ async function sendMessage() {
     resetUiSelections();
     resetRenderState();
     clearArtifactPanel();
+    renderWorkspaceActivityForSnapshot(null, { clearWhenEmpty: true });
     renderManualAdjustmentPanel(null);
     updateWorkflowTraceSummary(null);
     renderWorkspaceArtifactLoadingState(data.run);
     updateWorkspaceActionAvailability({ status: data.run?.status || "queued", available: false });
     applyRunStartSnapshot(data);
+    captureActiveWorkspaceSession();
+    renderWorkspaceTabs();
+    persistWorkspaceTabs();
     if (document.body.classList.contains("desktop-body")) {
       window.dispatchEvent(new CustomEvent("desktop-open-workspace-trace"));
     }
     setStatus("Running");
-    await refreshSnapshot({ silent: true, force: true });
+    try {
+      await refreshSnapshot({ silent: true, force: true });
+    } catch (error) {
+      console.warn("Run was accepted, but the first monitor refresh was delayed", error);
+      scheduleSnapshotPolling();
+    }
   } catch (error) {
-    setStatus(error.message || "Send failed");
+    if (operation) {
+      recordWorkspaceOperationError(operation, error, "Send failed");
+    } else {
+      setStatus(error.message || "Send failed");
+    }
   } finally {
-    sendRequestInFlight = false;
+    if (operation) {
+      finishWorkspaceOperation(operation);
+    }
+    conversionSubmissionInFlight = false;
     updateStartRuntimeHint();
+  }
+}
+
+async function cancelActiveRun() {
+  const run = appState.snapshot?.current_run;
+  if (!run?.run_id || !["queued", "running"].includes(run.status)) {
+    return;
+  }
+  const operation = beginWorkspaceOperation("cancel-run");
+  try {
+    await fetchJson(
+      `/threads/${encodeURIComponent(operation.threadId)}/runs/${encodeURIComponent(run.run_id)}/cancel`,
+      { method: "POST" },
+    );
+    if (isOperationActive(operation)) {
+      elements.desktopStopRun.disabled = true;
+      setStatus("Cancellation requested");
+      scheduleSnapshotPolling();
+    }
+  } catch (error) {
+    recordWorkspaceOperationError(operation, error, "Cancellation failed");
+  } finally {
+    finishWorkspaceOperation(operation);
   }
 }
 
@@ -3319,15 +5004,20 @@ async function resumeApproval(decision) {
 }
 
 async function resumeRunForRun(run) {
-  if (!run?.artifact_dir) {
+  if (!run?.run_id) {
     setStatus("No resumable run is available.");
+    return;
+  }
+  if (isActiveWorkspaceOperationInFlight("manual-adjust")) {
+    setStatus("Wait for the current refinement to finish before resuming this tab.");
     return;
   }
 
   const extraBudgetRaw = elements.resumeExtraBudget.value.trim();
+  const operation = beginWorkspaceOperation("resume");
   const payload = {
-    run_dir: run.artifact_dir,
-    thread_id: appState.threadId,
+    run_id: run.run_id,
+    thread_id: operation.threadId,
   };
   if (extraBudgetRaw) {
     const extraBudget = Number.parseInt(extraBudgetRaw, 10);
@@ -3345,15 +5035,35 @@ async function resumeRunForRun(run) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    const originSession = getOperationSession(operation);
+    if (!originSession) {
+      return;
+    }
+    applyRunStartToWorkspaceSession(originSession, data);
+    if (!isOperationActive(operation)) {
+      renderWorkspaceTabs();
+      persistWorkspaceTabs();
+      return;
+    }
     appState.threadId = data.thread_id;
     elements.threadId.textContent = appState.threadId;
     resetUiSelections();
-    await refreshSnapshot({ silent: true });
-    setStatus("Resumed");
+    try {
+      await refreshSnapshot({ silent: true });
+    } catch (error) {
+      console.warn("Resume was accepted, but the first monitor refresh was delayed", error);
+      scheduleSnapshotPolling();
+    }
+    if (isOperationActive(operation)) {
+      setStatus("Resumed");
+    }
   } catch (error) {
-    setStatus(error.message || "Resume failed");
+    recordWorkspaceOperationError(operation, error, "Resume failed");
   } finally {
-    elements.resumeRun.disabled = false;
+    finishWorkspaceOperation(operation);
+    if (isOperationActive(operation)) {
+      elements.resumeRun.disabled = false;
+    }
   }
 }
 
@@ -3364,7 +5074,6 @@ async function resumeRunFromArtifacts() {
   }
   const selectedRun = getSelectedRun();
   await resumeRunForRun({
-    artifact_dir: appState.latestArtifactSnapshot.artifact_dir,
     run_id: selectedRun?.run_id || appState.latestArtifactSnapshot.run_id,
   });
 }
@@ -3374,11 +5083,38 @@ function bindFormEvents() {
     if (!file) {
       return;
     }
+    const operation = beginWorkspaceOperation("input-upload");
     try {
-      await uploadLocalFile(file, setStatus);
+      const upload = await uploadLocalFile(file, setStatus, {
+        shouldApply: () => isOperationActive(operation),
+      });
+      const originSession = getOperationSession(operation);
+      if (!originSession) {
+        if (upload?.previewObjectUrl) {
+          URL.revokeObjectURL(upload.previewObjectUrl);
+        }
+        return;
+      }
+      const previousUpload = originSession.state.localUpload;
+      if (previousUpload?.previewObjectUrl && previousUpload.previewObjectUrl !== upload?.previewObjectUrl) {
+        URL.revokeObjectURL(previousUpload.previewObjectUrl);
+      }
+      originSession.state.localUpload = upload;
+      originSession.draft = {
+        ...(originSession.draft || createEmptyWorkspaceDraft()),
+        imagePath: upload.image_path,
+      };
+      if (isOperationActive(operation)) {
+        appState.localUpload = upload;
+        originSession.draft = readWorkspaceDraft();
+      }
     } catch (error) {
-      elements.uploadStatus.textContent = failureMessage;
-      setStatus(error.message || failureMessage);
+      recordWorkspaceOperationError(operation, error, failureMessage);
+      if (isOperationActive(operation)) {
+        elements.uploadStatus.textContent = failureMessage;
+      }
+    } finally {
+      finishWorkspaceOperation(operation);
     }
   }
 
@@ -3386,12 +5122,11 @@ function bindFormEvents() {
     if (!file) {
       return;
     }
-    try {
-      await uploadManualReferenceFiles([file]);
+    const result = await uploadManualReferenceFiles([file]);
+    if (result?.active && result.ok) {
       renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
-    } catch (error) {
+    } else if (result?.active && !result.ok) {
       elements.manualUploadStatus.textContent = failureMessage;
-      setStatus(error.message || failureMessage);
     }
   }
 
@@ -3478,13 +5213,32 @@ function bindFormEvents() {
     event.stopPropagation();
     void (async () => {
       if (appState.hostCapabilities.canOpenLocalFilePicker && window.desktopHost) {
-        const imagePath = await pickLocalFileFromHost();
-        if (imagePath) {
-          elements.imagePath.value = imagePath;
-          elements.uploadStatus.textContent = "Selected local image from local workspace.";
-          updateEffectiveValues();
-          updateGuideContent();
+        const operation = beginWorkspaceOperation("host-file-picker");
+        try {
+          const imagePath = await pickLocalFileFromHost();
+          if (imagePath) {
+            const originSession = getOperationSession(operation);
+            if (!originSession) {
+              return;
+            }
+            originSession.draft = {
+              ...(originSession.draft || createEmptyWorkspaceDraft()),
+              imagePath,
+            };
+            if (!isOperationActive(operation)) {
+              return;
+            }
+            elements.imagePath.value = imagePath;
+            elements.uploadStatus.textContent = "Selected local image from local workspace.";
+            updateEffectiveValues();
+            updateGuideContent();
+            return;
+          }
+        } catch (error) {
+          recordWorkspaceOperationError(operation, error, "Unable to open the local file picker");
           return;
+        } finally {
+          finishWorkspaceOperation(operation);
         }
       }
       elements.uploadFileInput.click();
@@ -3640,6 +5394,10 @@ function bindStartRuntimeHintUpdates() {
 }
 
 function bindActionEvents() {
+  elements.desktopStopRun?.addEventListener("click", async () => {
+    await cancelActiveRun();
+  });
+
   elements.messagePresetBar?.addEventListener("click", (event) => {
     const presetButton = event.target instanceof Element ? event.target.closest("[data-preset]") : null;
     const presetKey = presetButton?.getAttribute("data-preset");
@@ -3682,11 +5440,40 @@ function bindActionEvents() {
   });
 
   elements.newThread.addEventListener("click", async () => {
-    stopSnapshotPolling();
-    stopArtifactPolling();
-    stopManualAdjustmentPolling();
-    await createThread();
+    document.querySelector('[data-desktop-page-target="start"]')?.click();
+    await ensureStartDraftWorkspace();
   });
+
+  elements.workspaceNewTab?.addEventListener("click", async () => {
+    document.querySelector('[data-desktop-page-target="start"]')?.click();
+    await ensureStartDraftWorkspace();
+  });
+
+  elements.workspaceTabOverflow?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!elements.workspaceTabMenu) {
+      return;
+    }
+    const expanded = elements.workspaceTabMenu.hidden;
+    elements.workspaceTabMenu.hidden = !expanded;
+    elements.workspaceTabOverflow.setAttribute("aria-expanded", expanded ? "true" : "false");
+  });
+
+  elements.workspaceTabList?.addEventListener("wheel", (event) => {
+    const list = elements.workspaceTabList;
+    if (list.scrollWidth <= list.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      return;
+    }
+    const movingLeft = event.deltaY < 0;
+    const canMove = movingLeft
+      ? list.scrollLeft > 0
+      : list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+    if (!canMove) {
+      return;
+    }
+    event.preventDefault();
+    list.scrollLeft += event.deltaY;
+  }, { passive: false });
 
   elements.refreshMonitor.addEventListener("click", async () => {
     try {
@@ -3799,7 +5586,14 @@ function bindActionEvents() {
   elements.manualUploadInput.addEventListener("change", async (event) => {
     const files = Array.from(event.target.files || []);
     try {
-      await uploadManualReferenceFiles(files);
+      const result = await uploadManualReferenceFiles(files);
+      if (!result?.active) {
+        return;
+      }
+      if (!result.ok) {
+        elements.manualUploadStatus.textContent = "Reference upload failed.";
+        return;
+      }
       renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
     } catch (error) {
       setStatus(error.message || "Reference upload failed");
@@ -3812,6 +5606,7 @@ function bindActionEvents() {
   elements.manualPasteReferenceButton.addEventListener("click", async (event) => {
     event.stopPropagation();
     setManualReferenceMode("add", { openUpload: true, render: false });
+    const operation = beginWorkspaceOperation("manual-reference-upload");
     try {
       let file = null;
       if (navigator.clipboard?.read) {
@@ -3830,42 +5625,66 @@ function bindActionEvents() {
         }
       }
       if (!file) {
-        elements.manualReferencePastezone.focus();
-        elements.manualUploadStatus.textContent = "Focus the paste zone and press Ctrl+V to paste a reference image.";
+        if (isOperationActive(operation)) {
+          elements.manualReferencePastezone.focus();
+          elements.manualUploadStatus.textContent = "Focus the paste zone and press Ctrl+V to paste a reference image.";
+        }
         return;
       }
-      elements.manualUploadStatus.textContent = "Clipboard reference detected. Uploading...";
-      await uploadManualReferenceFiles([file]);
+      if (isOperationActive(operation)) {
+        elements.manualUploadStatus.textContent = "Clipboard reference detected. Uploading...";
+      }
+      const result = await uploadManualReferenceFiles([file], operation);
+      if (!result?.active) {
+        return;
+      }
+      if (!result.ok) {
+        elements.manualUploadStatus.textContent = "Reference upload failed.";
+        return;
+      }
       renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
     } catch (error) {
-      elements.manualReferencePastezone.focus();
-      elements.manualUploadStatus.textContent = "Clipboard read failed. Focus the paste zone and press Ctrl+V.";
-      setStatus(error.message || "Clipboard reference upload failed");
+      recordWorkspaceOperationError(operation, error, "Clipboard reference upload failed");
+      if (isOperationActive(operation)) {
+        elements.manualReferencePastezone.focus();
+        elements.manualUploadStatus.textContent = "Clipboard read failed. Focus the paste zone and press Ctrl+V.";
+      }
+    } finally {
+      finishWorkspaceOperation(operation);
     }
   });
 
   elements.manualReferenceCaptureButton?.addEventListener("click", async (event) => {
     event.stopPropagation();
     setManualReferenceMode("add", { openUpload: true, render: false });
+    const operation = beginWorkspaceOperation("manual-reference-upload");
+    const snapshot = appState.latestArtifactSnapshot;
     try {
       elements.manualUploadStatus.textContent = "Capturing the selected input area...";
-      await captureReferenceImageFromInput(appState.latestArtifactSnapshot);
-      renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+      const result = await captureReferenceImageFromInput(snapshot, operation);
+      if (result?.active) {
+        renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+      }
     } catch (error) {
-      elements.manualUploadStatus.textContent = error.message || "Failed to capture the input crop.";
-      setStatus(error.message || "Reference capture failed");
+      recordWorkspaceOperationError(operation, error, "Reference capture failed");
+      if (isOperationActive(operation)) {
+        elements.manualUploadStatus.textContent = error.message || "Failed to capture the input crop.";
+      }
+    } finally {
+      finishWorkspaceOperation(operation);
     }
   });
 
   elements.manualUseReferenceImages.addEventListener("change", () => {
     if (!elements.manualUseReferenceImages.checked) {
-      appState.manualCustomReferenceConfirmed = false;
+      setManualReferenceMode("none");
+      return;
     }
-    renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+    setManualReferenceMode(elements.manualIncludeDefaultCrop.checked ? "default" : "add");
   });
 
   elements.manualIncludeDefaultCrop.addEventListener("change", () => {
-    renderManualAdjustmentPanel(appState.latestArtifactSnapshot);
+    setManualReferenceMode(elements.manualIncludeDefaultCrop.checked ? "default" : "add");
   });
 
   elements.manualApplyButton.addEventListener("click", async () => {
@@ -3885,20 +5704,53 @@ function bindActionEvents() {
       stopSnapshotPolling();
       stopArtifactPolling();
       stopManualAdjustmentPolling();
+      stopWorkspaceBackgroundMonitor();
     } else {
       schedulePolling();
       if (appState.manualAdjustmentRequestInFlight) {
         startManualAdjustmentPolling();
       }
       void refreshSnapshot({ silent: true });
+      scheduleWorkspaceBackgroundMonitor();
       window.requestAnimationFrame(refreshWorkflowTraceLayout);
     }
   });
 
   window.addEventListener("beforeunload", () => {
+    captureActiveWorkspaceSession();
+    persistWorkspaceTabs();
     stopSnapshotPolling();
     stopArtifactPolling();
     stopManualAdjustmentPolling();
+    stopWorkspaceBackgroundMonitor();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!elements.workspaceTabMenu || elements.workspaceTabMenu.hidden) {
+      return;
+    }
+    if (!(event.target instanceof Element) || !event.target.closest(".workspace-tab-overflow-wrap")) {
+      elements.workspaceTabMenu.hidden = true;
+      elements.workspaceTabOverflow?.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!event.ctrlKey || event.key !== "Tab") {
+      return;
+    }
+    const openTabs = appState.workspaceTabOrder.filter(
+      (tabId) => appState.workspaceSessions.get(tabId)?.boundRunId
+        && appState.workspaceSessions.get(tabId)?.open !== false,
+    );
+    if (openTabs.length < 2) {
+      return;
+    }
+    event.preventDefault();
+    const currentIndex = Math.max(0, openTabs.indexOf(appState.activeWorkspaceTabId));
+    const delta = event.shiftKey ? -1 : 1;
+    const nextIndex = (currentIndex + delta + openTabs.length) % openTabs.length;
+    void selectWorkspaceTab(openTabs[nextIndex]);
   });
 
   window.addEventListener("resize", () => {
@@ -3909,6 +5761,27 @@ function bindActionEvents() {
   window.addEventListener("desktop-history-change", () => {
     renderViews();
     window.requestAnimationFrame(syncRecentRunsHeight);
+  });
+
+  window.addEventListener("desktop-history-query", () => {
+    void refreshHistory().catch((error) => {
+      if (error?.message !== "Request cancelled") {
+        setStatus(error.message || "Project history could not be loaded.");
+      }
+    });
+  });
+
+  window.addEventListener("desktop-history-open", () => {
+    void refreshHistory().catch((error) => {
+      setStatus(error.message || "Project history could not be loaded.");
+    });
+  });
+
+  window.addEventListener("desktop-workspace-open", () => {
+    void ensureWorkspaceDisplayState().catch((error) => {
+      setStatus(error.message || "Workspace could not be opened.");
+      renderDefaultWorkspaceSkeleton();
+    });
   });
 
   window.addEventListener("desktop-process-guide-change", () => {
@@ -4040,14 +5913,27 @@ export async function initApp() {
   updateModeControls();
 
   try {
-    setStatus("Creating thread...");
-    await Promise.all([createThread(), loadFrontendDefaults(), loadFrontendHostInfo(), loadRuntimeOverrides()]);
+    const restoredWorkspace = restoreWorkspaceTabs();
+    setStatus(restoredWorkspace ? "Restoring projects..." : "Preparing a new conversion...");
+    await Promise.all([loadFrontendDefaults(), loadFrontendHostInfo(), loadRuntimeOverrides(), refreshHistory()]);
+    if (restoredWorkspace) {
+      await restorePersistedWorkspaceSessions();
+      applyWorkspaceDraft(appState.workspaceSessions.get(appState.activeWorkspaceTabId));
+      renderWorkspaceTabs();
+    } else {
+      await ensureStartDraftWorkspace();
+    }
     setManualSelectionMode("select");
     setManualReferenceSelectionMode("select");
     updateEffectiveValues();
     updateStartRuntimeHint();
     updateMessagePresetSelection();
-    await refreshSnapshot({ silent: true });
+    if (restoredWorkspace) {
+      await refreshSnapshot({ silent: true });
+      captureActiveWorkspaceSession();
+    }
+    renderWorkspaceTabs();
+    scheduleWorkspaceBackgroundMonitor();
     updateModeControls();
     setStatus("Ready");
   } catch {

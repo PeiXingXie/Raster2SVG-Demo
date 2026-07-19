@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 from PIL import Image
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.artifacts import ArtifactStore
 from deepagents_template.config import get_settings
 from deepagents_template.modeling.executor import MultimodalJsonCaller
@@ -22,6 +23,7 @@ from deepagents_template.prompt import (
 )
 from deepagents_template.resume import load_request_from_run_dir
 from deepagents_template.runtime import get_thread_store
+from deepagents_template.retry_policy import resolve_retry_limits
 from deepagents_template.schemas import (
     ArtifactSnapshot,
     ManualAdjustmentPreEditAnalysis,
@@ -76,11 +78,12 @@ class ManualAdjustmentService:
             raise FileNotFoundError("Artifact run directory is unavailable.")
         self.request = load_request_from_run_dir(self.run_dir)
         settings = get_settings()
+        self.retry_limits = resolve_retry_limits(settings, self.request)
         self.api_key = settings.resolved_api_key(self.request.api_key)
         self.base_url = settings.resolved_base_url(self.request.base_url)
         self.api_provider = settings.resolved_api_provider(self.request.api_provider)
         self.api_format = settings.resolved_api_format(self.request.api_format)
-        self.max_retries = settings.resolved_max_retries(self.request.max_retries)
+        self.max_retries = self.retry_limits.model_retry_limit()
         self.agent_model = settings.resolved_agent_model(self.request.agent_model)
         self.subagent_model = settings.resolved_subagent_model(self.request.subagent_model)
         self.worker_caller = MultimodalJsonCaller(
@@ -88,6 +91,7 @@ class ManualAdjustmentService:
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
+            response_validation_max_attempts=self.retry_limits.response_validation_max_attempts,
             api_provider=self.api_provider,
             api_format=self.api_format,
             response_callback=self._record_model_response,
@@ -99,6 +103,7 @@ class ManualAdjustmentService:
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
+            response_validation_max_attempts=self.retry_limits.response_validation_max_attempts,
             api_provider=self.api_provider,
             api_format=self.api_format,
             response_callback=self._record_model_response,
@@ -439,7 +444,8 @@ class ManualAdjustmentService:
         call_index = self._manual_call_index
         safe_model_name = self._safe_model_response_name(payload.get("response_model"))
         request_path = self._model_call_dir() / f"{call_index:03d}_{safe_model_name}_sent_message.json"
-        request_path.write_text(
+        atomic_write_text(
+            request_path,
             json.dumps(
                 {
                     "call_index": call_index,
@@ -453,7 +459,6 @@ class ManualAdjustmentService:
                 ensure_ascii=False,
                 indent=2,
             ),
-            encoding="utf-8",
         )
         return call_index
 
@@ -474,7 +479,7 @@ class ManualAdjustmentService:
             raw_response_file = self._model_call_dir() / f"{call_index:03d}_{safe_model_name}_response_raw.txt"
             request_file = self._model_call_dir() / f"{call_index:03d}_{safe_model_name}_sent_message.json"
             if isinstance(raw_text, str):
-                raw_response_file.write_text(raw_text, encoding="utf-8")
+                atomic_write_text(raw_response_file, raw_text)
             raw_response_path = str(raw_response_file.relative_to(self.run_dir)).replace("/", "\\")
             request_path = str(request_file.relative_to(self.run_dir)).replace("/", "\\")
 
@@ -1016,7 +1021,7 @@ class ManualAdjustmentService:
             merged_regions[region_path.parent.name] = region_path.read_text(encoding="utf-8")
         final_svg = merge_svg(template_svg, merged_regions)
         final_svg = normalize_svg(final_svg)
-        (self.run_dir / "output" / "final.svg").write_text(final_svg, encoding="utf-8")
+        atomic_write_text(self.run_dir / "output" / "final.svg", final_svg)
 
     def _load_region_fragment(self, region_id: str, *, base_svg_text: str | None = None) -> str:
         if base_svg_text:
@@ -1170,10 +1175,8 @@ class ManualAdjustmentService:
 
     @staticmethod
     def _write_json(path: Path, payload: dict | list) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     @staticmethod
     def _write_text(path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)

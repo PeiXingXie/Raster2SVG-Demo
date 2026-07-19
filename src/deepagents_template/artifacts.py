@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from deepagents_template.atomic_files import atomic_write_text, read_text_with_retry
 from deepagents_template.config import get_settings
+from deepagents_template.resume import load_run_state, write_run_state
 from deepagents_template.schemas import ExecutionRun, ThreadState
 from deepagents_template.schemas import FailureDiagnostic
 from deepagents_template.svg_utils import merge_svg, normalize_svg
@@ -103,17 +106,17 @@ class ArtifactStore:
         self.root = get_settings().resolved_run_artifacts_dir()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def create_run_dir(self, project_name: str) -> Path:
+    def create_run_dir(self) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        slug = slugify_project_name(project_name, max_length=RUN_DIR_SLUG_MAX_LENGTH)
-        run_dir = self.root / f"{timestamp}-{slug}"
         suffix = 1
-        candidate = run_dir
-        while candidate.exists():
-            suffix += 1
-            candidate = self.root / f"{timestamp}-{slug}-{suffix}"
-        candidate.mkdir(parents=True, exist_ok=False)
-        return candidate
+        while True:
+            run_id = timestamp if suffix == 1 else f"{timestamp}-{suffix}"
+            candidate = self.root / run_id
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+                return candidate
+            except FileExistsError:
+                suffix += 1
 
     def write_metadata(self, thread: ThreadState) -> None:
         run = thread.current_run
@@ -131,9 +134,9 @@ class ArtifactStore:
             "messages": [message.model_dump(mode="json") for message in thread.messages],
             "recent_runs": [recent_run.model_dump(mode="json") for recent_run in thread.recent_runs],
         }
-        (artifact_dir / "metadata.json").write_text(
+        atomic_write_text(
+            artifact_dir / "metadata.json",
             json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def write_output(self, run: ExecutionRun, content: str) -> None:
@@ -144,7 +147,8 @@ class ArtifactStore:
         primary_markdown = artifact_dir / "output" / "report.md"
         primary_json = artifact_dir / "output" / "report.json"
         compatibility_markdown = artifact_dir / "output.md"
-        compatibility_markdown.write_text(
+        atomic_write_text(
+            compatibility_markdown,
             "\n".join(
                 [
                     "# Compatibility Output",
@@ -163,10 +167,10 @@ class ArtifactStore:
                     "",
                 ]
             ),
-            encoding="utf-8",
         )
         payload = {
             "run_id": run.run_id,
+            "owner_thread_id": run.owner_thread_id,
             "project_name": run.project_name,
             "status": run.status,
             "current_stage": run.current_stage,
@@ -176,26 +180,131 @@ class ArtifactStore:
             "compatibility_markdown_path": str(compatibility_markdown.relative_to(artifact_dir)).replace("/", "\\"),
             "content_preview": content[:400] if content else "",
         }
-        (artifact_dir / "output.json").write_text(
+        atomic_write_text(
+            artifact_dir / "output.json",
             json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
-    def list_recent_runs(self, limit: int = 20) -> list[ExecutionRun]:
-        run_records: list[tuple[datetime, ExecutionRun]] = []
-        for run_dir in sorted(self.root.iterdir(), reverse=True):
-            if not run_dir.is_dir():
+    def _run_directory_candidates(self) -> list[tuple[float, Path]]:
+        candidates: list[tuple[float, Path]] = []
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                if not entry.is_dir() or entry.name.startswith((".", "_")):
+                    continue
+                run_dir = Path(entry.path)
+                metadata_path = run_dir / "metadata.json"
+                output_path = run_dir / "output.json"
+                timestamp_path = metadata_path if metadata_path.is_file() else output_path
+                if not timestamp_path.is_file():
+                    continue
+                try:
+                    modified_at = timestamp_path.stat().st_mtime
+                except OSError:
+                    continue
+                candidates.append((modified_at, run_dir))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates
+
+    @staticmethod
+    def _run_matches_history_query(run: ExecutionRun, status_filter: str, search: str) -> bool:
+        normalized_status = status_filter.strip().lower()
+        if normalized_status != "all":
+            run_status = str(run.status or "").lower()
+            if normalized_status == "paused":
+                if not run_status.startswith("paused"):
+                    return False
+            elif run_status != normalized_status:
+                return False
+        normalized_search = search.strip().lower()
+        if not normalized_search:
+            return True
+        searchable = " ".join(
+            str(value)
+            for value in (
+                run.project_name,
+                run.status,
+                run.current_stage,
+                run.run_id,
+            )
+            if value
+        ).lower()
+        return normalized_search in searchable
+
+    def list_runs_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 6,
+        status_filter: str = "all",
+        search: str = "",
+        sort: str = "updated_desc",
+    ) -> tuple[list[ExecutionRun], int | None, int | None, bool]:
+        """Load only the requested History page unless global sorting requires all runs."""
+        resolved_page = max(1, page)
+        resolved_page_size = max(1, page_size)
+        offset = (resolved_page - 1) * resolved_page_size
+        candidates = self._run_directory_candidates()
+
+        if sort in {"name_asc", "status_asc"}:
+            matching_runs = []
+            for _, run_dir in candidates:
+                run = self.load_execution_run(run_dir)
+                if run is not None and self._run_matches_history_query(run, status_filter, search):
+                    matching_runs.append(run)
+            if sort == "name_asc":
+                matching_runs.sort(key=lambda run: (run.project_name or "").casefold())
+            else:
+                matching_runs.sort(
+                    key=lambda run: (
+                        str(run.status or "").casefold(),
+                        -(run.updated_at or run.finished_at or run.started_at).timestamp(),
+                    )
+                )
+            total = len(matching_runs)
+            total_pages = max(1, (total + resolved_page_size - 1) // resolved_page_size)
+            page_runs = matching_runs[offset : offset + resolved_page_size]
+            return page_runs, total, total_pages, offset + len(page_runs) < total
+
+        page_runs: list[ExecutionRun] = []
+        matched_count = 0
+        has_more = False
+        exhausted = True
+        for _, run_dir in candidates:
+            run = self.load_execution_run(run_dir)
+            if run is None or not self._run_matches_history_query(run, status_filter, search):
                 continue
+            matched_count += 1
+            if matched_count <= offset:
+                continue
+            if len(page_runs) < resolved_page_size:
+                page_runs.append(run)
+                continue
+            has_more = True
+            exhausted = False
+            break
+
+        default_listing = status_filter == "all" and not search.strip()
+        if default_listing:
+            total = len(candidates)
+            total_pages = max(1, (total + resolved_page_size - 1) // resolved_page_size)
+            has_more = offset + len(page_runs) < total
+        elif exhausted:
+            total = matched_count
+            total_pages = max(1, (total + resolved_page_size - 1) // resolved_page_size)
+        else:
+            total = None
+            total_pages = None
+        return page_runs, total, total_pages, has_more
+
+    def list_recent_runs(self, limit: int = 20) -> list[ExecutionRun]:
+        runs, _, _, _ = self.list_runs_page(page=1, page_size=limit)
+        return runs
+
+    def find_run_by_id(self, run_id: str) -> ExecutionRun | None:
+        for _, run_dir in self._run_directory_candidates():
             run = self.load_execution_run(run_dir)
             if run is None:
                 continue
-            sort_key = run.updated_at or run.finished_at or run.started_at
-            run_records.append((sort_key, run))
-        run_records.sort(key=lambda item: item[0], reverse=True)
-        return [run for _, run in run_records[:limit]]
-
-    def find_run_by_id(self, run_id: str) -> ExecutionRun | None:
-        for run in self.list_recent_runs(limit=200):
             if run.run_id == run_id:
                 return run
         return None
@@ -209,7 +318,7 @@ class ArtifactStore:
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                metadata = json.loads(read_text_with_retry(metadata_path, encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 metadata = {}
         else:
@@ -227,17 +336,22 @@ class ArtifactStore:
                 item["updated_at"] = now.isoformat()
             recent_runs.append(item)
         metadata["recent_runs"] = recent_runs
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2))
 
         output_path = run_dir / "output.json"
         if output_path.exists():
             try:
-                output_payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+                output_payload = json.loads(read_text_with_retry(output_path, encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 output_payload = None
             if isinstance(output_payload, dict):
                 output_payload["project_name"] = project_name
-                output_path.write_text(json.dumps(output_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                atomic_write_text(output_path, json.dumps(output_payload, ensure_ascii=False, indent=2))
+
+        run_state = load_run_state(run_dir)
+        if run_state is not None:
+            run_state.project_name = project_name
+            write_run_state(run_dir, run_state)
         return updated_run
 
     def delete_run_dir(self, artifact_dir: str | None) -> Path:
@@ -256,12 +370,13 @@ class ArtifactStore:
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             try:
-                payload = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                payload = json.loads(read_text_with_retry(metadata_path, encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict) and isinstance(payload.get("current_run"), dict):
                 run_payload = dict(payload["current_run"])
                 run_payload["artifact_dir"] = str(run_dir)
+                run_payload.setdefault("owner_thread_id", payload.get("thread_id"))
                 try:
                     if isinstance(run_payload.get("failure_diagnostic"), dict):
                         run_payload["failure_diagnostic"] = FailureDiagnostic.model_validate(run_payload["failure_diagnostic"])
@@ -272,7 +387,7 @@ class ArtifactStore:
         output_path = run_dir / "output.json"
         if output_path.exists():
             try:
-                payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+                payload = json.loads(read_text_with_retry(output_path, encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
@@ -282,6 +397,7 @@ class ArtifactStore:
                 failure_diagnostic = payload.get("failure_diagnostic")
                 return ExecutionRun(
                     run_id=run_id,
+                    owner_thread_id=payload.get("owner_thread_id"),
                     mode="invoke",
                     status=str(payload.get("status") or "completed"),
                     current_stage=str(payload.get("current_stage") or "completed"),
@@ -340,7 +456,7 @@ class ArtifactStore:
         log_file = run_dir / "logs" / "files.json"
         if log_file.exists():
             try:
-                records = json.loads(log_file.read_text(encoding="utf-8-sig"))
+                records = json.loads(read_text_with_retry(log_file, encoding="utf-8-sig"))
                 if isinstance(records, list):
                     return sorted(
                         [
@@ -355,7 +471,7 @@ class ArtifactStore:
 
         records: list[dict] = []
         for path in sorted(run_dir.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or path.name == ".shape-studio.lock":
                 continue
             stat = path.stat()
             relative_path = str(path.relative_to(run_dir))
@@ -375,7 +491,7 @@ class ArtifactStore:
         if file_path is None:
             return None
         try:
-            payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
+            payload = json.loads(read_text_with_retry(file_path, encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
@@ -385,7 +501,7 @@ class ArtifactStore:
         if file_path is None:
             return None
         try:
-            return json.loads(file_path.read_text(encoding="utf-8-sig"))
+            return json.loads(read_text_with_retry(file_path, encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -418,6 +534,31 @@ class ArtifactStore:
             "output_png": self._to_relative(run_dir, output_png),
             "initial_svg": self._to_relative(run_dir, initial_svg),
         }
+
+    def find_existing_history_previews(self, artifact_dir: str | None) -> dict[str, Path | None]:
+        """Locate existing History previews without generating or modifying artifacts."""
+        run_dir = self.resolve_run_dir(artifact_dir)
+        if run_dir is None:
+            return {"input": None, "output": None}
+
+        input_preview = self._find_first_existing(
+            run_dir,
+            "input/*.png",
+            "input/*.jpg",
+            "input/*.jpeg",
+            "input/*.webp",
+            "input/*.gif",
+            "input/*.bmp",
+        )
+        output_preview = self._find_first_existing(
+            run_dir,
+            "output/final.png",
+            "output/final.svg",
+            "output/*.png",
+            "output/*.svg",
+            "intermediate/initial.svg",
+        )
+        return {"input": input_preview, "output": output_preview}
 
     def build_region_overlays(self, artifact_dir: str | None) -> tuple[int | None, int | None, list[dict]]:
         regions_payload = self.load_payload(artifact_dir, "intermediate/regions.json")
@@ -523,7 +664,7 @@ class ArtifactStore:
         template_path = run_dir / "intermediate" / "template.svg"
         if not template_path.is_file():
             return []
-        template_svg = template_path.read_text(encoding="utf-8")
+        template_svg = read_text_with_retry(template_path)
         frame_dir = run_dir / "logs" / "view_frames"
         frame_dir.mkdir(parents=True, exist_ok=True)
 
@@ -617,19 +758,19 @@ class ArtifactStore:
             scope = step["scope"]
             frame_svg: str
             if scope == "final-output":
-                frame_svg = normalize_svg(fragment_path.read_text(encoding="utf-8"))
+                frame_svg = normalize_svg(read_text_with_retry(fragment_path))
             else:
                 region_id = step["region_id"]
-                fragment_text = fragment_path.read_text(encoding="utf-8")
+                fragment_text = read_text_with_retry(fragment_path)
                 last_region_fragments[region_id] = fragment_text
                 merged_regions = dict(last_region_fragments)
                 frame_svg = normalize_svg(merge_svg(template_svg, merged_regions))
 
             frame_name = f"{index:03d}_{slugify_project_name(step['title'])}.svg"
             frame_path = frame_dir / frame_name
-            existing_text = frame_path.read_text(encoding="utf-8") if frame_path.is_file() else None
+            existing_text = read_text_with_retry(frame_path) if frame_path.is_file() else None
             if existing_text != frame_svg:
-                frame_path.write_text(frame_svg, encoding="utf-8")
+                atomic_write_text(frame_path, frame_svg)
             stat = frame_path.stat()
             frames.append(
                 {
@@ -971,7 +1112,7 @@ class ArtifactStore:
         if not path.is_file():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8-sig"))
+            return json.loads(read_text_with_retry(path, encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return None
 

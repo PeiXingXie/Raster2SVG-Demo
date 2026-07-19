@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from deepagents_template.atomic_files import read_text_with_retry
 from deepagents_template.schemas import ExecutionRun, WorkflowTrace, WorkflowTraceNode, WorkflowTraceSummary
 
 
@@ -120,7 +121,7 @@ def _coerce_int(value: object) -> int | None:
 
 def _load_json_file(path: Path) -> dict:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_with_retry(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -182,7 +183,7 @@ def _model_call_records(run: ExecutionRun | None) -> list[tuple[int, object, dic
         raw_path = request_path.with_name(request_path.name.replace("_sent_message.json", "_response_raw.txt"))
         raw_text = ""
         try:
-            raw_text = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.is_file() else ""
+            raw_text = read_text_with_retry(raw_path, errors="replace") if raw_path.is_file() else ""
         except OSError:
             raw_text = ""
         prompt_payload = request_payload.get("prompt") if isinstance(request_payload.get("prompt"), dict) else {}
@@ -275,6 +276,35 @@ def _is_budget_exhausted_failure(run: ExecutionRun | None) -> bool:
         run.error,
     ]
     return any("budgetexceedederror" in str(value or "").lower() or "max_budget exhausted" in str(value or "").lower() for value in values)
+
+
+def _run_block_reason(run: ExecutionRun | None) -> str | None:
+    """Classify expected stop conditions so they do not appear as execution failures."""
+    if run is None:
+        return None
+    if _is_budget_exhausted_failure(run):
+        return "budget_exhausted"
+    if run.status == "paused":
+        return "paused"
+    if run.status == "needs_approval":
+        return "awaiting_approval"
+    diagnostic = getattr(run, "failure_diagnostic", None)
+    values = [
+        getattr(diagnostic, "root_cause_type", None),
+        getattr(diagnostic, "error_type", None),
+        getattr(diagnostic, "root_cause_message", None),
+        getattr(diagnostic, "error_message", None),
+        run.error,
+    ]
+    if any("retry exhausted" in str(value or "").lower() for value in values):
+        return "retry_exhausted"
+    return None
+
+
+def _node_meta(*, block_reason: str | None = None, **values: Any) -> dict[str, Any]:
+    if block_reason:
+        values["block_reason"] = block_reason
+    return values
 
 
 def _budget_exhausted_target(run: ExecutionRun | None) -> dict[str, str | None]:
@@ -650,6 +680,7 @@ def _build_main_stage_nodes(
 ) -> list[WorkflowTraceNode]:
     current_stage_key = _effective_failure_stage_key(run) if run is not None and run.status == "failed" else active_stage_key
     current_index = STAGE_INDEX.get(current_stage_key, 0)
+    run_block_reason = _run_block_reason(run)
     nodes: list[WorkflowTraceNode] = []
     for index, (stage_key, label) in enumerate(MAIN_STAGES):
         status = "pending"
@@ -660,15 +691,15 @@ def _build_main_stage_nodes(
                 status = "success"
             elif index == current_index:
                 if run.status == "failed":
-                    status = "failed" if stage_key == current_stage_key else ("success" if index < current_index else "pending")
+                    status = "blocked" if run_block_reason else "failed"
                     summary = (
                         getattr(run.failure_diagnostic, "summary", None)
                         or getattr(run.failure_diagnostic, "error_message", None)
                         or run.error
                         or "Execution failed"
                     )
-                elif run.status == "paused":
-                    status = "blocked" if stage_key == current_stage_key else "pending"
+                elif run.status in {"paused", "needs_approval"}:
+                    status = "blocked"
                     summary = "Paused for resume" if stage_key == current_stage_key else None
                 elif run.status == "completed" and stage_key == "final-integrate":
                     status = "success"
@@ -694,6 +725,7 @@ def _build_main_stage_nodes(
                 started_at=started_at,
                 ended_at=ended_at if status in {"success", "failed", "blocked"} else None,
                 duration_ms=duration_ms,
+                meta=_node_meta(block_reason=run_block_reason if status == "blocked" else None),
             )
         )
     return nodes
@@ -814,13 +846,20 @@ def _build_layout_loop_node(
     if adjustment_calls == 0 and policy_calls == 0 and not stop_reason:
         return None
 
+    run_block_reason = _run_block_reason(run)
     status = "success"
+    block_reason = None
     if run.status == "failed" and current_stage_key == "layout":
-        status = "failed"
+        status = "blocked" if run_block_reason else "failed"
+        block_reason = run_block_reason
+    elif run.status in {"paused", "needs_approval"} and current_stage_key == "layout":
+        status = "blocked"
+        block_reason = run_block_reason
     elif current_stage_key == "layout":
         status = "retrying" if adjustment_calls > 1 or policy_calls > 0 else "running"
     elif issues_count:
         status = "blocked"
+        block_reason = "residual_issues"
 
     summary_parts = []
     if adjustment_calls:
@@ -841,11 +880,12 @@ def _build_layout_loop_node(
         ended_at=loop_ended_at if status not in {"running", "retrying"} else None,
         duration_ms=_duration_ms(loop_started_at, loop_ended_at),
         event_index=loop_event_index if isinstance(loop_event_index, int) else start_index,
-        meta={
-            "retries_total": adjustment_calls,
-            "budget_stage_key": "layout",
-            "budget_response_models": ["BboxAdjustmentResult", "BboxCombinedPolicyModelResult"],
-        },
+        meta=_node_meta(
+            block_reason=block_reason,
+            retries_total=adjustment_calls,
+            budget_stage_key="layout",
+            budget_response_models=["BboxAdjustmentResult", "BboxCombinedPolicyModelResult"],
+        ),
     )
 
 
@@ -860,11 +900,17 @@ def _build_initial_generate_nodes(
 
     current_index = STAGE_INDEX.get(current_stage_key, 0)
     initial_index = STAGE_INDEX["initial-generate"]
+    run_block_reason = _run_block_reason(run)
     branch_status = "pending"
-    if current_index > initial_index or (run is not None and run.status in TERMINAL_RUN_STATUSES and current_index >= initial_index):
+    if current_index > initial_index or (run is not None and run.status == "completed"):
         branch_status = "success"
     elif current_stage_key == "initial-generate":
-        branch_status = "running"
+        if run is not None and run.status == "failed":
+            branch_status = "blocked" if run_block_reason else "failed"
+        elif run is not None and run.status in {"paused", "needs_approval"}:
+            branch_status = "blocked"
+        else:
+            branch_status = "running"
 
     branch_started_at = None
     branch_ended_at = None
@@ -878,6 +924,7 @@ def _build_initial_generate_nodes(
             status=branch_status,
             summary=f"{len(regions)} region branch{'es' if len(regions) != 1 else ''}",
             execution_mode="parallel",
+            meta=_node_meta(block_reason=run_block_reason if branch_status == "blocked" else None),
         )
     ]
 
@@ -898,10 +945,15 @@ def _build_initial_generate_nodes(
             branch_event_index = event_index
 
         status = "pending"
-        if current_index > initial_index or (run is not None and run.status in TERMINAL_RUN_STATUSES and current_index >= initial_index):
+        if current_index > initial_index or (run is not None and run.status == "completed"):
             status = "success"
         elif current_stage_key == "initial-generate" and started_at is not None:
-            status = "running"
+            if run is not None and run.status == "failed":
+                status = "blocked" if run_block_reason else "failed"
+            elif run is not None and run.status in {"paused", "needs_approval"}:
+                status = "blocked"
+            else:
+                status = "running"
 
         object_count = len(_safe_list(region.get("objects")))
         summary = f"{object_count} object{'s' if object_count != 1 else ''}" if object_count else "Initial region branch prepared."
@@ -926,11 +978,12 @@ def _build_initial_generate_nodes(
                 ended_at=ended_at if status == "success" else None,
                 duration_ms=duration_ms,
                 event_index=event_index,
-                meta={
-                    "objects_total": object_count,
-                    "budget_stage_key": "initial-generate",
-                    "budget_response_models": sorted(INITIAL_REGION_RESPONSE_MODELS),
-                },
+                meta=_node_meta(
+                    block_reason=run_block_reason if status == "blocked" else None,
+                    objects_total=object_count,
+                    budget_stage_key="initial-generate",
+                    budget_response_models=sorted(INITIAL_REGION_RESPONSE_MODELS),
+                ),
             )
         )
 
@@ -949,28 +1002,31 @@ def _refine_region_status(
     result: dict[str, Any],
     worker_status: dict[str, Any] | None,
     budget_blocked_region_id: str | None = None,
-) -> tuple[str, str | None]:
+    run_block_reason: str | None = None,
+) -> tuple[str, str | None, str | None]:
     retry_used = int(region.get("retry_used") or 0)
     object_retries = sum(int(item.get("retry_used") or 0) for item in _safe_list(region.get("objects")))
     total_retries = retry_used + object_retries
     before_refine = STAGE_INDEX.get(current_stage_key, 0) < STAGE_INDEX["refine"]
     if before_refine:
-        return "pending", None
+        return "pending", None, None
     if worker_status and worker_status.get("status") == "running":
-        return ("retrying" if total_retries > 0 else "running"), worker_status.get("detail")
+        return ("retrying" if total_retries > 0 else "running"), worker_status.get("detail"), None
     if result.get("retry_exhausted") or region.get("retry_exhausted"):
-        return "blocked", _region_reason(result) or "Retry exhausted"
+        return "blocked", _region_reason(result) or "Retry exhausted", "retry_exhausted"
     if budget_blocked_region_id and str(region.get("region_id") or "") == budget_blocked_region_id:
-        return "blocked", "Run budget exhausted during refinement"
+        return "blocked", "Run budget exhausted during refinement", "budget_exhausted"
+    if run_block_reason and current_stage_key == "refine" and not result:
+        return "blocked", "Refinement stopped before this region could run", run_block_reason
     if run is not None and run.status == "running" and current_stage_key == "refine":
         if total_retries > 0:
-            return "retrying", _region_reason(result) or "Refinement loop still active"
-        return "issue_detected", "Waiting for review route"
+            return "retrying", _region_reason(result) or "Refinement loop still active", None
+        return "issue_detected", "Waiting for review route", None
     if total_retries > 0:
-        return "success", f"Accepted after {total_retries} retr{'y' if total_retries == 1 else 'ies'}"
+        return "success", f"Accepted after {total_retries} retr{'y' if total_retries == 1 else 'ies'}", None
     if run is not None and run.status in {"completed", "paused", "failed"}:
-        return "success", None
-    return "pending", None
+        return "success", None, None
+    return "pending", None, None
 
 
 def _build_refine_nodes(
@@ -995,7 +1051,9 @@ def _build_refine_nodes(
     branch_started_at = None
     branch_ended_at = None
     branch_event_index = None
-    budget_exhausted_in_refine = run is not None and run.status in {"failed", "paused"} and current_stage_key == "refine" and _is_budget_exhausted_failure(run)
+    run_block_reason = _run_block_reason(run)
+    run_blocked_in_refine = bool(run_block_reason and current_stage_key == "refine")
+    budget_exhausted_in_refine = run_blocked_in_refine and run_block_reason == "budget_exhausted"
     budget_target = _budget_exhausted_target(run) if budget_exhausted_in_refine else {"region_id": None, "object_id": None}
     budget_blocked_region_id = budget_target.get("region_id")
     budget_blocked_object_id = budget_target.get("object_id")
@@ -1004,13 +1062,14 @@ def _build_refine_nodes(
         region_id = str(region.get("region_id") or "")
         result = results_by_id.get(region_id, {})
         worker_status = workers.get(region_id)
-        status, summary = _refine_region_status(
+        status, summary, block_reason = _refine_region_status(
             current_stage_key=current_stage_key,
             run=run,
             region=region,
             result=result,
             worker_status=worker_status,
             budget_blocked_region_id=budget_blocked_region_id,
+            run_block_reason=run_block_reason if run_blocked_in_refine else None,
         )
         route = _region_route(result)
         retries_total = int(region.get("retry_used") or 0) + sum(
@@ -1059,17 +1118,18 @@ def _build_refine_nodes(
                 ended_at=region_ended_at if status not in {"running", "retrying"} else None,
                 duration_ms=region_duration_ms,
                 event_index=region_timing.get("event_index"),
-                meta={
-                    "retries_total": retries_total,
-                    "retry_used": region.get("retry_used") or 0,
-                    "objects_with_retries": sum(
+                meta=_node_meta(
+                    block_reason=block_reason,
+                    retries_total=retries_total,
+                    retry_used=region.get("retry_used") or 0,
+                    objects_with_retries=sum(
                         1
                         for item in _safe_list(region.get("objects"))
                         if int(item.get("retry_used") or 0) > 0 or item.get("retry_exhausted")
                     ),
-                    "budget_stage_key": "refine",
-                    "budget_response_models": sorted(REGION_REVIEW_RESPONSE_MODELS),
-                },
+                    budget_stage_key="refine",
+                    budget_response_models=sorted(REGION_REVIEW_RESPONSE_MODELS),
+                ),
             )
         )
 
@@ -1102,11 +1162,12 @@ def _build_refine_nodes(
                     ended_at=region_ended_at if loop_status not in {"running", "retrying"} else None,
                     duration_ms=region_duration_ms,
                     event_index=region_timing.get("event_index"),
-                    meta={
-                        "retries_total": retries_total,
-                        "budget_stage_key": "refine",
-                        "budget_response_models": sorted(REGION_REPAIR_RESPONSE_MODELS),
-                    },
+                    meta=_node_meta(
+                        block_reason=block_reason if loop_status == "blocked" else None,
+                        retries_total=retries_total,
+                        budget_stage_key="refine",
+                        budget_response_models=sorted(REGION_REPAIR_RESPONSE_MODELS),
+                    ),
                 )
             )
 
@@ -1134,12 +1195,15 @@ def _build_refine_nodes(
                 continue
             object_status = "success"
             object_summary = None
+            object_block_reason = None
             if budget_blocked_region_id == region_id and budget_blocked_object_id == object_id:
                 object_status = "blocked"
                 object_summary = "Run budget exhausted during object review"
+                object_block_reason = "budget_exhausted"
             elif retry_exhausted or has_failed_items:
                 object_status = "blocked"
                 object_summary = "Retry exhausted" if retry_exhausted else "Still unresolved after repair"
+                object_block_reason = "retry_exhausted" if retry_exhausted else "unresolved_after_repair"
             elif retry_used > 0:
                 object_summary = f"Accepted after {retry_used} retr{'y' if retry_used == 1 else 'ies'}"
             object_timing = _target_event_span(run, region_id=region_id, object_id=object_id, stage_key="refine")
@@ -1164,12 +1228,13 @@ def _build_refine_nodes(
                     ended_at=object_timing.get("ended_at") if object_status not in {"running", "retrying"} else None,
                     duration_ms=object_timing.get("duration_ms"),
                     event_index=object_timing.get("event_index"),
-                    meta={
-                        "retry_used": retry_used,
-                        "object_type": obj.get("object_type") or "",
-                        "budget_stage_key": "refine",
-                        "budget_response_models": sorted(OBJECT_REPAIR_RESPONSE_MODELS),
-                    },
+                    meta=_node_meta(
+                        block_reason=object_block_reason,
+                        retry_used=retry_used,
+                        object_type=obj.get("object_type") or "",
+                        budget_stage_key="refine",
+                        budget_response_models=sorted(OBJECT_REPAIR_RESPONSE_MODELS),
+                    ),
                 )
             )
         if budget_blocked_region_id == region_id and budget_blocked_object_id and not budget_object_node_added:
@@ -1195,17 +1260,18 @@ def _build_refine_nodes(
                     ended_at=object_timing.get("ended_at"),
                     duration_ms=object_timing.get("duration_ms"),
                     event_index=object_timing.get("event_index"),
-                    meta={
-                        "retry_used": 0,
-                        "budget_stage_key": "refine",
-                        "budget_response_models": sorted(OBJECT_REPAIR_RESPONSE_MODELS),
-                    },
+                    meta=_node_meta(
+                        block_reason="budget_exhausted",
+                        retry_used=0,
+                        budget_stage_key="refine",
+                        budget_response_models=sorted(OBJECT_REPAIR_RESPONSE_MODELS),
+                    ),
                 )
             )
 
     if regions:
         branch_status = "pending"
-        if budget_exhausted_in_refine:
+        if run_blocked_in_refine:
             branch_status = "blocked"
         elif current_stage_key == "refine":
             branch_status = "retrying" if retrying_regions else "running"
@@ -1226,6 +1292,13 @@ def _build_refine_nodes(
                 ended_at=branch_ended_at if branch_status not in {"running", "retrying"} else None,
                 duration_ms=_duration_ms(branch_started_at, branch_ended_at),
                 event_index=branch_event_index,
+                meta=_node_meta(
+                    block_reason=(
+                        run_block_reason
+                        if run_blocked_in_refine
+                        else "retry_exhausted" if blocked_regions else None
+                    ),
+                ),
             )
         )
     nodes.extend(region_nodes)
@@ -1352,4 +1425,9 @@ def build_workflow_trace(
         stage_spans=stage_spans,
         budget_limit=budget_limit,
     )
-    return WorkflowTrace(summary=summary, nodes=nodes)
+    return WorkflowTrace(
+        run_id=run.run_id if run is not None else None,
+        artifact_dir=run.artifact_dir if run is not None else None,
+        summary=summary,
+        nodes=nodes,
+    )

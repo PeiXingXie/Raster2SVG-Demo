@@ -1,73 +1,14 @@
 # Shape Studio Developer Guide
 
-This document is the developer entrypoint that used to live in the root `README.md`.
+This file is the developer entrypoint. It gives the shortest source startup path and points to the authoritative detailed documents.
 
-Use it when you want to set up the project from source, run the backend/frontend locally, debug the Electron shell, or build installers.
+For the product-facing overview and complete documentation index, use [README.md](./README.md).
 
-For the product-facing project overview and documentation index, use [README.md](./README.md).
+## Developer Path
 
-## Documentation Map
+Use [docs.development.md](./docs.development.md) as the authoritative development manual. It covers Python environment selection, `.env`, automatic and manual startup, port conflict handling, desktop startup, and troubleshooting.
 
-Read the detailed guides only when you need them.
-
-Project documents:
-
-- [docs.development.md](./docs.development.md): full developer manual for Conda or `.venv`, API configuration, automatic startup, manual startup, and troubleshooting
-- [packaging/README.packaging.md](./packaging/README.packaging.md): installer packaging, versioned release builds, overwrite-update behavior, and package-size notes
-- [docs.installer.md](./docs.installer.md): detailed installer MVP notes and installed-app behavior
-- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): source-bundle deployment and migration flow for another machine
-- [desktop/README.desktop.md](./desktop/README.desktop.md): Electron shell startup, runtime URL resolution, and desktop-specific troubleshooting
-- [environment.yml](./environment.yml): recommended Conda environment definition
-- [.env.example](./.env.example): template for API and runtime configuration
-
-Important runtime files:
-
-- `.env`: long-term local API and startup configuration that you edit manually
-- `.runtime_startup.env`: auto-generated effective runtime host and port written by the startup scripts after port resolution
-- `.bootstrap_backend_state.env`: auto-generated backend bootstrap state used by `if-needed` startup checks
-
-## What This Project Does
-
-- converts raster images into editable SVG
-- serves a shared web frontend from FastAPI
-- supports an optional Electron desktop shell that reuses the same frontend
-- reserves SAM-based bbox refinement as an optional post-recognition refinement path
-
-## Development Goal
-
-The current developer experience is optimized for this target:
-
-- a developer can clone the repo on a new machine
-- complete minimal setup in 10 to 20 minutes
-- start the web frontend first
-- optionally launch the desktop shell on top of the same backend
-- package a Windows installer for non-developer users
-
-## Requirements
-
-Required on all platforms:
-
-- Python 3.11+
-- network access for `pip install`
-- network access to your model API endpoint
-
-Required only for desktop development:
-
-- Node.js 20+
-- network access for `npm install` unless desktop dependencies are already packaged
-
-Required only for Windows installer builds:
-
-- Windows
-- PowerShell
-- an existing Python environment that can create `.venv_package`
-- Node.js/npm dependencies under `desktop/`
-
-## Fastest Development Start
-
-If you want the shortest local development path, use the automatic startup flow and then fill `.env` before your first real model-backed conversion.
-
-The full startup manual is in [docs.development.md](./docs.development.md).
+Fastest web development start:
 
 Windows:
 
@@ -75,21 +16,14 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\start-dev.ps1
 ```
 
-macOS:
+macOS/Linux:
 
 ```bash
 chmod +x start-dev.sh
 ./start-dev.sh
 ```
 
-Linux:
-
-```bash
-chmod +x start-dev.sh
-./start-dev.sh
-```
-
-To launch web + desktop together:
+Fastest web + desktop development start:
 
 Windows:
 
@@ -103,107 +37,91 @@ macOS/Linux:
 ./start-dev.sh --desktop
 ```
 
-To stop an active Windows desktop development session manually:
+The frontend is usually available at:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\stop-dev.ps1
+```text
+http://127.0.0.1:8120/
 ```
 
-## Build A User Installer
+Development API settings live in the project-root `.env`. If `.env` does not exist, startup/bootstrap scripts create it from [.env.example](./.env.example).
 
-For a normal local Windows installer build:
+## Required Tools
+
+Required on all platforms:
+
+- Python 3.11+
+- network access for `pip install`
+- network access to your model API endpoint
+
+Required only for desktop development:
+
+- Node.js 20+
+- network access for `npm install` unless desktop dependencies are already available
+
+Required only for Windows installer builds:
+
+- Windows
+- PowerShell
+- Python environment capable of creating `.venv_package`
+- desktop npm dependencies under `desktop/`
+
+## Build And Release
+
+Use [packaging/README.packaging.md](./packaging/README.packaging.md) as the only authoritative packaging and release-build document.
+
+Normal local Windows installer build:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build-windows-installer.ps1 -SkipNpmInstall
 ```
 
-For a versioned release installer that can overwrite an older installation:
+Versioned Windows release build:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -SkipNpmInstall
 ```
 
-If Python backend dependencies changed, recreate the clean packaging environment:
+Do not manually edit version numbers across multiple files for releases; use the packaging scripts.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build-release-windows.ps1 -Version <new-version> -Python python -RecreatePackageVenv -SkipNpmInstall
-```
+## Document Map
 
-The expected Windows installer output is:
+Open these documents by topic:
 
-```text
-dist/installers/
-```
+- [docs.development.md](./docs.development.md): full development environment, startup, `.env`, port handling, and troubleshooting manual
+- [packaging/README.packaging.md](./packaging/README.packaging.md): installer packaging, versioned release builds, overwrite-update behavior, and package-size notes
+- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md): source-bundle deployment and migration to another machine
+- [desktop/README.desktop.md](./desktop/README.desktop.md): Electron shell startup, runtime URL resolution, and desktop-specific troubleshooting
+- [docs.settings-mapping.md](./docs.settings-mapping.md): frontend settings labels and displayed value mapping
+- [architecture-summary/README.md](./architecture-summary/README.md): current architecture, workflow, runtime, state, deployment, and maintenance boundaries
+- [RELEASE_NOTES.md](./RELEASE_NOTES.md): version-specific changes, artifacts, checksums, and verification
 
-For a developer-side macOS DMG build, run this on macOS:
+Generated/local runtime files:
 
-```bash
-chmod +x packaging/*.sh
-./packaging/build-release-macos.sh --version <new-version> --skip-npm-install
-```
+- `.env`: local API and startup configuration that you edit manually
+- `.runtime_startup.env`: generated effective runtime host and port after port resolution
+- `.bootstrap_backend_state.env`: generated bootstrap state used by `if-needed` startup checks
 
-Read [packaging/README.packaging.md](./packaging/README.packaging.md) before publishing installers to users.
+## Recommended Reading Order
 
-## Which Document To Open
+Developing locally:
 
-Open [docs.development.md](./docs.development.md) if you need:
+1. Read [docs.development.md](./docs.development.md).
+2. Fill `.env` before the first real model-backed conversion.
+3. Use the root `start-dev` scripts first.
+4. Switch to manual startup only when you need finer control.
 
-- Conda setup
-- `.env` and API key instructions
-- automatic startup versus manual startup
-- port conflict interaction details
-- startup failure troubleshooting
+Building user installers:
 
-Open [packaging/README.packaging.md](./packaging/README.packaging.md) if you need:
+1. Read [packaging/README.packaging.md](./packaging/README.packaging.md).
+2. Use `build-release-windows.ps1` for user-facing Windows releases.
+3. Keep `desktop/package.json` `build.appId` and `build.productName` stable between versions.
 
-- clean `.venv_package` packaging
-- Windows installer builds
-- versioned overwrite updates
-- uninstall behavior
-- dependency-size analysis
+Moving the source tree to another machine:
 
-Open [quick-start/README.quick-start.md](./quick-start/README.quick-start.md) if you need:
+1. Read [quick-start/README.quick-start.md](./quick-start/README.quick-start.md).
+2. Create a source deployment bundle.
+3. Bootstrap the backend on the target machine.
 
-- source-bundle deployment
-- migration to another machine
-- target-machine bootstrap
+Debugging the Electron shell:
 
-Open [desktop/README.desktop.md](./desktop/README.desktop.md) if you need:
-
-- Electron-only bootstrap
-- frontend URL override behavior
-- desktop-specific debugging
-
-## Recommended Development Reading Order
-
-If you are developing locally:
-
-1. read [docs.development.md](./docs.development.md)
-2. create or activate your Conda environment if needed
-3. fill `.env` before the first real model-backed conversion
-4. use automatic startup first, then switch to manual startup when you need finer control
-
-If you are building user installers:
-
-1. read [packaging/README.packaging.md](./packaging/README.packaging.md)
-2. use `build-release-windows.ps1` for real user-facing releases
-3. keep `desktop/package.json` `build.appId` and `build.productName` stable between versions
-
-If you are moving the source tree to another machine:
-
-1. read [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)
-2. create a source deployment bundle
-3. bootstrap the backend on the target machine
-
-If you are debugging the Electron shell:
-
-1. read [desktop/README.desktop.md](./desktop/README.desktop.md)
-
-## Related Docs
-
-- [README.md](./README.md)
-- [docs.development.md](./docs.development.md)
-- [packaging/README.packaging.md](./packaging/README.packaging.md)
-- [docs.installer.md](./docs.installer.md)
-- [quick-start/README.quick-start.md](./quick-start/README.quick-start.md)
-- [desktop/README.desktop.md](./desktop/README.desktop.md)
+1. Read [desktop/README.desktop.md](./desktop/README.desktop.md).

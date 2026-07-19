@@ -1763,7 +1763,10 @@ button:disabled {
   background: rgba(47, 107, 69, 0.76);
 }
 
-.workflow-trace-card-tab.blocked .workflow-trace-tab-status,
+.workflow-trace-card-tab.blocked .workflow-trace-tab-status {
+  background: rgba(180, 130, 32, 0.82);
+}
+
 .workflow-trace-card-tab.failed .workflow-trace-tab-status {
   background: rgba(142, 47, 47, 0.86);
 }
@@ -1878,7 +1881,10 @@ button.workflow-trace-card {
   border-color: rgba(47, 107, 69, 0.28);
 }
 
-.workflow-trace-card.blocked,
+.workflow-trace-card.blocked {
+  border-color: rgba(180, 130, 32, 0.42);
+}
+
 .workflow-trace-card.failed {
   border-color: rgba(142, 47, 47, 0.34);
 }
@@ -1930,9 +1936,12 @@ button.workflow-trace-card {
 }
 
 .workflow-trace-stage.blocked,
-.workflow-trace-stage.failed,
 .workflow-trace-stage.issue_detected {
   color: var(--warning);
+}
+
+.workflow-trace-stage.failed {
+  color: var(--danger);
 }
 
 .workflow-trace-duration,
@@ -1991,7 +2000,11 @@ button.workflow-trace-card {
   color: var(--success);
 }
 
-.workflow-trace-badge.blocked,
+.workflow-trace-badge.blocked {
+  background: rgba(180, 130, 32, 0.12);
+  color: #8a6415;
+}
+
 .workflow-trace-badge.failed {
   background: rgba(142, 47, 47, 0.12);
   color: var(--danger);

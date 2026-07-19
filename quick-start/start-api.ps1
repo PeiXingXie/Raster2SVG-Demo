@@ -470,6 +470,11 @@ if ([string]::IsNullOrWhiteSpace($ListenHost)) {
 if ([string]::IsNullOrWhiteSpace($ListenHost)) {
     $ListenHost = "127.0.0.1"
 }
+$NormalizedListenHost = $ListenHost.Trim().ToLowerInvariant()
+if ($NormalizedListenHost -notin @("127.0.0.1", "localhost", "::1")) {
+    throw "Shape Studio is local-only. APP_HOST/ListenHost must be 127.0.0.1, localhost, or ::1."
+}
+$ListenHost = "127.0.0.1"
 
 if (-not $PSBoundParameters.ContainsKey("Port")) {
     $Port = Get-PortSettingValue -FilePath $EnvFile -Key "APP_PORT" -DefaultValue 8120

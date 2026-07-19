@@ -8,12 +8,12 @@ from deepagents_template.prompt.bbox_conventions import (
     BBOX_COORDINATE_CONVENTION_RULE,
     GLOBAL_BBOX_COORDINATE_RULE,
     GLOBAL_CROP_VISUAL_EVIDENCE_RULE,
-    GLOBAL_NO_LOCAL_COORDINATE_GUESS_RULE,
     GLOBAL_NO_OFFSET_REAPPLICATION_RULE,
     GLOBAL_SVG_OUTPUT_COORDINATE_RULE,
 )
 from deepagents_template.schemas import ObjectCandidate
-from deepagents_template.utils.context_payloads import build_object_generation_payload, build_object_policy_payload
+from deepagents_template.taxonomy import OBJECT_REPAIR_GUIDANCE, build_object_issue_taxonomy_rules
+from deepagents_template.utils.context_payloads import build_object_generation_payload
 from deepagents_template.utils.prompting import (
     compact_dict,
     inline_text_file_section,
@@ -25,24 +25,7 @@ from deepagents_template.utils.prompting import (
     svg_output_contract,
 )
 
-OBJECT_ISSUE_TAXONOMY_RULES = textwrap.dedent(
-    """
-    Object-local issue taxonomy:
-    - Every failed_items[] item must include issue_family.
-    - issue_family must use exactly one of:
-      content_accuracy, shape_fidelity, internal_structure, style_appearance, containment_boundary.
-    - content_accuracy: object content, text, data value, semantic identity, or required owned part is wrong, missing, extra, unreadable, or misleading.
-    - shape_fidelity: outer silhouette, contour, geometry, proportions, or recognizable shape likeness differs from the raster.
-    - internal_structure: owned sub-elements, internal strokes, z-order, grouping, relative placement, or internal layout inside the object is wrong.
-    - style_appearance: color, fill, stroke, typography, opacity, visual weight, or object-local styling differs while content and structure remain intact.
-    - containment_boundary: object-local content is clipped, outside its bbox, pressed against an edge, or incorrectly contained by its own extent.
-    - Choose containment_boundary first for clipping, out-of-bounds, edge pressure, or containment defects.
-    - Otherwise choose content_accuracy for wrong, missing, extra, unreadable, or misleading object content or semantic identity.
-    - Otherwise choose internal_structure for wrong owned sub-element arrangement, z-order, grouping, or internal layout.
-    - Otherwise choose shape_fidelity for outer silhouette, contour, geometry, or proportion mismatches.
-    - Otherwise choose style_appearance for color, stroke, typography, opacity, visual weight, or local style mismatches.
-    """
-).strip()
+OBJECT_ISSUE_TAXONOMY_RULES = build_object_issue_taxonomy_rules("failed_items[]")
 
 
 def build_object_svg_generation_prompts(
@@ -86,6 +69,7 @@ def build_object_svg_generation_prompts(
 
         Editing behavior:
           - During update, make the smallest useful change that resolves failed_items.
+          - {OBJECT_REPAIR_GUIDANCE}
           - Preserve correct existing geometry, text, style, grouping, transforms, and editability.
           - Do not re-plan or simplify correct details just because they are not mentioned in failed_items.
           - Do not compensate for region/global layout defects, neighboring-object defects, or merge issues; only repair this object's own SVG.
@@ -162,101 +146,6 @@ def build_object_svg_generation_prompts(
                   "object_id": "{obj.object_id}",
                   "svg_elements": "<!-- object: {obj.object_id}; type={obj.object_type}; request=... -->\\n<g data-object-id=\\"{obj.object_id}\\" data-object-type=\\"{obj.object_type}\\">\\n  ...object-specific SVG elements...\\n</g>",
                   "generation_notes": ["what changed"]
-                }}
-                """
-            ).strip(),
-        ),
-    )
-    return system_prompt, user_prompt
-
-
-def build_object_review_prompts(
-    *,
-    obj: ObjectCandidate,
-    object_svg: str,
-    failed_items: list[dict] | None,
-    svg_file_name: str = "proposed_object.svg",
-) -> tuple[str, str]:
-    system_prompt = textwrap.dedent(
-        f"""
-        You are a multimodal object SVG reviewer.
-        Compare one object crop with the proposed object SVG.
-        Return JSON only.
-
-        Judge only this object. Do not ask for whole-region changes.
-        Be tolerant of small low-impact visual differences when the object's main semantics,
-        content, and local relationships are already correct.
-        Do not fail for slight spacing, tone, or proportion differences unless they materially
-        change meaning, readability, or object identity.
-        For icon objects, object identity requires more than category recognizability:
-        the silhouette, distinctive parts, internal strokes, and visual weight should match the raster.
-        Fail generic or over-simplified icon substitutions even if their placement is acceptable.
-        If Object.fidelity_hints.verify_required is true, evaluate Object.fidelity_hints.fidelity_goals before accepting.
-        Generic pass reasoning such as recognizable, semantically faithful, or same-category is insufficient for verify_required objects.
-        For verify_required objects, fail materially unmet goals: missing required detail, generic substitution, wrong silhouette, changed internal marks/strokes/topology, wrong z-order, or wrong visual weight.
-        Each failed item must include severity exactly as "low", "medium", or "high".
-        Judge severity by visual/material impact, not by wording style.
-        low means cosmetic only; object identity, structure, readability, containment, and editability remain intact.
-        medium means visible mismatch weakens fidelity but preserves identity and core structure.
-        high means wrong/generic identity, missing key parts, broken internal layout, unreadable text, clipping, or out-of-bounds content.
-        Each failed_items.reason must be brief, clear, and no more than 15 words.
-        Reasons must state what is wrong, not how to fix it.
-        {OBJECT_ISSUE_TAXONOMY_RULES}
-        Input roles: image 1 is the ground-truth object crop; image 2 is the rendered preview of the proposed SVG.
-        Inline SVG source text is structural evidence for locating issues. Use the rendered preview as the primary visual comparison target.
-        Coordinate rules:
-        - {GLOBAL_BBOX_COORDINATE_RULE}
-        - The Object payload bbox follows this global coordinate frame.
-        - {GLOBAL_CROP_VISUAL_EVIDENCE_RULE}
-        - {GLOBAL_NO_OFFSET_REAPPLICATION_RULE}
-        - {GLOBAL_NO_LOCAL_COORDINATE_GUESS_RULE}
-        - {BBOX_COORDINATE_CONVENTION_RULE}
-        {json_output_contract(
-            required_fields=("object_id", "failed_items"),
-            array_fields=("failed_items",),
-            closed_value_fields={
-                "failed_items[].severity": ("low", "medium", "high"),
-                "failed_items[].issue_family": (
-                    "content_accuracy",
-                    "shape_fidelity",
-                    "internal_structure",
-                    "style_appearance",
-                    "containment_boundary",
-                ),
-            },
-        )}
-        """
-    ).strip()
-    user_prompt = join_sections(
-        section(
-            "Object review request",
-            (
-                "Attached images are, in order: "
-                "1) the source object crop, 2) the rendered preview of the provided SVG."
-            ),
-        ),
-        json_section("Object", build_object_policy_payload(obj)),
-        inline_text_file_section(
-            "Proposed object SVG source",
-            file_name=svg_file_name,
-            content=object_svg,
-            role="Structural SVG source that corresponds to the rendered preview image.",
-        ),
-        json_section("Expected fixes or inherited failed items", failed_items or []),
-        section(
-            "Return this JSON shape",
-            textwrap.dedent(
-                f"""
-                {{
-                  "object_id": "{obj.object_id}",
-                  "failed_items": [
-                    {{
-                      "issue_family": "shape_fidelity",
-                      "criterion": "criterion text",
-                      "reason": "brief problem description",
-                      "severity": "medium"
-                    }}
-                  ]
                 }}
                 """
             ).strip(),

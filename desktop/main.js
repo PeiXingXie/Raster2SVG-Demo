@@ -193,7 +193,7 @@ function removeDevPidFile() {
   }
 }
 
-function createWindow() {
+async function createWindow() {
   const win = new BrowserWindow({
     width: 1600,
     height: 980,
@@ -207,7 +207,12 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  win.loadURL(runtimeFrontendUrl);
+  try {
+    await win.webContents.session.clearCache();
+  } catch (error) {
+    console.warn("Failed to clear the desktop HTTP cache:", error);
+  }
+  await win.loadURL(runtimeFrontendUrl);
   return win;
 }
 
@@ -291,11 +296,11 @@ app.whenReady().then(async () => {
     return;
   }
 
-  const win = createWindow();
+  const win = await createWindow();
   buildMenu(win);
-  app.on("activate", () => {
+  app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      const nextWin = createWindow();
+      const nextWin = await createWindow();
       buildMenu(nextWin);
     }
   });

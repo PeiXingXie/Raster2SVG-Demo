@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from deepagents_template.atomic_files import atomic_write_text
 
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
@@ -158,7 +159,7 @@ def write_svg_review_artifacts(
 ) -> tuple[Path, Path | None, SvgRenderResult]:
     svg_path.parent.mkdir(parents=True, exist_ok=True)
     png_path.parent.mkdir(parents=True, exist_ok=True)
-    svg_path.write_text(svg_text, encoding="utf-8")
+    atomic_write_text(svg_path, svg_text)
     render_result = render_svg_file_to_png_detailed(svg_path, png_path)
     return svg_path, render_result.png_path if render_result.ok else None, render_result
 

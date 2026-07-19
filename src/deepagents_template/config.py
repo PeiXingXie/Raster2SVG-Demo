@@ -10,6 +10,7 @@ from pydantic import AliasChoices
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from deepagents_template.atomic_files import atomic_write_text, read_text_with_retry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,20 +33,18 @@ RUNTIME_OVERRIDE_FIELDS = {
     "base_url",
     "api_provider",
     "api_format",
-    "max_retries",
     "workflow_mode",
     "region_processing_mode",
     "region_concurrency",
-    "bbox_issue_concurrency",
-    "bbox_issue_stagnation_rounds",
-    "bbox_global_stagnation_rounds",
     "agent_model",
     "subagent_model",
     "agent_name",
     "use_previous_response_id",
-    "max_retry",
-    "fusion_max_retry",
-    "max_budget",
+    "bbox_refinement_max_rounds",
+    "region_repair_max_attempts",
+    "object_repair_max_attempts",
+    "fusion_repair_max_attempts",
+    "run_model_call_budget",
     "supervisor_memory_enabled",
     "supervisor_memory_persist_enabled",
     "strategy_enabled",
@@ -63,7 +62,7 @@ def load_runtime_overrides() -> dict:
     if not RUNTIME_OVERRIDE_PATH.is_file():
         return {}
     try:
-        payload = json.loads(RUNTIME_OVERRIDE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_with_retry(RUNTIME_OVERRIDE_PATH))
     except (json.JSONDecodeError, OSError):
         return {}
     if not isinstance(payload, dict):
@@ -76,12 +75,10 @@ def save_runtime_overrides(overrides: dict) -> dict:
 
     normalized = {key: overrides[key] for key in RUNTIME_OVERRIDE_FIELDS if key in overrides}
     RUNTIME_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = RUNTIME_OVERRIDE_PATH.with_name(f"{RUNTIME_OVERRIDE_PATH.name}.tmp")
-    temp_path.write_text(
+    atomic_write_text(
+        RUNTIME_OVERRIDE_PATH,
         json.dumps(normalized, ensure_ascii=True, indent=2),
-        encoding="utf-8",
     )
-    temp_path.replace(RUNTIME_OVERRIDE_PATH)
     return normalized
 
 
@@ -110,6 +107,8 @@ class Settings(BaseSettings):
     agent_name: str = Field(default="shape-studio-coordinator", alias="AGENT_NAME")
     use_previous_response_id: bool = Field(default=False, alias="USE_PREVIOUS_RESPONSE_ID")
     max_retries: int = Field(default=2, validation_alias=AliasChoices("MAX_RETRIES", "OPENAI_MAX_RETRIES"))
+    transport_max_attempts: int | None = Field(default=3, ge=1, alias="TRANSPORT_MAX_ATTEMPTS")
+    response_validation_max_attempts: int = Field(default=3, ge=1, alias="RESPONSE_VALIDATION_MAX_ATTEMPTS")
 
     app_host: str = Field(default="127.0.0.1", alias="APP_HOST")
     app_port: int = Field(default=8120, alias="APP_PORT")
@@ -120,8 +119,27 @@ class Settings(BaseSettings):
     run_artifacts_dir: str = Field(default="artifacts/runs", alias="RUN_ARTIFACTS_DIR")
     default_user_input: str = Field(default="Convert this image into SVG format", alias="DEFAULT_USER_INPUT")
     max_retry: int = Field(default=5, ge=0, alias="MAX_RETRY")
+    bbox_initial_localization_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        alias="BBOX_INITIAL_LOCALIZATION_MAX_ATTEMPTS",
+    )
+    bbox_refinement_max_rounds: int | None = Field(default=4, ge=0, alias="BBOX_REFINEMENT_MAX_ROUNDS")
+    region_repair_max_attempts: int | None = Field(default=4, ge=0, alias="REGION_REPAIR_MAX_ATTEMPTS")
+    object_repair_max_attempts: int | None = Field(default=4, ge=0, alias="OBJECT_REPAIR_MAX_ATTEMPTS")
+    fidelity_verification_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        alias="FIDELITY_VERIFICATION_MAX_ATTEMPTS",
+    )
+    fidelity_verification_independent_budget: bool = Field(
+        default=True,
+        alias="FIDELITY_VERIFICATION_INDEPENDENT_BUDGET",
+    )
     fusion_max_retry: int = Field(default=3, ge=0, alias="FUSION_MAX_RETRY")
+    fusion_repair_max_attempts: int | None = Field(default=3, ge=0, alias="FUSION_REPAIR_MAX_ATTEMPTS")
     max_budget: int = Field(default=80, ge=0, alias="MAX_BUDGET")
+    run_model_call_budget: int | None = Field(default=80, ge=0, alias="RUN_MODEL_CALL_BUDGET")
     supervisor_memory_enabled: bool = Field(default=False, alias="SUPERVISOR_MEMORY_ENABLED")
     supervisor_memory_persist_enabled: bool = Field(default=True, alias="SUPERVISOR_MEMORY_PERSIST_ENABLED")
     strategy_enabled: bool = Field(default=True, alias="STRATEGY_ENABLED")
@@ -135,6 +153,11 @@ class Settings(BaseSettings):
     default_bbox_issue_concurrency: int = Field(default=2, alias="BBOX_ISSUE_CONCURRENCY")
     bbox_issue_stagnation_rounds: int = Field(default=3, ge=1, alias="BBOX_ISSUE_STAGNATION_ROUNDS")
     bbox_global_stagnation_rounds: int = Field(default=2, ge=1, alias="BBOX_GLOBAL_STAGNATION_ROUNDS")
+    bbox_global_stagnation_max_rounds: int | None = Field(
+        default=2,
+        ge=1,
+        alias="BBOX_GLOBAL_STAGNATION_MAX_ROUNDS",
+    )
     default_workflow_mode: str = Field(default="region_object", alias="WORKFLOW_MODE")
 
     def _runtime_override(self, key: str):
@@ -179,6 +202,56 @@ class Settings(BaseSettings):
         if runtime_override is not None:
             return max(0, int(runtime_override))
         return self.max_retries
+
+    def _resolved_new_int(
+        self,
+        key: str,
+        override: int | None,
+        configured: int | None,
+        *,
+        minimum: int,
+    ) -> int | None:
+        if override is not None:
+            return max(minimum, int(override))
+        runtime_override = self._runtime_override(key)
+        if runtime_override is not None:
+            return max(minimum, int(runtime_override))
+        if configured is not None:
+            return max(minimum, int(configured))
+        return None
+
+    def resolved_transport_max_attempts(
+        self,
+        override: int | None = None,
+        legacy_max_retries: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "transport_max_attempts",
+            override,
+            self.transport_max_attempts,
+            minimum=1,
+        )
+        return resolved if resolved is not None else self.resolved_max_retries(legacy_max_retries) + 1
+
+    def resolved_response_validation_max_attempts(self, override: int | None = None) -> int:
+        return int(
+            self._resolved_new_int(
+                "response_validation_max_attempts",
+                override,
+                self.response_validation_max_attempts,
+                minimum=1,
+            )
+        )
+
+    def resolved_bbox_initial_localization_max_attempts(self, override: int | None = None) -> int:
+        return int(
+            self._resolved_new_int(
+                "bbox_initial_localization_max_attempts",
+                override,
+                self.bbox_initial_localization_max_attempts,
+                minimum=1,
+            )
+        )
 
     def resolved_user_input(self, override: str | None = None) -> str:
         if override and override.strip():
@@ -355,6 +428,63 @@ class Settings(BaseSettings):
             return max(0, int(runtime_override))
         return self.max_retry
 
+    def resolved_bbox_refinement_max_rounds(
+        self,
+        override: int | None = None,
+        legacy_max_retry: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "bbox_refinement_max_rounds",
+            override,
+            self.bbox_refinement_max_rounds,
+            minimum=0,
+        )
+        return resolved if resolved is not None else self.resolved_max_retry(legacy_max_retry)
+
+    def resolved_region_repair_max_attempts(
+        self,
+        override: int | None = None,
+        legacy_max_retry: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "region_repair_max_attempts",
+            override,
+            self.region_repair_max_attempts,
+            minimum=0,
+        )
+        return resolved if resolved is not None else self.resolved_max_retry(legacy_max_retry)
+
+    def resolved_object_repair_max_attempts(
+        self,
+        override: int | None = None,
+        legacy_max_retry: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "object_repair_max_attempts",
+            override,
+            self.object_repair_max_attempts,
+            minimum=0,
+        )
+        return resolved if resolved is not None else self.resolved_max_retry(legacy_max_retry)
+
+    def resolved_fidelity_verification_max_attempts(self, override: int | None = None) -> int:
+        return int(
+            self._resolved_new_int(
+                "fidelity_verification_max_attempts",
+                override,
+                self.fidelity_verification_max_attempts,
+                minimum=1,
+            )
+        )
+
+    def resolved_fidelity_verification_independent_budget(self, override: bool | None = None) -> bool:
+        if override is not None:
+            return bool(override)
+        runtime_override = self._runtime_override("fidelity_verification_independent_budget")
+        if runtime_override is not None:
+            return bool(runtime_override)
+        return self.fidelity_verification_independent_budget
+
     def resolved_fusion_max_retry(self, override: int | None = None) -> int:
         if override is not None:
             return max(0, int(override))
@@ -363,6 +493,19 @@ class Settings(BaseSettings):
             return max(0, int(runtime_override))
         return self.fusion_max_retry
 
+    def resolved_fusion_repair_max_attempts(
+        self,
+        override: int | None = None,
+        legacy_fusion_max_retry: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "fusion_repair_max_attempts",
+            override,
+            self.fusion_repair_max_attempts,
+            minimum=0,
+        )
+        return resolved if resolved is not None else self.resolved_fusion_max_retry(legacy_fusion_max_retry)
+
     def resolved_max_budget(self, override: int | None = None) -> int:
         if override is not None:
             return max(0, int(override))
@@ -370,6 +513,36 @@ class Settings(BaseSettings):
         if runtime_override is not None:
             return max(0, int(runtime_override))
         return self.max_budget
+
+    def resolved_run_model_call_budget(
+        self,
+        override: int | None = None,
+        legacy_max_budget: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "run_model_call_budget",
+            override,
+            self.run_model_call_budget,
+            minimum=0,
+        )
+        return resolved if resolved is not None else self.resolved_max_budget(legacy_max_budget)
+
+    def resolved_bbox_global_stagnation_max_rounds(
+        self,
+        override: int | None = None,
+        legacy_bbox_global_stagnation_rounds: int | None = None,
+    ) -> int:
+        resolved = self._resolved_new_int(
+            "bbox_global_stagnation_max_rounds",
+            override,
+            self.bbox_global_stagnation_max_rounds,
+            minimum=1,
+        )
+        return (
+            resolved
+            if resolved is not None
+            else self.resolved_bbox_global_stagnation_rounds(legacy_bbox_global_stagnation_rounds)
+        )
 
     def resolved_supervisor_memory_enabled(self, override: bool | None = None) -> bool:
         if override is not None:

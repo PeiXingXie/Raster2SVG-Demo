@@ -1,6 +1,6 @@
-import { fetchJson } from "./js/api-client.js";
-import { appState } from "./js/state.js?v=run-start-state-boundary-1";
-import { renderState } from "./js/state.js?v=run-start-state-boundary-1";
+import { fetchJson } from "./js/api-client.js?v=workspace-session-isolation-5";
+import { appState } from "./js/state.js?v=workspace-session-isolation-5";
+import { renderState } from "./js/state.js?v=workspace-session-isolation-5";
 import { createLoadingState, renderLoadingState } from "./js/components/loading-state.js";
 
 const casePreviewCache = new Map();
@@ -22,17 +22,25 @@ function renderInitialHistoryLoadingState() {
     return;
   }
   recentRuns.className = "recent-runs recent-runs-sidebar is-loading";
-  renderLoadingState(recentRuns, {
-    label: "Loading saved projects",
-    message: "Reading project history...",
-    className: "desktop-history-loading-state",
-  });
+  recentRuns.replaceChildren();
+  for (let index = 0; index < appState.desktopHistoryPageSize; index += 1) {
+    const card = document.createElement("article");
+    card.className = "history-skeleton-card";
+    card.setAttribute("aria-hidden", "true");
+    renderLoadingState(card, {
+      label: "Loading project",
+      message: "Reading project summary...",
+      compact: true,
+      className: "desktop-history-loading-state",
+    });
+    recentRuns.appendChild(card);
+  }
 }
 
 function refreshDesktopHistory() {
   renderState.recentRunsSig = null;
   try {
-    window.dispatchEvent(new CustomEvent("desktop-history-change"));
+    window.dispatchEvent(new CustomEvent("desktop-history-query"));
   } catch {
     window.dispatchEvent(new Event("resize"));
   }
@@ -59,10 +67,14 @@ function setupDesktopHistoryControls() {
   const searchInput = document.getElementById("desktop-history-search");
   if (searchInput instanceof HTMLInputElement) {
     searchInput.value = appState.desktopHistorySearch || "";
+    let searchTimer = null;
     searchInput.addEventListener("input", () => {
-      appState.desktopHistorySearch = searchInput.value;
-      appState.desktopHistoryPage = 1;
-      refreshDesktopHistory();
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(() => {
+        appState.desktopHistorySearch = searchInput.value.trim();
+        appState.desktopHistoryPage = 1;
+        refreshDesktopHistory();
+      }, 300);
     });
   }
   const sortSelect = document.getElementById("desktop-history-sort");
@@ -89,7 +101,9 @@ function setupDesktopHistoryControls() {
       return;
     }
     const requestedPage = Number.parseInt(pageInput.value, 10);
-    const maxPage = Number.parseInt(pageInput.max || "1", 10);
+    const maxPage = pageInput.hasAttribute("max")
+      ? Number.parseInt(pageInput.max, 10)
+      : Number.NaN;
     if (Number.isNaN(requestedPage)) {
       pageInput.value = String(appState.desktopHistoryPage || 1);
       return;
@@ -150,11 +164,12 @@ function setupDesktopProcessGuideControls() {
 function setupDesktopChrome() {
   const navButtons = Array.from(document.querySelectorAll("[data-desktop-page-target]"));
   const validPages = new Set(["start", "history", "workspace", "settings"]);
-  const refineToggle = document.getElementById("desktop-refine-toggle");
+  const workspaceRefineOpen = document.getElementById("workspace-refine-open");
   const refineClose = document.getElementById("desktop-refine-close");
   const workspaceSidebar = document.getElementById("workspace-sidebar");
   const workspaceSidebarResizeHandle = document.getElementById("workspace-sidebar-resize-handle");
   const workspaceSidebarTabs = Array.from(document.querySelectorAll("[data-workspace-sidebar-tab]"));
+  const workspaceSidebarNavTabs = Array.from(document.querySelectorAll(".workspace-sidebar-tab[data-workspace-sidebar-tab]"));
   const workspaceSidebarPanels = Array.from(document.querySelectorAll("[data-workspace-sidebar-panel]"));
   const workspaceSidebarCloseButtons = Array.from(document.querySelectorAll("[data-workspace-sidebar-close]"));
   const workspaceSidebarWidthStorageKey = "workspace-sidebar-width";
@@ -169,7 +184,7 @@ function setupDesktopChrome() {
     workspaceSidebarRegistry.set(panelId, {
       id: panelId,
       panel,
-      tab: workspaceSidebarTabs.find((item) => item.getAttribute("data-workspace-sidebar-tab") === panelId) || null,
+      tab: workspaceSidebarNavTabs.find((item) => item.getAttribute("data-workspace-sidebar-tab") === panelId) || null,
     });
   }
   const sidebarScrollTimers = new WeakMap();
@@ -250,14 +265,17 @@ function setupDesktopChrome() {
     const expanded = document.body.dataset.workspaceSidebar === "expanded";
     const activePanel = getActiveWorkspaceSidebarPanel();
     document.body.dataset.workspaceSidebarActivePanel = expanded ? activePanel : "none";
-    refineToggle?.setAttribute("aria-expanded", expanded && activePanel === "refine" ? "true" : "false");
+    workspaceRefineOpen?.setAttribute("aria-expanded", expanded && activePanel === "refine" ? "true" : "false");
   };
   const isRefineNavigationLocked = () => document.body.dataset.refineLocked !== "false";
   const showLockedRefineHint = () => {
-    const status = document.getElementById("refine-status");
-    if (status) {
-      status.textContent = "Locked";
-      status.title = "Refine unlocks after the main flow finishes.";
+    const title = document.getElementById("workspace-refine-guide-title");
+    const body = document.getElementById("workspace-refine-guide-body");
+    if (title) {
+      title.textContent = "Refine is locked.";
+    }
+    if (body) {
+      body.textContent = "Finish the main conversion once to unlock local refinement.";
     }
   };
   const setWorkspaceSidebarExpanded = (expanded, panelId = getActiveWorkspaceSidebarPanel()) => {
@@ -303,6 +321,10 @@ function setupDesktopChrome() {
     }
     if (nextPage === "workspace") {
       refreshTraceLayout();
+      window.dispatchEvent(new CustomEvent("desktop-workspace-open"));
+    }
+    if (nextPage === "history") {
+      window.dispatchEvent(new CustomEvent("desktop-history-open"));
     }
     if (nextPage === "start") {
       scheduleProcessGuideAutoplay();
@@ -335,9 +357,6 @@ function setupDesktopChrome() {
       if (!target) {
         return;
       }
-      if (target.closest("#send-btn")) {
-        window.setTimeout(openWorkspaceTracePanel, 0);
-      }
       if (
         target.closest("#recent-runs button")
         && !target.closest(".run-chip-preview-zoom")
@@ -350,20 +369,6 @@ function setupDesktopChrome() {
   );
 
   window.addEventListener("desktop-open-workspace-trace", openWorkspaceTracePanel);
-
-  refineToggle?.addEventListener("click", () => {
-    if (isRefineNavigationLocked()) {
-      showLockedRefineHint();
-      return;
-    }
-    const expanded = document.body.dataset.workspaceSidebar === "expanded";
-    const activePanel = getActiveWorkspaceSidebarPanel();
-    if (!expanded || activePanel !== "refine") {
-      setWorkspaceSidebarPanel("refine", { expand: true });
-      return;
-    }
-    setWorkspaceSidebarExpanded(false);
-  });
 
   refineClose?.addEventListener("click", () => {
     setWorkspaceSidebarExpanded(false);
@@ -458,30 +463,13 @@ function setupDesktopChrome() {
 }
 
 function getDesktopRunList() {
-  const snapshot = appState.snapshot;
-  if (!snapshot) {
-    return [];
-  }
-  const runs = [];
-  if (snapshot.current_run) {
-    runs.push(snapshot.current_run);
-  }
-  for (const run of snapshot.recent_runs || []) {
-    if (!runs.some((item) => item.run_id === run.run_id)) {
-      runs.push(run);
-    }
-  }
-  return runs;
+  return appState.historyRuns || [];
 }
 
-function getPreviewUrl(snapshot, kind) {
-  if (kind === "input") {
-    return snapshot?.previews?.input_image_url || null;
-  }
-  return snapshot?.previews?.output_svg_url
-    || snapshot?.previews?.output_png_url
-    || snapshot?.previews?.initial_svg_url
-    || null;
+function getPreviewUrl(previewMetadata, kind) {
+  return kind === "input"
+    ? previewMetadata?.input_preview_url || null
+    : previewMetadata?.output_preview_url || null;
 }
 
 function decodeCasePreviewImage(url) {
@@ -579,16 +567,16 @@ function getCasePreviewCacheKey(run) {
   return `${run?.run_id || ""}:${run?.artifact_revision || ""}`;
 }
 
-async function getCasePreviewSnapshot(threadId, run) {
+async function getCasePreviewMetadata(run) {
   const cacheKey = getCasePreviewCacheKey(run);
   if (casePreviewCache.has(cacheKey)) {
     return casePreviewCache.get(cacheKey);
   }
   if (!casePreviewRequestCache.has(cacheKey)) {
-    const request = fetchJson(`/threads/${encodeURIComponent(threadId)}/artifacts?run_id=${encodeURIComponent(run.run_id)}`)
-      .then((snapshot) => {
-        casePreviewCache.set(cacheKey, snapshot);
-        return snapshot;
+    const request = fetchJson(`/runs/${encodeURIComponent(run.run_id)}/history-preview`)
+      .then((metadata) => {
+        casePreviewCache.set(cacheKey, metadata);
+        return metadata;
       })
       .catch((error) => {
         casePreviewRequestCache.delete(cacheKey);
@@ -609,16 +597,12 @@ async function hydrateCasePreview(card) {
   if (preview.dataset.previewState === "ready" && preview.querySelector(".run-chip-preview-zoom")) {
     return;
   }
-  const threadId = appState.threadId || document.getElementById("thread-id")?.textContent?.trim();
-  if (!threadId || threadId === "Not created yet") {
-    return;
-  }
   const loadToken = getCasePreviewCacheKey(run);
   preview.dataset.previewState = "loading";
   preview.dataset.previewToken = loadToken;
-  const snapshot = await getCasePreviewSnapshot(threadId, run);
-  const inputUrl = getPreviewUrl(snapshot, "input");
-  const outputUrl = getPreviewUrl(snapshot, "output");
+  const previewMetadata = await getCasePreviewMetadata(run);
+  const inputUrl = getPreviewUrl(previewMetadata, "input");
+  const outputUrl = getPreviewUrl(previewMetadata, "output");
   if (!inputUrl && !outputUrl) {
     if (preview.dataset.previewToken === loadToken) {
       preview.replaceChildren(
@@ -848,7 +832,7 @@ setupDesktopImageLightbox();
 
 void (async () => {
   try {
-    const { initApp } = await import("./js/main.js?v=refine-history-readiness-1");
+    const { initApp } = await import("./js/main.js?v=workspace-scroll-stability-1");
     await initApp();
   } catch (error) {
     console.error("Desktop app initialization failed", error);

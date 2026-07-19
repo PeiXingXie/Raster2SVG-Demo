@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.schemas import SupervisorDecisionMemory, SupervisorIssueMemory
 from deepagents_template.utils.svg_rendering import (
     SvgPreviewRenderError,
@@ -81,7 +82,7 @@ class BaseWorkflowAgent:
             if part is not None
         )
         error_path.parent.mkdir(parents=True, exist_ok=True)
-        error_path.write_text(detail, encoding="utf-8")
+        atomic_write_text(error_path, detail)
         self._record_review_asset(error_path, kind="txt")
         push_event = getattr(self.pipeline, "_push_event", None)
         if callable(push_event):
@@ -134,7 +135,7 @@ class BaseWorkflowAgent:
         if not svg_text.strip():
             return None
         svg_path.parent.mkdir(parents=True, exist_ok=True)
-        svg_path.write_text(svg_text, encoding="utf-8")
+        atomic_write_text(svg_path, svg_text)
         self._record_review_asset(svg_path, kind="svg")
         return svg_path
 

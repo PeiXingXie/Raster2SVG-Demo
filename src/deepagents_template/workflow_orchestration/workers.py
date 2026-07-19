@@ -27,8 +27,10 @@ from deepagents_template.prompt import (
     build_recognition_bbox_adjustment_prompts,
     build_recognition_bbox_combined_policy_prompts,
     build_region_combined_policy_prompts,
+    build_region_contract_enrichment_prompts,
     build_region_recognition_prompts,
     build_region_svg_generation_prompts,
+    build_targeted_contract_completion_prompts,
 )
 from deepagents_template.schemas import (
     BboxAdjustmentResult,
@@ -45,8 +47,11 @@ from deepagents_template.schemas import (
     ObjectCombinedPolicyModelResult,
     ObjectSvgGenerationResult,
     RegionCombinedPolicyModelResult,
+    RegionContractEnrichmentResult,
     RegionRecognitionResult,
+    RegionStructureRecognitionResult,
     RegionSvgGenerationResult,
+    TargetedContractCompletionResult,
 )
 
 from .base import BaseWorkflowAgent
@@ -357,7 +362,7 @@ class RegionRecognitionWorkerAgent(BaseWorkflowAgent):
         crop_path: Path,
         region: dict,
         checklist: dict,
-    ) -> tuple[RegionRecognitionResult, str]:
+    ) -> tuple[RegionStructureRecognitionResult, str]:
         region_context = build_region_recognition_context(region)
         region_checklist = select_checklist_payload_for_region(
             checklist,
@@ -370,12 +375,66 @@ class RegionRecognitionWorkerAgent(BaseWorkflowAgent):
             checklist_criteria=region_checklist,
         )
         return self.pipeline.region_caller.call_json(
-            RegionRecognitionResult,
+            RegionStructureRecognitionResult,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[crop_path],
+            validation_context={
+                "expected_region_id": region["region_id"],
+                "require_recognized_objects": True,
+            },
+        )
+
+    def enrich_object_contracts(
+        self,
+        *,
+        crop_path: Path,
+        region: dict,
+        checklist: dict,
+        recognized_objects: list[dict],
+    ) -> tuple[RegionContractEnrichmentResult, str]:
+        region_checklist = select_checklist_payload_for_region(
+            checklist,
+            region["region_id"],
+            stage="recognition",
+        )
+        system_prompt, user_prompt = build_region_contract_enrichment_prompts(
+            region=region,
+            recognized_objects=recognized_objects,
+            checklist_criteria=region_checklist,
+        )
+        return self.pipeline.region_caller.call_json(
+            RegionContractEnrichmentResult,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[crop_path],
+            validation_context={
+                "expected_region_id": region["region_id"],
+                "expected_object_ids": [
+                    item.get("object_id")
+                    for item in recognized_objects
+                    if isinstance(item, dict) and item.get("object_id")
+                ],
+            },
+        )
+
+    def complete_object_contracts(
+        self,
+        *,
+        crop_path: Path,
+        region: dict,
+        objects_to_complete: list[dict],
+    ) -> tuple[TargetedContractCompletionResult, str]:
+        system_prompt, user_prompt = build_targeted_contract_completion_prompts(
+            region=region,
+            objects_to_complete=objects_to_complete,
+        )
+        return self.pipeline.region_caller.call_json(
+            TargetedContractCompletionResult,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_paths=[crop_path],
         )
-
 
 class RegionSvgWorkerAgent(BaseWorkflowAgent):
     """Worker that generates or updates editable SVG for one region."""

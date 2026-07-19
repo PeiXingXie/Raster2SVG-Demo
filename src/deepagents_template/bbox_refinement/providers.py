@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from deepagents_template.atomic_files import atomic_write_text
 from deepagents_template.schemas import (
     BboxQualityIssue,
     ObjectBboxRefinementResult,
@@ -157,7 +158,7 @@ class SamRemoteRecognitionBboxRefiner:
             "exempted_issue_ids": exempted_issue_ids or [],
         }
         request_path = output_dir / "sam_remote_request.json"
-        request_path.write_text(json.dumps(request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(request_path, json.dumps(request_payload, ensure_ascii=False, indent=2))
         if not self.remote_url:
             return ObjectBboxRefinementResult(
                 provider="sam_remote",
@@ -202,7 +203,7 @@ class SamRemoteRecognitionBboxRefiner:
             )
 
         response_path = output_dir / "sam_remote_response_raw.json"
-        response_path.write_text(raw_text, encoding="utf-8")
+        atomic_write_text(response_path, raw_text)
         try:
             payload = json.loads(raw_text)
         except json.JSONDecodeError:

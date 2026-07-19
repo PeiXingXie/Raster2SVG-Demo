@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from deepagents_template.artifacts import ArtifactStore, derive_project_name_from_image
+from deepagents_template.artifacts import ArtifactStore
 from deepagents_template.config import get_settings
 from deepagents_template.conversion import RasterToSvgPipeline
 from deepagents_template.runtime import get_thread_store
@@ -174,8 +174,9 @@ def main() -> None:
         sys.exit(2)
 
     artifact_store = ArtifactStore()
-    project_name = derive_project_name_from_image(None, args.image_path, resolved_message)
-    run_dir = artifact_store.create_run_dir(project_name)
+    run_dir = artifact_store.create_run_dir()
+    run_id = run_dir.name
+    project_name = run_id
     thread_store = get_thread_store()
     thread = thread_store.get_or_create("cli-demo-thread")
     thread_store.append_message(
@@ -215,6 +216,7 @@ def main() -> None:
         detail="The command line conversion run is starting.",
         project_name=project_name,
         artifact_dir=str(run_dir),
+        run_id=run_id,
     )
     monitor(thread.current_run)
     pipeline = RasterToSvgPipeline(
@@ -224,6 +226,8 @@ def main() -> None:
         request=request,
         agent_model=settings.agent_model,
         subagent_model=settings.subagent_model,
+        run_id=run_id,
+        project_name=project_name,
         event_callback=monitor,
     )
     try:

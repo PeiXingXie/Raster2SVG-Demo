@@ -9,7 +9,6 @@ from deepagents_template.prompt.bbox_conventions import (
     BBOX_COORDINATE_CONVENTION_RULE,
     GLOBAL_BBOX_COORDINATE_RULE,
     GLOBAL_CROP_VISUAL_EVIDENCE_RULE,
-    GLOBAL_NO_LOCAL_COORDINATE_GUESS_RULE,
     GLOBAL_NO_OFFSET_REAPPLICATION_RULE,
     GLOBAL_SVG_OUTPUT_COORDINATE_RULE,
 )
@@ -21,11 +20,12 @@ from deepagents_template.utils.prompting import (
     json_output_contract,
     join_sections,
     json_section,
-    list_section,
     optional_section,
     section,
     svg_output_contract,
 )
+
+
 
 
 def build_region_recognition_prompts(
@@ -34,97 +34,60 @@ def build_region_recognition_prompts(
     region_context: dict,
     checklist_criteria: list[dict],
 ) -> tuple[str, str]:
+    """Build Stage-1 prompts for frozen object structure and ownership only."""
+
     system_prompt = textwrap.dedent(
         f"""
-        You are a multimodal region recognition worker.
-        Read the cropped raster region and identify the objects that must later become editable SVG.
+        You identify editable object structure inside one cropped raster region.
+        Inspect the crop and return only the object identity, type, description, and ownership structure.
         Return JSON only.
 
-        Rules:
+        Scope:
+        - Identify independently editable semantic objects.
+        - Assign each object a stable object_id and one object_type.
+        - Describe each object's visible content and role.
+        - List concrete visible elements semantically owned by each object.
+        - Decide object granularity and ownership only. Do not plan SVG generation, bbox localization, or visual fidelity checks.
 
-        1. Basic requirements
+        Output rules:
         - Output valid JSON without markdown fences.
         - The image input is only the crop for this region, not the full source image.
-        - description states what the object is and its visible role.
-        - included_elements lists concrete visible parts semantically owned by the object.
-        - generation_focus states what later SVG generation must preserve for that object.
-        - fidelity_hints is optional for ordinary objects, but add it for any object that is, contains, or visually owns an icon, badge, emblem, logo, mark, or other symbolic visual detail.
-        - Do not add fidelity_hints only for ordinary card borders, background fills, text grouping, spacing, centering, generic container shape, or non-symbolic layout details.
-        - fidelity_hints.verify_required should be true for objects with symbolic details, even when the owning object is not object_type="icon".
-        - fidelity_hints.fidelity_goals must contain at most 5 short visual preservation goals.
-        - Prioritize the most identity-critical goals first, because downstream payloads keep at most 5 goals.
-        - fidelity_hints.fidelity_goals should be goals, not just a part list.
-        - Each fidelity goal should stay under 18 words and name a concrete visible feature plus the preservation intent.
-        - Each fidelity goal should state what local visual form aspect to preserve: silhouette/contour, internal marks/strokes, relative layout inside the owning object, z-order/layering, visual weight, local style, or avoiding generic replacement.
-        - Object fidelity goals must be locally checkable inside that object's own bbox or owned SVG group.
-        - Do not put sibling-object spacing, content-stack alignment, cross-object scale balance, or region padding into any object's fidelity_hints.
-        - For container objects, fidelity_hints may describe the container's own border, fill, contour, corner shape, local decoration, or owned symbolic details only.
-        - For text objects, fidelity_hints may describe local text content, readability, typographic weight, or owned symbolic details only.
-        - For icon/symbolic-mark/badge details owned by a non-icon object, keep them in the owning object and describe their fidelity goals there. Do not invent part types.
-        - recognized_objects must be a list of object records.
-        - Use the applicable checklist criteria as high-level guidance only.
-        - Recognize only element types that visibly exist in this cropped region.
-        - object_id must be unique within the region, stable, lowercase snake_case, and describe the semantic unit.
-        - Do not use generic object_id values such as object_1 unless no meaningful name is possible.
+        - recognized_objects must cover all visible content except the region wrapper itself.
+        - Return recognized_objects=[] only when the crop genuinely contains no editable visible content.
+        - object_id must be unique, stable, lowercase snake_case, and semantically meaningful.
+        - object_id and description must be non-empty for every object.
+        - region_id must exactly match the requested region_id shown in the output shape.
         - object_type must be one of: background, icon, text, container, connector, diagram, fig.
-        - Do not include object bbox coordinates in this recognition step; bbox localization is handled by a later dedicated worker.
-        - recognized_objects must cover all visible content in the region except the region wrapper itself.
-        - Every visible primitive should belong to exactly one object, either standalone or via a same-class collection object.
-        - Assign semantic ownership before listing objects: output only root-level independently editable semantic units.
-        - Attached labels, markers, internal strokes, annotations, and decorative parts belong in the subject object's included_elements when they do not function independently.
+        - description must state visible content and role; transcribe readable text as accurately as possible.
+        - included_elements lists concrete visible parts semantically owned by the object and must contain at most 6 short items.
+        - Every visible primitive belongs to exactly one root-level object, directly or as an included_element.
+        - Do not output generation_focus, relative_position, extent_hint, fidelity_hints, bbox, or bbox_space.
+        - Do not include object bbox coordinates or infer global coordinates.
+        - Use checklist criteria only as high-level coverage guidance.
+
+        Granularity and ownership:
+        - Output independently editable semantic units, not every primitive.
+        - Prefer one object for a subject plus attached parts that are edited together.
+        - A process or flowchart box with its internal label is usually one container object.
+        - Attached labels, markers, internal strokes, annotations, and decorations belong to the owning object when they do not function independently.
         - Do not create a separate object for an element already listed in another object's included_elements.
-        - Object bboxes are not part of recognition; do not decide ownership from numeric bbox overlap.
-        - Use semantic role, visual attachment, containment, proximity, and practical editability to decide ownership.
-        - Use a compact, high-signal writing style and avoid low-value adjectives.
-        - observation should stay short and focused, ideally within 1-2 short sentences.
-        - Each object description should stay compact and high-signal rather than exhaustive.
-        - included_elements must contain at most 6 short concrete visible parts.
-        - generation_focus must contain at most 3 short items.
-        - relative_position should describe where the object sits in the crop using semantic landmarks.
-        - extent_hint should describe what a later bbox must include or avoid, without numeric coordinates.
-        - For extent_hint, name important extremities such as text descenders, icon strokes, connector endpoints, or panel borders.
+        - Spatial containment alone does not imply ownership; backgrounds and frames may surround independent foreground objects.
+        - Do not split one tightly coupled unit into many tiny objects or merge unrelated classes into one oversized object.
+        - Keep independent side-by-side icons separate; group icons only when they form one inseparable composite mark or repeated decorative set.
+        - Treat a tightly related connector/arrow/line network as one connector object.
 
-        2. Object granularity
-        - First identify independently editable semantic units.
-        - Prefer one object for a subject plus its attached sub-elements when those parts are edited together in practice.
-        - A flowchart/process box together with its internal label is usually one container object.
-        - Avoid redundant host-child duplicates: do not represent the same semantic unit both as a larger object and as its semantically owned sub-object.
-        - An element is semantically owned when it functions only as part of another object; fold it into that object's included_elements instead of outputting it separately.
-        - Spatial containment alone does not imply semantic ownership; backgrounds, frames, and backdrops may underlie or surround foreground objects without owning them.
-        - Use a separate text/icon/container object only when it functions independently.
-        - Use grouped same-class objects for repeated fragments, connector networks, decorations, or title/text systems.
-        - Do not split one tightly coupled semantic unit into many tiny objects.
-        - Do not create oversized mixed-class objects just to reduce count.
-        - Background fills, panels, halos, or framing shapes should usually be one background object.
-        - When the crop is fragmented or structurally dense, prefer semantically coherent grouped objects over exhaustive enumeration.
-        - Do not merge separate icons into one object when they are independent symbols with no logical relation, hierarchy, nesting, overlap, or shared shape structure.
-        - Side-by-side icons that could reasonably be edited independently should usually be separate icon objects, even if they appear in one row or header area.
-        - Only group multiple icons when they form one inseparable composite mark or one repeated decorative set.
+        Object type definitions:
+        - background: panel, fill, backdrop, halo, or framing shape.
+        - icon: independently editable pictogram or symbolic mark.
+        - text: words, labels, or numbers.
+        - container: process node, box, card, or shape container with owned parts.
+        - connector: connector, arrow, divider, edge, or local connector network.
+        - diagram: chart, plot, axis-based, or encoded visual.
+        - fig: natural image, barcode, or QR code.
 
-        Object description rules:
-        - description must state the visible content, role, and key visual traits.
-        - For text, description must include the readable text content or best-effort transcription.
-        - For connector, describe what endpoints or objects are connected.
-        - For diagram, describe axes/encodings/data marks when visible.
-        - For fig, describe the natural image/barcode/QR placeholder subject.
-        - Favor major semantic role and recognizable content over low-value micro-detail.
-        Element type definitions and object requests:
-        - background: panel, fill, backdrop, halo, or framing shape; preserve extent, color, border, and layering role.
-        - icon: pictogram or symbolic mark; use editable SVG shapes to approximate appearance.
-        - text: words, labels, or numbers; preserve content, formatting, typography, placement.
-        - container: process node, box, card, or shape container; preserve formatting, position, grouping, and order.
-        - connector: connector, arrow, divider, or edge; preserve style, endpoints, direction, relationships.
-          Treat all tightly related connector/arrow/line work in one local network as one combined connector object.
-        - diagram: chart, plot, axis-based or encoded visual; preserve scales, encodings, values, readability.
-        - fig: natural image, barcode, or QR code; use color-block placeholders, not forced detail.
         {json_output_contract(
             required_fields=("region_id", "observation", "recognized_objects"),
-            array_fields=(
-                "recognized_objects",
-                "recognized_objects[].included_elements",
-                "recognized_objects[].generation_focus",
-                "recognized_objects[].fidelity_hints.fidelity_goals",
-            ),
+            array_fields=("recognized_objects", "recognized_objects[].included_elements"),
             closed_value_fields={
                 "recognized_objects[].object_type": ("background", "icon", "text", "container", "connector", "diagram", "fig"),
             },
@@ -133,15 +96,15 @@ def build_region_recognition_prompts(
     ).strip()
     user_prompt = textwrap.dedent(
         f"""
-        Region-specific request:
-        Convert this cropped region into editable SVG while preserving: {region['description']}
+        Object-structure request:
+        Identify the editable object structure in this cropped region: {region['description']}
 
         Region context:
         {json.dumps(region_context, ensure_ascii=False, indent=2)}
 
         Coordinate note:
         Use the crop image as visual evidence only; do not add the region bbox offset
-        or infer global object coordinates in this recognition step.
+        or infer global object coordinates.
 
         Applicable checklist criteria:
         {json.dumps(checklist_criteria, ensure_ascii=False, indent=2)}
@@ -149,20 +112,167 @@ def build_region_recognition_prompts(
         Return this JSON shape:
         {{
           "region_id": "{region['region_id']}",
-          "observation": "short observation",
+          "observation": "short structural observation",
           "recognized_objects": [
             {{
-              "object_id": "meaningful_symbol_name",
+              "object_id": "meaningful_object_name",
               "object_type": "icon",
-              "description": "visible icon or symbol content and traits",
-              "included_elements": ["outer symbol shape", "internal marks"],
-              "generation_focus": ["preserve symbolic form", "preserve internal marks"],
-              "fidelity_hints": {{"verify_required": true, "fidelity_goals": ["preserve symbol contour", "preserve internal marks"]}},
-              "relative_position": "centered above the text stack",
-              "extent_hint": "include full symbol outline and internal strokes"
+              "description": "visible content and semantic role",
+              "included_elements": ["outer symbol shape", "internal marks"]
             }}
           ]
         }}
+        """
+    ).strip()
+    return system_prompt, user_prompt
+
+
+def build_region_contract_enrichment_prompts(
+    *,
+    region: dict,
+    recognized_objects: list[dict],
+    checklist_criteria: list[dict],
+) -> tuple[str, str]:
+    """Build Stage-2 prompts that enrich a frozen object structure."""
+
+    system_prompt = textwrap.dedent(
+        f"""
+        You enrich frozen object records with generation contract fields for a raster-to-SVG workflow.
+        Inspect the source crop and return JSON only.
+
+        Frozen-structure rules:
+        - Use the provided object_id list as the complete and only set of objects.
+        - Do not add, remove, split, merge, rename, or reclassify objects.
+        - Do not change description, included_elements, ownership, or granularity.
+        - object_updates may contain only object_id, generation_focus, relative_position, extent_hint, and fidelity_hints.
+
+        Contract rules for every object:
+        - generation_focus must contain 1-3 short, concrete preservation goals useful for SVG generation.
+        - relative_position must describe crop-local position using semantic landmarks, not numeric coordinates.
+        - extent_hint must state what visual extent should be included or avoided, naming important extremities when relevant.
+        - fidelity_hints must be null unless the object needs the fidelity verification described below.
+        - Keep all fields compact and grounded in visible evidence rather than generic quality language.
+
+        Fidelity applicability:
+        - Every object_type="icon" must set fidelity_hints.verify_required=true.
+        - For an icon, target_elements must be exactly [object_id].
+        - For non-icon objects, fidelity_hints is optional. Add it only when the owner contains an identity-bearing icon, badge, emblem, logo, mark, glyph, pictogram, or other symbolic visual detail that should not be replaced by a generic same-category substitute.
+        - Do not add fidelity_hints merely for ordinary borders, fills, backgrounds, text grouping, spacing, alignment, cross-object layout, or non-identity-bearing decoration.
+        - When verify_required=true, provide 1-5 short fidelity_goals naming concrete source-visible contour, distinctive parts, internal marks/strokes, topology, relative layout, z-order, proportions, visual weight, or local style.
+        - For a non-icon owner, target_elements must name the owned symbolic content to inspect; it does not create another recognized object.
+        - Do not use generic goals such as preserve the icon, keep visual fidelity, match the reference, or remain recognizable.
+
+        {json_output_contract(
+            required_fields=(
+                "region_id",
+                "object_updates",
+                "object_updates[].object_id",
+                "object_updates[].generation_focus",
+                "object_updates[].relative_position",
+                "object_updates[].extent_hint",
+                "object_updates[].fidelity_hints",
+            ),
+            array_fields=("object_updates", "object_updates[].generation_focus"),
+            extra_rules=(
+                "The top-level value must be a JSON object, never an array.",
+                "Return exactly one object_updates item for each frozen object_id and no other object_ids.",
+                "Every object_updates item must include generation_focus, relative_position, extent_hint, and fidelity_hints.",
+                "Do not add wrapper fields such as enrichment, text_elements, symbol_fidelity, visual_requirements, stage, role, or key_relations.",
+            ),
+        )}
+
+        Return exactly this top-level shape:
+        {{
+          "region_id": "...",
+          "object_updates": [
+            {{
+              "object_id": "...",
+              "generation_focus": ["..."],
+              "relative_position": "...",
+              "extent_hint": "...",
+              "fidelity_hints": null
+            }}
+          ]
+        }}
+        """
+    ).strip()
+    user_prompt = textwrap.dedent(
+        f"""
+        Object-contract enrichment request for region {region['region_id']}.
+
+        Frozen object structure:
+        {json.dumps(recognized_objects, ensure_ascii=False, indent=2)}
+
+        Applicable checklist criteria:
+        {json.dumps(checklist_criteria, ensure_ascii=False, indent=2)}
+
+        Return object_updates for the provided object IDs only. Do not repeat or modify structure fields.
+        """
+    ).strip()
+    return system_prompt, user_prompt
+
+
+def build_targeted_contract_completion_prompts(
+    *,
+    region: dict,
+    objects_to_complete: list[dict],
+) -> tuple[str, str]:
+    """Build Stage-3 prompts for field-level completion of audited contracts."""
+
+    system_prompt = textwrap.dedent(
+        f"""
+        You complete requested invalid object contract fields for a raster-to-SVG workflow.
+        Object identity, type, description, included_elements, ownership, and granularity are fixed and frozen.
+        Inspect the source crop and return JSON only.
+
+        Repair only the explicitly listed invalid_fields for the requested object IDs.
+        Do not return unrequested objects, and do not return fields listed under accepted_contract.
+        Do not add, remove, split, merge, rename, or reclassify objects.
+
+        Field rules:
+        - generation_focus: 1-3 short, concrete SVG preservation goals.
+        - relative_position: crop-local semantic position without numeric coordinates.
+        - extent_hint: concrete bbox inclusion/exclusion guidance without numeric coordinates.
+        - fidelity_hints: for icons set verify_required=true, target_elements=[object_id], and provide 1-5 concrete source-visible goals; for an explicitly requested non-icon hint, scope targets to its owned symbolic content.
+        - Never use generic fidelity goals such as preserve the icon, keep visual fidelity, match the reference, or remain recognizable.
+
+        {json_output_contract(
+            required_fields=("region_id", "object_updates", "object_updates[].object_id"),
+            array_fields=(
+                "object_updates",
+                "object_updates[].generation_focus",
+                "object_updates[].fidelity_hints.target_elements",
+                "object_updates[].fidelity_hints.fidelity_goals",
+            ),
+            extra_rules=(
+                "The top-level value must be a JSON object, never an array.",
+                "Return only object_updates items for object IDs listed in the request.",
+                "Each object_updates item may contain only object_id plus fields listed in that object's invalid_fields.",
+                "Omit every accepted_contract field; do not echo accepted fields back.",
+                "Do not add wrapper fields such as patch, enrichment, text_elements, symbol_fidelity, visual_requirements, stage, role, or key_relations.",
+            ),
+        )}
+
+        Return exactly this top-level shape:
+        {{
+          "region_id": "...",
+          "object_updates": [
+            {{
+              "object_id": "...",
+              "generation_focus": ["..."]
+            }}
+          ]
+        }}
+        """
+    ).strip()
+    user_prompt = textwrap.dedent(
+        f"""
+        Targeted contract completion request for region {region['region_id']}.
+
+        Requested objects, frozen structure, accepted fields, and validation issues:
+        {json.dumps(objects_to_complete, ensure_ascii=False, indent=2)}
+
+        Return only patches for invalid_fields. Omit every field that is already accepted.
         """
     ).strip()
     return system_prompt, user_prompt
@@ -191,7 +301,7 @@ def build_region_svg_generation_prompts(
         - The image input is only the crop for this region, not the full source image.
         - The recognition result is an object index and preservation brief, not a fresh instruction to re-plan the region.
         - Each recognized object's included_elements are owned by that object and should render inside that object's group.
-        - For objects with fidelity_hints.verify_required=true, use fidelity_hints.fidelity_goals as concrete visual obligations.
+        - For objects with fidelity_hints.verify_required=true, use fidelity_hints.target_elements as the visual focus and fidelity_hints.fidelity_goals as concrete visual obligations.
         - Do not substitute a cleaner generic same-category icon, symbol, badge, code window, network diagram, emblem, or mark when fidelity goals describe specific visible structure.
         - If a fidelity goal describes an owned detail inside a non-icon object, render that detail inside the owning object rather than dropping or simplifying it.
         - Small simplification is acceptable only when it preserves the goal's silhouette, internal structure, relative layout, z-order, and visual weight.
@@ -272,125 +382,6 @@ def build_region_svg_generation_prompts(
                   "region_id": "{region['region_id']}",
                   "svg_elements": "<!-- region: bbox=<global_x,global_y,width,height> -->\\n<g id=\\"region-{region['region_id']}\\" data-region-id=\\"{region['region_id']}\\">\\n  <g data-object-id=\\"background_panel\\" data-object-type=\\"background\\">...</g>\\n  <g data-object-id=\\"title_system\\" data-object-type=\\"text\\">...</g>\\n</g>",
                   "generation_notes": ["what was generated or updated"]
-                }}
-                """
-            ).strip(),
-        ),
-    )
-    return system_prompt, user_prompt
-
-
-def build_region_review_prompts(
-    *,
-    region: dict,
-    region_context: dict,
-    checklist_criteria: list[dict],
-    proposed_svg_elements: str,
-    object_summary: list[dict],
-    svg_file_name: str = "proposed_region.svg",
-) -> tuple[str, str]:
-    system_prompt = textwrap.dedent(
-        f"""
-        You are a multimodal region SVG reviewer.
-        Compare the cropped raster region with the proposed SVG fragment.
-        Return JSON only.
-
-        Responsibilities:
-
-        1. Review scope
-        - Evaluate region-level checklist violations such as layout, containment, coverage,
-          global alignment, color/style consistency, and mergeability.
-        - Evaluate every recognized object for quality and completeness.
-        - {GLOBAL_BBOX_COORDINATE_RULE}
-        - Region context bounds and Recognized objects bboxes follow this global coordinate frame.
-        - {GLOBAL_CROP_VISUAL_EVIDENCE_RULE}
-        - {GLOBAL_NO_OFFSET_REAPPLICATION_RULE}
-        - {GLOBAL_NO_LOCAL_COORDINATE_GUESS_RULE}
-        - {BBOX_COORDINATE_CONVENTION_RULE}
-
-        2. Issue routing
-        - Put whole-region problems in global_repairs as {criterion, reason, severity}.
-        - Put localized single-object problems in object_issues as {object_id, criterion, reason, severity}.
-        - criterion should state the generic acceptance rule being violated, preferably in reusable object-type terms, not in image-specific subject terms.
-        - Put the concrete object identity, side, or local context in reason and object_id, not in criterion.
-        - severity must be exactly one of "low", "medium", or "high".
-        - Judge severity by visual/material impact, not by wording style.
-        - low: cosmetic differences only; identity, structure, readability, containment, and editability remain intact.
-        - medium: visible mismatch weakens fidelity but preserves identity, core structure, and readability.
-        - high: missing/wrong/generic object, broken structure, unreadable text, clipped/out-of-bounds content, wrong identity, or layout hierarchy failure.
-        - If a checklist violation is caused by a specific object, put it only in object_issues.
-        - Keep global_repairs and object_issues clearly separated with no duplicated issue content.
-        - Use global_repairs only for region-wide structure, cross-object alignment, coverage,
-          or mergeability problems that cannot be assigned to one object.
-        - Any issue about relative position, layout relationship, spacing, or offset between multiple objects belongs in global_repairs.
-        - Use object_issues only when the problem is internal to one object rather than its relationship to neighboring objects.
-        - Use object_issues only for isolated single-object fidelity or completeness problems.
-        - Do not use a fidelity criterion to report a purely spatial relation problem; route shared spacing, balance, or relative placement problems through global_repairs instead.
-        - Do not use a spatial-layout criterion to hide an internal fidelity mismatch; if shape, silhouette, or structural likeness is wrong, report that explicitly in object_issues.
-        - When an icon differs in recognizable shape, silhouette structure, or internal simplification, record that fidelity problem explicitly instead of collapsing it into a generic spacing issue.
-        - For icons and symbolic marks, preserve semantic recognizability, silhouette agreement, and structural simplicity before optimizing small whitespace preferences or tiny proportion tweaks.
-        - If a reported layout issue is mainly a consequence of one object's incorrect shape or visual weight, still mention the underlying object fidelity problem explicitly.
-        - For every recognized icon object, explicitly judge icon fidelity against the raster before passing the region.
-        - Do not pass an icon merely because its broad semantic category is recognizable.
-        - Put an icon in object_issues when its outer silhouette, distinctive lobes/windows/nodes, internal strokes, or key emblem parts are missing, generic, or materially different.
-        - Treat generic icon substitution as an object fidelity failure even when placement and size are acceptable.
-
-        3. Review tolerance
-        - Be tolerant of minor low-impact differences when the overall standalone region semantics
-          and major visual structure are correct.
-        - Do not fail for slight background tone, small proportion, spacing, or placement differences
-          unless they materially harm semantics, readability, or mergeability.
-        - Do not infer "too large", "too low", "too close", or similar spatial defects from a mild stylistic preference alone; require clear visual evidence such as crowding, broken hierarchy, reduced readability, border pressure, or noticeably uneven balance versus the raster.
-        - Moderate differences in whitespace or spacing may be acceptable when object identity, recognizability, and overall composition remain intact.
-
-        4. Output style
-        - Diagnose and route problems only. Do not provide repair plans or suggestions.
-        - The output schema is problem-only: reason fields explain what is wrong, not how to fix it.
-        - Every reason must be brief, clear, and no more than 15 words.
-        - Input roles: image 1 is the ground-truth raster crop; image 2 is the rendered preview of the proposed SVG.
-        - Inline SVG source text is structural evidence for locating issues. Use the rendered preview as the primary visual comparison target.
-        """
-    ).strip()
-    user_prompt = join_sections(
-        section(
-            "Region review request",
-            (
-                "Attached images are, in order: "
-                "1) the source raster crop, 2) the rendered preview of the provided SVG.\n"
-                f"Review whether the SVG fragment accurately reconstructs this cropped region: {region['description']}"
-            ),
-        ),
-        json_section("Region context", region_context),
-        json_section("Applicable checklist criteria", checklist_criteria),
-        inline_text_file_section(
-            "Proposed region SVG source",
-            file_name=svg_file_name,
-            content=proposed_svg_elements,
-            role="Structural SVG source that corresponds to the rendered preview image.",
-        ),
-        json_section("Recognized objects", object_summary),
-        section(
-            "Return this JSON shape",
-            textwrap.dedent(
-                f"""
-                {{
-                  "region_id": "{region['region_id']}",
-                  "passed_items": ["criterion text"],
-                  "global_repairs": [
-                    {{
-                      "criterion": "criterion text",
-                      "reason": "A brief description of the problem",
-                      "severity": "medium"
-                    }}
-                  ],
-                  "object_issues": [
-                    {{
-                      "object_id": "object_id",
-                      "criterion": "criterion text",
-                      "reason": "A brief description of the problem",
-                      "severity": "medium"
-                    }}
-                  ]
                 }}
                 """
             ).strip(),

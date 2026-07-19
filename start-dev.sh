@@ -339,6 +339,14 @@ PORT_PROMPT_TIMEOUT_SECONDS="$(get_int_setting_value "PORT_PROMPT_TIMEOUT_SECOND
 APP_HOST="${APP_HOST:-$(read_dotenv_value "APP_HOST" "${ENV_FILE}" || true)}"
 APP_PORT="$(get_port_setting_value "APP_PORT" "${ENV_FILE}" 8120)"
 APP_HOST="${APP_HOST:-127.0.0.1}"
+case "${APP_HOST}" in
+  127.0.0.1|localhost|::1) ;;
+  *)
+    echo "Error: Shape Studio is local-only. APP_HOST must be 127.0.0.1, localhost, or ::1." >&2
+    exit 1
+    ;;
+esac
+APP_HOST="127.0.0.1"
 
 USE_ACTIVATED_PYTHON="false"
 if [[ "${USE_ACTIVE_PYTHON}" == "true" ]] || test_virtualenv_active || test_conda_environment_active; then

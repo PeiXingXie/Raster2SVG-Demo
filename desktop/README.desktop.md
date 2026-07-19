@@ -1,5 +1,7 @@
 # Desktop Client
 
+This document is the authoritative guide for the Electron desktop shell, desktop startup, frontend URL resolution, runtime resolution, and desktop-specific troubleshooting.
+
 This directory contains the Electron desktop shell.
 
 ## Use This README When
@@ -15,6 +17,7 @@ For overall project navigation, use the root [README.md](../README.md).
 For the developer entrypoint, use [README.developer.md](../README.developer.md).
 For the full detailed local development guide, use [docs.development.md](../docs.development.md).
 For source-bundle deployment and migration, use [quick-start/README.quick-start.md](../quick-start/README.quick-start.md).
+For installer packaging and installed-app behavior, use [packaging/README.packaging.md](../packaging/README.packaging.md).
 
 ## What This README Covers
 
@@ -273,3 +276,5 @@ without maintaining separate frontend implementations.
 - [README.developer.md](../README.developer.md)
 - [docs.development.md](../docs.development.md)
 - [quick-start/README.quick-start.md](../quick-start/README.quick-start.md)
+- [packaging/README.packaging.md](../packaging/README.packaging.md)
+- [../architecture-summary/03-runtime-and-interfaces.md](../architecture-summary/03-runtime-and-interfaces.md)

@@ -1,5 +1,5 @@
 import { elements } from "./dom.js";
-import { appState, renderState, DEFAULT_MESSAGE } from "./state.js?v=run-start-state-boundary-1";
+import { appState, renderState, DEFAULT_MESSAGE } from "./state.js?v=workspace-session-isolation-5";
 import {
   arrayBufferToBase64,
   normalizeDisplayValue,
@@ -7,7 +7,7 @@ import {
   stableStringify,
   truncate,
 } from "./utils.js";
-import { fetchJson } from "./api-client.js";
+import { fetchJson } from "./api-client.js?v=workspace-session-isolation-5";
 import { getSettingsValueLabel } from "./settings-labels.js?v=desktop-settings-labels-1";
 
 function guessExtensionFromMimeType(mimeType) {
@@ -82,20 +82,22 @@ export const FIELD_SPECS = [
 ];
 
 export const RUNTIME_FIELD_SPECS = [
-  { id: "api-key", custom: getApiKeyEffectiveValue },
+  { id: "api-key", key: "api_key", custom: getApiKeyEffectiveValue },
   { id: "base-url", key: "base_url" },
   { id: "api-provider", key: "api_provider" },
   { id: "api-format", key: "api_format" },
-  { id: "max-retries", key: "max_retries", summary: true },
-  { id: "settings-workflow-mode", key: "workflow_mode", summaryLabel: "refinement depth", summary: true },
-  { id: "settings-region-processing-mode", key: "region_processing_mode", summaryLabel: "processing schedule", summary: true },
-  { id: "settings-region-concurrency", key: "region_concurrency", summaryLabel: "region concurrency", summary: true },
-  { id: "agent-model", key: "agent_model" },
-  { id: "subagent-model", key: "subagent_model" },
+  { id: "settings-workflow-mode", key: "workflow_mode", summaryLabel: "refinement depth", summary: true, summaryOrder: 1, summarySpan: 2 },
+  { id: "settings-region-processing-mode", key: "region_processing_mode", summaryLabel: "processing schedule", summary: true, summaryOrder: 2, summarySpan: 2 },
+  { id: "run-model-call-budget", key: "run_model_call_budget", type: "integer", min: 1, preserveBlankWithoutOverride: true, summaryLabel: "model budget", summary: true, summaryOrder: 3, summarySuffix: "calls" },
+  { id: "settings-region-concurrency", key: "region_concurrency", type: "integer", min: 1, summaryLabel: "region concurrency", summary: true, summaryOrder: 4 },
+  { id: "bbox-refinement-max-rounds", key: "bbox_refinement_max_rounds", type: "integer", min: 0, preserveBlankWithoutOverride: true },
+  { id: "region-repair-max-attempts", key: "region_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
+  { id: "object-repair-max-attempts", key: "object_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
+  { id: "fusion-repair-max-attempts", key: "fusion_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
+  { id: "agent-model", key: "agent_model", summaryLabel: "Coordinator Model", summary: true, summaryOrder: 7, summarySpan: 2 },
+  { id: "subagent-model", key: "subagent_model", summaryLabel: "Worker Model", summary: true, summaryOrder: 8, summarySpan: 2 },
   { id: "agent-name", key: "agent_name" },
   { id: "use-previous-response-id", key: "use_previous_response_id" },
-  { id: "max-repair-retry", key: "max_retry", summary: true },
-  { id: "max-budget", key: "max_budget", summary: true },
   { id: "supervisor-memory-enabled", key: "supervisor_memory_enabled" },
   { id: "supervisor-memory-persist-enabled", key: "supervisor_memory_persist_enabled" },
   { id: "strategy-enabled", key: "strategy_enabled" },
@@ -104,9 +106,19 @@ export const RUNTIME_FIELD_SPECS = [
   { id: "sam-remote-url", key: "sam_remote_url" },
   { id: "sam-enabled", key: "sam_enabled" },
   { id: "sam-fallback-to-llm", key: "sam_fallback_to_llm" },
-  { id: "bbox-issue-concurrency", key: "bbox_issue_concurrency" },
-  { id: "bbox-issue-stagnation-rounds", key: "bbox_issue_stagnation_rounds" },
-  { id: "bbox-global-stagnation-rounds", key: "bbox_global_stagnation_rounds" },
+];
+
+const COMPUTED_RUNTIME_SUMMARY_SPECS = [
+  {
+    label: "region / object repair",
+    order: 5,
+    getValue: () => `${getEffectiveRuntimeValueByKey("region_repair_max_attempts")} / ${getEffectiveRuntimeValueByKey("object_repair_max_attempts")}`,
+  },
+  {
+    label: "bbox / fusion depth",
+    order: 6,
+    getValue: () => `${getEffectiveRuntimeValueByKey("bbox_refinement_max_rounds")} / ${getEffectiveRuntimeValueByKey("fusion_repair_max_attempts")}`,
+  },
 ];
 
 export function getElementByFieldId(fieldId) {
@@ -137,8 +149,6 @@ export function getElementByFieldId(fieldId) {
       return elements.apiProvider;
     case "api-format":
       return elements.apiFormat;
-    case "max-retries":
-      return elements.maxRetries;
     case "agent-model":
       return elements.agentModel;
     case "subagent-model":
@@ -147,10 +157,6 @@ export function getElementByFieldId(fieldId) {
       return elements.agentName;
     case "use-previous-response-id":
       return elements.usePreviousResponseId;
-    case "max-repair-retry":
-      return elements.maxRepairRetry;
-    case "max-budget":
-      return elements.maxBudget;
     case "supervisor-memory-enabled":
       return elements.supervisorMemoryEnabled;
     case "supervisor-memory-persist-enabled":
@@ -167,15 +173,14 @@ export function getElementByFieldId(fieldId) {
       return elements.samEnabled;
     case "sam-fallback-to-llm":
       return elements.samFallbackToLlm;
-    case "bbox-issue-concurrency":
-      return elements.bboxIssueConcurrency;
-    case "bbox-issue-stagnation-rounds":
-      return elements.bboxIssueStagnationRounds;
-    case "bbox-global-stagnation-rounds":
-      return elements.bboxGlobalStagnationRounds;
     default:
-      return null;
+      return document.getElementById(fieldId);
   }
+}
+
+function getEffectiveRuntimeValueByKey(key) {
+  const spec = RUNTIME_FIELD_SPECS.find((item) => item.key === key);
+  return spec ? getEffectiveValue(spec) : normalizeDisplayValue(appState.defaults?.[key]);
 }
 
 export function getEffectiveValue(spec) {
@@ -344,24 +349,42 @@ export function updateEffectiveValues() {
     }
     if (spec.summary && RUNTIME_FIELD_SPECS.includes(spec)) {
       const targetParts = runtimeSummaryParts;
+      const displayValue = String(getDisplayValueForSpec(spec, effectiveValue));
       targetParts.push({
         label: spec.summaryLabel || spec.id.replaceAll("-", " "),
-        value: String(getDisplayValueForSpec(spec, effectiveValue)),
+        value: displayValue === "-" || !spec.summarySuffix
+          ? displayValue
+          : `${displayValue} ${spec.summarySuffix}`,
+        order: spec.summaryOrder ?? Number.MAX_SAFE_INTEGER,
+        span: spec.summarySpan ?? 1,
       });
     }
+  }
+  for (const spec of COMPUTED_RUNTIME_SUMMARY_SPECS) {
+    runtimeSummaryParts.push({
+      label: spec.label,
+      value: String(spec.getValue()),
+      order: spec.order,
+      span: spec.span ?? 1,
+    });
   }
 
   if (elements.runtimeConfigSummary) {
     elements.runtimeConfigSummary.innerHTML = "";
+    runtimeSummaryParts.sort((left, right) => left.order - right.order);
     for (const part of runtimeSummaryParts) {
       const chip = document.createElement("span");
       chip.className = "effective-chip";
+      chip.classList.add(`effective-chip--span-${part.span}`);
+      chip.title = `${part.label}: ${part.value}`;
       const label = document.createElement("span");
       label.className = "effective-chip-label";
       label.textContent = part.label;
+      label.title = part.label;
       const value = document.createElement("span");
       value.className = "effective-chip-value";
       value.textContent = part.value;
+      value.title = part.value;
       chip.append(label, value);
       elements.runtimeConfigSummary.appendChild(chip);
     }
@@ -405,6 +428,10 @@ export function applyRuntimeOverrides(overrides) {
     const resolvedValue = getResolvedRuntimeValue(spec);
     if (element.tagName === "SELECT") {
       setElementValue(element, resolvedValue === "" ? String(appState.defaults?.[spec.key] ?? "") : resolvedValue);
+    } else if (spec.preserveBlankWithoutOverride && !hasOverride) {
+      setElementValue(element, "");
+      const defaultValue = normalizeDisplayValue(appState.defaults?.[spec.key]);
+      element.placeholder = defaultValue === "-" ? "Uses environment default" : `Default: ${defaultValue}`;
     } else {
       setElementValue(element, resolvedValue);
     }
@@ -427,6 +454,37 @@ export function clearUploadPreview() {
   elements.uploadStatus.textContent = document.body.classList.contains("desktop-body") ? "" : "No local file uploaded.";
 }
 
+export function syncUploadPreviewFromState() {
+  const upload = appState.localUpload;
+  if (upload?.previewObjectUrl) {
+    elements.uploadPreviewImage.src = upload.previewObjectUrl;
+    elements.uploadPreviewImage.classList.remove("hidden");
+    elements.uploadPreviewEmpty.classList.add("hidden");
+    elements.uploadPreviewPanel.classList.remove("upload-preview-empty-state");
+    elements.uploadPreviewMeta.textContent = upload.previewMeta
+      || `${upload.filename || "Uploaded image"} | ${Math.max(1, Math.round((upload.size_bytes || 0) / 1024))} KB`;
+    elements.uploadStatus.textContent = upload.filename
+      ? `${upload.filename} uploaded (${upload.size_bytes || 0} bytes)`
+      : "Image uploaded";
+    return;
+  }
+  elements.uploadPreviewImage.removeAttribute("src");
+  elements.uploadPreviewImage.classList.add("hidden");
+  elements.uploadPreviewEmpty.classList.remove("hidden");
+  elements.uploadPreviewMeta.textContent = document.body.classList.contains("desktop-body")
+    ? ""
+    : "Focus here, then paste with Ctrl+V or choose a file below.";
+  elements.uploadPreviewPanel.classList.add("upload-preview-empty-state");
+  elements.uploadStatus.textContent = document.body.classList.contains("desktop-body") ? "" : "No local file uploaded.";
+}
+
+export function resetInputImageSelection() {
+  clearUploadPreview();
+  elements.imagePath.value = "";
+  elements.uploadFileInput.value = "";
+  updateEffectiveValues();
+}
+
 function setUploadPreview(file, objectUrl) {
   elements.uploadPreviewImage.src = objectUrl;
   elements.uploadPreviewMeta.textContent = `${file.name} | ${Math.max(1, Math.round(file.size / 1024))} KB`;
@@ -435,7 +493,7 @@ function setUploadPreview(file, objectUrl) {
   elements.uploadPreviewPanel.classList.remove("upload-preview-empty-state");
 }
 
-export async function uploadLocalFile(file, setStatus) {
+export async function uploadLocalFile(file, setStatus, { shouldApply = () => true } = {}) {
   if (!file) {
     return;
   }
@@ -453,16 +511,25 @@ export async function uploadLocalFile(file, setStatus) {
     }),
   });
 
+  const previewObjectUrl = URL.createObjectURL(normalizedFile);
+  const upload = {
+    ...data,
+    previewObjectUrl,
+    previewMeta: `${normalizedFile.name} | ${Math.max(1, Math.round(normalizedFile.size / 1024))} KB`,
+  };
+  if (!shouldApply()) {
+    return upload;
+  }
   if (appState.localUpload?.previewObjectUrl) {
     URL.revokeObjectURL(appState.localUpload.previewObjectUrl);
   }
-  const previewObjectUrl = URL.createObjectURL(normalizedFile);
-  appState.localUpload = { ...data, previewObjectUrl };
+  appState.localUpload = upload;
   elements.imagePath.value = data.image_path;
   elements.uploadStatus.textContent = `${data.filename} uploaded (${data.size_bytes} bytes)`;
   setUploadPreview(normalizedFile, previewObjectUrl);
   updateEffectiveValues();
   setStatus("Upload complete");
+  return upload;
 }
 
 export async function pickLocalFileFromHost() {
@@ -534,23 +601,27 @@ export function updateMessagePresetSelection() {
   }
 }
 
-export function buildInvokePayload(threadId) {
+export function buildInvokePayload(threadId, draft = null) {
+  const message = draft?.message ?? elements.messageInput.value;
+  const imagePath = draft?.imagePath ?? elements.imagePath.value;
+  const projectName = draft?.projectName ?? elements.projectName.value;
+  const workflowMode = draft?.workflowMode ?? elements.workflowMode.value;
+  const regionProcessingMode = draft?.regionProcessingMode ?? elements.regionProcessingMode.value;
+  const regionConcurrencyRaw = draft?.regionConcurrency ?? elements.regionConcurrency.value;
   const payload = {
     thread_id: threadId,
-    message: elements.messageInput.value.trim(),
+    message: String(message).trim(),
   };
 
-  const imagePath = elements.imagePath.value.trim();
-  const projectName = elements.projectName.value.trim();
-  const workflowMode = elements.workflowMode.value;
-  const regionProcessingMode = elements.regionProcessingMode.value;
-  const regionConcurrencyRaw = elements.regionConcurrency.value.trim();
+  const normalizedImagePath = String(imagePath).trim();
+  const normalizedProjectName = String(projectName).trim();
+  const normalizedRegionConcurrency = String(regionConcurrencyRaw).trim();
 
-  if (imagePath) {
-    payload.image_path = imagePath;
+  if (normalizedImagePath) {
+    payload.image_path = normalizedImagePath;
   }
-  if (projectName) {
-    payload.project_name = projectName;
+  if (normalizedProjectName) {
+    payload.project_name = normalizedProjectName;
   }
   if (workflowMode) {
     payload.workflow_mode = workflowMode;
@@ -558,8 +629,8 @@ export function buildInvokePayload(threadId) {
   if (regionProcessingMode) {
     payload.region_processing_mode = regionProcessingMode;
   }
-  if (regionConcurrencyRaw) {
-    const regionConcurrency = Number.parseInt(regionConcurrencyRaw, 10);
+  if (normalizedRegionConcurrency) {
+    const regionConcurrency = Number.parseInt(normalizedRegionConcurrency, 10);
     if (!Number.isNaN(regionConcurrency)) {
       payload.region_concurrency = regionConcurrency;
     }
@@ -581,6 +652,17 @@ export function buildRuntimeOverridesPayload() {
     if (element.dataset.overrideActive !== "true" && rawValue === "") {
       continue;
     }
+    if (element.dataset.overrideActive === "true" && rawValue === "") {
+      payload[key] = null;
+      continue;
+    }
+    if (spec.type === "integer") {
+      const parsed = Number.parseInt(rawValue, 10);
+      if (!Number.isNaN(parsed) && (spec.min == null || parsed >= spec.min)) {
+        payload[key] = parsed;
+      }
+      continue;
+    }
     switch (key) {
       case "api_key":
       case "base_url":
@@ -598,22 +680,6 @@ export function buildRuntimeOverridesPayload() {
           payload[key] = rawValue;
         }
         break;
-      case "max_retries":
-      case "region_concurrency":
-      case "max_retry":
-      case "max_budget":
-      case "bbox_issue_concurrency":
-      case "bbox_issue_stagnation_rounds":
-      case "bbox_global_stagnation_rounds": {
-        if (!rawValue) {
-          break;
-        }
-        const parsed = Number.parseInt(rawValue, 10);
-        if (!Number.isNaN(parsed)) {
-          payload[key] = parsed;
-        }
-        break;
-      }
       case "use_previous_response_id":
       case "supervisor_memory_enabled":
       case "supervisor_memory_persist_enabled":

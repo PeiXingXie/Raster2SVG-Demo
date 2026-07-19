@@ -324,6 +324,14 @@ if [[ -z "${APP_HOST:-}" ]]; then
 fi
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="$(get_port_setting_value "APP_PORT" "${ENV_FILE}" 8120)"
+case "${APP_HOST}" in
+  127.0.0.1|localhost|::1) ;;
+  *)
+    echo "Error: Shape Studio is local-only. APP_HOST must be 127.0.0.1, localhost, or ::1." >&2
+    exit 1
+    ;;
+esac
+APP_HOST="127.0.0.1"
 
 if test_virtualenv_active || test_conda_environment_active; then
   PYTHON_EXECUTABLE="$(get_python_executable_path "${PYTHON_BIN}")"

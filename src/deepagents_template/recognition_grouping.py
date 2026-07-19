@@ -77,8 +77,6 @@ def group_oversegmented_recognition(
     dropped_ids: list[str] = []
     kept_objects = []
     consumed: set[str] = set()
-    object_by_id = {obj.object_id: obj for obj in objects}
-
     for obj in objects:
         if obj.object_id in consumed:
             continue

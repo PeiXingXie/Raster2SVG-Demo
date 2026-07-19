@@ -38,6 +38,7 @@ const root = process.argv[2];
 const packagePath = path.join(root, "desktop", "package.json");
 const lockPath = path.join(root, "desktop", "package-lock.json");
 const pyprojectPath = path.join(root, "pyproject.toml");
+const packageVersionPath = path.join(root, "src", "deepagents_template", "version.py");
 
 const desktopPackage = JSON.parse(fs.readFileSync(packagePath, "utf8"));
 const desktopVersion = String(desktopPackage.version || "");
@@ -51,6 +52,16 @@ if (!pyprojectMatch) {
 const pyprojectVersion = pyprojectMatch[1];
 if (desktopVersion !== pyprojectVersion) {
   throw new Error(`Version mismatch: desktop/package.json=${desktopVersion} pyproject.toml=${pyprojectVersion}`);
+}
+
+const packageVersionText = fs.readFileSync(packageVersionPath, "utf8");
+const packageVersionMatch = packageVersionText.match(/^__version__\s*=\s*"([^"]+)"/m);
+if (!packageVersionMatch) {
+  throw new Error("Could not find __version__ in src/deepagents_template/version.py.");
+}
+const packageVersion = packageVersionMatch[1];
+if (packageVersion !== desktopVersion) {
+  throw new Error(`Version mismatch: src/deepagents_template/version.py=${packageVersion} desktop/package.json=${desktopVersion}`);
 }
 
 if (fs.existsSync(lockPath)) {

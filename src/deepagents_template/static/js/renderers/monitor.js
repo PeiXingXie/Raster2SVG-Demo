@@ -1,5 +1,5 @@
 import { elements } from "../dom.js";
-import { renderState } from "../state.js?v=run-start-state-boundary-1";
+import { renderState } from "../state.js?v=workspace-session-isolation-5";
 import { renderLoadingState } from "../components/loading-state.js";
 import {
   captureDetailsState,
@@ -313,22 +313,34 @@ function updateDesktopHistoryPagination(pagination, pageInfo) {
   if (!root || !prevButton || !nextButton || !status) {
     return;
   }
-  const visible = Boolean(pagination?.enabled && pageInfo.totalRuns > 0);
+  const visible = Boolean(
+    pagination?.enabled
+    && (pageInfo.totalRuns > 0 || pageInfo.page > 1 || pageInfo.endItem > 0)
+  );
   root.classList.toggle("hidden", !visible);
   if (!visible) {
     return;
   }
   const filterLabel = getHistoryFilterLabel(pagination.filterStatus || "all");
-  status.textContent = `${pageInfo.startItem}-${pageInfo.endItem} of ${pageInfo.totalRuns} ${filterLabel} | Page ${pageInfo.page} / ${pageInfo.totalPages}`;
+  const totalKnown = Number.isFinite(pageInfo.totalRuns) && Number.isFinite(pageInfo.totalPages);
+  status.textContent = totalKnown
+    ? `${pageInfo.startItem}-${pageInfo.endItem} of ${pageInfo.totalRuns} ${filterLabel} | Page ${pageInfo.page} / ${pageInfo.totalPages}`
+    : `${pageInfo.startItem}-${pageInfo.endItem} ${filterLabel} | Page ${pageInfo.page}`;
   prevButton.disabled = pageInfo.page <= 1;
-  nextButton.disabled = pageInfo.page >= pageInfo.totalPages;
+  nextButton.disabled = pagination?.serverPaginated
+    ? !pageInfo.hasMore
+    : pageInfo.page >= pageInfo.totalPages;
   if (pageInput instanceof HTMLInputElement) {
     pageInput.min = "1";
-    pageInput.max = String(pageInfo.totalPages);
+    if (totalKnown) {
+      pageInput.max = String(pageInfo.totalPages);
+    } else {
+      pageInput.removeAttribute("max");
+    }
     pageInput.value = String(pageInfo.page);
   }
   if (pageTotal) {
-    pageTotal.textContent = `/ ${pageInfo.totalPages}`;
+    pageTotal.textContent = totalKnown ? `/ ${pageInfo.totalPages}` : "";
   }
 }
 
@@ -384,28 +396,42 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
   const isLoading = Boolean(options.loading);
   const filterStatus = pagination?.filterStatus || "all";
   const isDesktopPaginated = Boolean(pagination?.enabled);
+  const isServerPaginated = Boolean(pagination?.serverPaginated);
   const searchQuery = String(pagination?.search || "").trim().toLowerCase();
-  const statusFilteredRuns = isDesktopPaginated && filterStatus !== "all"
+  const statusFilteredRuns = !isServerPaginated && isDesktopPaginated && filterStatus !== "all"
     ? runs.filter((run) => runMatchesHistoryFilter(run, filterStatus))
     : runs;
-  const searchedRuns = searchQuery
+  const searchedRuns = !isServerPaginated && searchQuery
     ? statusFilteredRuns.filter((run) => getRunSearchText(run).includes(searchQuery))
     : statusFilteredRuns;
-  const filteredRuns = isDesktopPaginated
+  const filteredRuns = isDesktopPaginated && !isServerPaginated
     ? sortRunsForLibrary(searchedRuns, pagination?.sort || "updated_desc")
     : searchedRuns;
   const pageSize = Math.max(1, Number.parseInt(pagination?.pageSize || filteredRuns.length || 1, 10));
-  const totalPages = Math.max(1, Math.ceil(filteredRuns.length / pageSize));
   const requestedPage = Math.max(1, Number.parseInt(pagination?.page || 1, 10));
-  const page = Math.min(requestedPage, totalPages);
+  const serverTotalPages = Number.isFinite(pagination?.totalPages) ? pagination.totalPages : null;
+  const totalPages = isServerPaginated
+    ? serverTotalPages
+    : Math.max(1, Math.ceil(filteredRuns.length / pageSize));
+  const page = isServerPaginated || totalPages == null
+    ? requestedPage
+    : Math.min(requestedPage, totalPages);
   const pageStartIndex = isDesktopPaginated ? (page - 1) * pageSize : 0;
-  const pageRuns = isDesktopPaginated ? filteredRuns.slice(pageStartIndex, pageStartIndex + pageSize) : filteredRuns;
+  const pageRuns = isServerPaginated
+    ? filteredRuns
+    : isDesktopPaginated
+      ? filteredRuns.slice(pageStartIndex, pageStartIndex + pageSize)
+      : filteredRuns;
+  const totalRuns = isServerPaginated
+    ? (Number.isFinite(pagination?.totalRuns) ? pagination.totalRuns : null)
+    : filteredRuns.length;
   const pageInfo = {
     page,
     pageSize,
     totalPages,
-    totalRuns: filteredRuns.length,
-    startItem: filteredRuns.length ? pageStartIndex + 1 : 0,
+    totalRuns,
+    hasMore: isServerPaginated ? Boolean(pagination?.hasMore) : page < totalPages,
+    startItem: pageRuns.length ? pageStartIndex + 1 : 0,
     endItem: pageStartIndex + pageRuns.length,
   };
   const signature = stableStringify({
@@ -428,11 +454,18 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
   if (isLoading) {
     elements.recentRuns.className = "recent-runs recent-runs-sidebar is-loading";
     elements.recentRunsClearSelection.classList.add("hidden");
-    renderLoadingState(elements.recentRuns, {
-      label: "Loading saved projects",
-      message: "Reading project history...",
-      className: "desktop-history-loading-state",
-    });
+    for (let index = 0; index < pageSize; index += 1) {
+      const card = document.createElement("article");
+      card.className = "history-skeleton-card";
+      card.setAttribute("aria-hidden", "true");
+      renderLoadingState(card, {
+        label: "Loading project",
+        message: "Reading project summary...",
+        compact: true,
+        className: "desktop-history-loading-state",
+      });
+      elements.recentRuns.appendChild(card);
+    }
     updateDesktopHistoryPagination(pagination, {
       page: 1,
       pageSize: Math.max(1, Number.parseInt(pagination?.pageSize || 1, 10)),
@@ -444,7 +477,7 @@ export function renderRecentRuns(runs, selectedRunId, onReviewRun, onResumeRun, 
     renderState.recentRunsSig = signature;
     return;
   }
-  if (!filteredRuns.length) {
+  if (!pageRuns.length) {
     elements.recentRuns.textContent = searchQuery
       ? "No projects match your search."
       : isDesktopPaginated && filterStatus !== "all"

@@ -6,13 +6,8 @@ import concurrent.futures
 from pathlib import Path
 from threading import current_thread
 
-from deepagents_template.debug_review import DebugRegionReviewWorkerAgent
-from deepagents_template.geometry import build_region_context, recognition_bboxes_to_global_if_local
-from deepagents_template.schemas import RegionRecognitionResult, RegionRepairResult, RegionReviewResult, RegionSvgGenerationResult
-from deepagents_template.svg_utils import extract_group_template
-from deepagents_template.utils.svg_rendering import SvgPreviewRenderError, wrap_svg_fragment, write_svg_review_artifacts
-from deepagents_template.utils.svg_runtime import finalize_region_svg
-from deepagents_template.utils.tasks import create_region_task
+from deepagents_template.geometry import recognition_bboxes_to_global_if_local
+from deepagents_template.schemas import RegionRecognitionResult, RegionSvgGenerationResult
 
 
 class RegionProcessNodeMixin:
@@ -139,10 +134,15 @@ class RegionProcessNodeMixin:
             max_workers=max_workers,
             thread_name_prefix="region-svg",
         ) as executor:
-            future_to_item = {
-                executor.submit(worker, item, checklist): (index, item)
-                for index, item in enumerate(region_work_items)
-            }
+            callback_runner = getattr(self, "_run_with_context_payload_warning_callback", None)
+            future_to_item = {}
+            for index, item in enumerate(region_work_items):
+                future = (
+                    executor.submit(callback_runner, worker, item, checklist)
+                    if callable(callback_runner)
+                    else executor.submit(worker, item, checklist)
+                )
+                future_to_item[future] = (index, item)
             for future in concurrent.futures.as_completed(future_to_item):
                 index, item = future_to_item[future]
                 region = item.get("region") or item["initial_result"]["region"]
@@ -247,13 +247,48 @@ class RegionProcessNodeMixin:
         )
         previous_trace_stage = self._set_current_trace_stage("initial-generate")
         try:
-            return self._process_region_initial(
+            result = self._process_region_initial(
                 crop_path=item["crop_path"],
                 region=region,
                 checklist=checklist,
                 region_dir=item["region_dir"],
             )
-        finally:
+        except Exception as exc:
+            self._set_current_trace_stage(previous_trace_stage)
+            self._mark_region_worker_finished()
+            error_message = str(exc).strip() or repr(exc)
+            error_summary = error_message.splitlines()[0] if error_message else type(exc).__name__
+            self._mark_region_state(
+                region["region_id"],
+                status="failed",
+                phase="initial",
+                last_completed_step=None,
+            )
+            worker_statuses = self._set_worker_status(
+                worker_id=worker_id,
+                status="failed",
+                stage="region-process",
+                task_id=region["region_id"],
+                detail=f"Failed {region['region_id']}: {error_summary}",
+            )
+            self._push_event(
+                "region-process",
+                f"Initial pass failed for {region['region_id']}",
+                f"{region['description']} Error: {type(exc).__name__}: {error_summary}",
+                payload={
+                    "region_id": region["region_id"],
+                    "bbox": region["bbox"],
+                    "phase": "initial",
+                    "error_type": type(exc).__name__,
+                    "error_message": error_message,
+                },
+                worker_statuses=worker_statuses,
+                status="failed",
+                level="error",
+                trace_stage="initial-generate",
+            )
+            raise
+        else:
             self._set_current_trace_stage(previous_trace_stage)
             self._mark_region_worker_finished()
             worker_statuses = self._set_worker_status(
@@ -271,6 +306,7 @@ class RegionProcessNodeMixin:
                 worker_statuses=worker_statuses,
                 status="running",
             )
+            return result
 
     def _refine_region_work_item(self, item: dict, checklist: dict) -> dict:
         initial_result = item["initial_result"]
@@ -299,8 +335,44 @@ class RegionProcessNodeMixin:
         )
         previous_trace_stage = self._set_current_trace_stage("refine")
         try:
-            return self._refine_region(initial_result=initial_result, checklist=checklist)
-        finally:
+            result = self._refine_region(initial_result=initial_result, checklist=checklist)
+        except Exception as exc:
+            self._set_current_trace_stage(previous_trace_stage)
+            self._mark_region_worker_finished()
+            error_message = str(exc).strip() or repr(exc)
+            error_summary = error_message.splitlines()[0] if error_message else type(exc).__name__
+            self._mark_region_state(
+                region["region_id"],
+                status="failed",
+                phase="refine",
+                last_completed_step="initial_result",
+            )
+            worker_statuses = self._set_worker_status(
+                worker_id=worker_id,
+                status="failed",
+                stage="region-process",
+                task_id=region["region_id"],
+                detail=f"Failed {region['region_id']}: {error_summary}",
+            )
+            self._push_event(
+                "region-process",
+                f"Refinement failed for {region['region_id']}",
+                f"{region['description']} Error: {type(exc).__name__}: {error_summary}",
+                payload={
+                    "region_id": region["region_id"],
+                    "bbox": region["bbox"],
+                    "workflow_mode": self.workflow_mode,
+                    "phase": "refine",
+                    "error_type": type(exc).__name__,
+                    "error_message": error_message,
+                },
+                worker_statuses=worker_statuses,
+                status="failed",
+                level="error",
+                trace_stage="refine",
+            )
+            raise
+        else:
             self._set_current_trace_stage(previous_trace_stage)
             self._mark_region_worker_finished()
             worker_statuses = self._set_worker_status(
@@ -323,6 +395,7 @@ class RegionProcessNodeMixin:
                 worker_statuses=worker_statuses,
                 status="running",
             )
+            return result
 
     def _process_region_initial(
         self,
@@ -405,186 +478,3 @@ class RegionProcessNodeMixin:
             retry_exhausted=result["retry_exhausted"],
         )
         return result
-
-    def _recognize_region(
-        self,
-        *,
-        crop_path: Path,
-        region: dict,
-        checklist: dict,
-        region_task: dict,
-    ) -> tuple[RegionRecognitionResult, str]:
-        return self.workflow_agents.region.recognition_worker.run(
-            crop_path=crop_path,
-            region=region,
-            checklist=checklist,
-        )
-
-    def _generate_region_svg(
-        self,
-        *,
-        crop_path: Path,
-        region: dict,
-        checklist: dict,
-        region_task: dict,
-        recognition: RegionRecognitionResult,
-        current_svg_elements: str | None = None,
-        failed_items: list[dict] | None = None,
-    ) -> tuple[RegionSvgGenerationResult, str]:
-        return self.workflow_agents.region.svg_worker.run(
-            crop_path=crop_path,
-            region=region,
-            checklist=checklist,
-            recognition=recognition,
-            current_svg_elements=current_svg_elements,
-            current_svg_file_path=(
-                self.workflow_agents.region._write_svg_prompt_attachment(
-                    svg_text=current_svg_elements,
-                    svg_path=self.root_intermediate_dir / "_prompt_inputs" / region["region_id"] / "current_region.svg",
-                )
-                if current_svg_elements
-                else None
-            ),
-            failed_items=failed_items,
-        )
-
-    def _review_region_svg(
-        self,
-        *,
-        crop_path: Path,
-        region: dict,
-        checklist: dict,
-        recognition: RegionRecognitionResult,
-        proposed_svg_elements: str,
-    ) -> tuple[RegionReviewResult, str]:
-        bbox = region.get("bbox") or {}
-        review_dir = self.root_intermediate_dir / "_review_assets" / region["region_id"]
-        review_dir.mkdir(parents=True, exist_ok=True)
-        svg_file_name = f"region-{region['region_id']}-review.svg"
-        svg_path = review_dir / svg_file_name
-        png_path = review_dir / f"region-{region['region_id']}-review.png"
-        wrapped_svg = wrap_svg_fragment(
-            proposed_svg_elements,
-            view_box=(
-                int(bbox.get("x", 0)),
-                int(bbox.get("y", 0)),
-                max(int(bbox.get("width", 1)), 1),
-                max(int(bbox.get("height", 1)), 1),
-            ),
-        )
-        _, rendered_svg_path, render_result = write_svg_review_artifacts(
-            svg_text=wrapped_svg,
-            svg_path=svg_path,
-            png_path=png_path,
-        )
-        self._record_written_file(svg_path, kind="svg")
-        if rendered_svg_path is not None:
-            self._record_written_file(rendered_svg_path, kind="png")
-        else:
-            error_path = png_path.with_suffix(".render_error.txt")
-            error_path.write_text(
-                "\n".join(
-                    [
-                        f"scope: legacy-region:{region.get('region_id', '')}",
-                        f"svg_path: {svg_path}",
-                        f"png_path: {png_path}",
-                        f"renderer: {render_result.renderer or '-'}",
-                        f"error: {render_result.error or '-'}",
-                        "stderr:",
-                        render_result.stderr or "-",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            self._record_written_file(error_path, kind="txt")
-            raise SvgPreviewRenderError(
-                scope=f"legacy-region:{region.get('region_id', '')}",
-                svg_path=svg_path,
-                png_path=png_path,
-                error_path=error_path,
-                render_result=render_result,
-            )
-        return DebugRegionReviewWorkerAgent(self).run(
-            crop_path=crop_path,
-            region=region,
-            checklist=checklist,
-            recognition=recognition,
-            proposed_svg_elements=proposed_svg_elements,
-            rendered_svg_path=rendered_svg_path,
-            svg_file_path=svg_path,
-            svg_file_name=svg_file_name,
-        )
-
-    def _run_region_repair_loop(
-        self,
-        *,
-        crop_path: Path,
-        region: dict,
-        checklist: dict,
-        region_dir: Path,
-        region_task: dict,
-        recognition: RegionRecognitionResult,
-        review: RegionReviewResult,
-        review_history: list[dict],
-        repair_history: list[dict],
-        current_svg_elements: str,
-        region_retry_task: str,
-        repair_iteration: int,
-    ) -> tuple[str, dict[str, str], RegionReviewResult, RegionRepairResult | None, int]:
-        repair_payload = None
-        object_svg_index = {}
-        while review.global_repairs and self._begin_retry(region_retry_task):
-            repair_iteration += 1
-            region_svg_update, repair_raw = self._generate_region_svg(
-                crop_path=crop_path,
-                region=region,
-                checklist=checklist,
-                region_task=region_task,
-                recognition=recognition,
-                current_svg_elements=current_svg_elements,
-                failed_items=[item.model_dump(mode="json") for item in review.global_repairs],
-            )
-            current_svg_elements, object_svg_index, unscoped_visuals = finalize_region_svg(region_svg_update.svg_elements, region)
-            self._warn_unscoped_visuals(
-                region=region,
-                phase=f"region_repair_{repair_iteration}",
-                unscoped_visuals=unscoped_visuals,
-            )
-            repair_payload = RegionRepairResult(
-                region_id=region["region_id"],
-                repaired_svg_elements=current_svg_elements,
-                repairs_applied=region_svg_update.generation_notes,
-            )
-            repair_history.append(
-                {
-                    "iteration": repair_iteration,
-                    "retry": self._retry_state(region_retry_task),
-                    "repair": repair_payload.model_dump(mode="json"),
-                    "raw": repair_raw,
-                }
-            )
-            self._write_text_async(region_dir / f"region_svg_update_iter_{repair_iteration}_raw.txt", repair_raw)
-            self._write_json(
-                region_dir / f"region_svg_update_iter_{repair_iteration}.json",
-                region_svg_update.model_dump(mode="json"),
-            )
-            self._write_text(region_dir / f"region_svg_update_iter_{repair_iteration}.svgfrag", current_svg_elements)
-            review, review_raw = self._review_region_svg(
-                crop_path=crop_path,
-                region=region,
-                checklist=checklist,
-                recognition=recognition,
-                proposed_svg_elements=current_svg_elements,
-            )
-            review_history.append({"iteration": repair_iteration, "review": review.model_dump(mode="json"), "raw": review_raw})
-            self._write_text_async(region_dir / f"review_iter_{repair_iteration}_raw.txt", review_raw)
-        if not object_svg_index:
-            _final_svg, object_svg_index, unscoped_visuals = finalize_region_svg(current_svg_elements, region)
-            self._warn_unscoped_visuals(region=region, phase="finalize_cache_fill", unscoped_visuals=unscoped_visuals)
-        return current_svg_elements, object_svg_index, review, repair_payload, repair_iteration
-
-    @staticmethod
-    def _region_checklist(checklist: dict, region_id: str) -> list[str]:
-        from deepagents_template.checklist import select_checklist_for_region
-
-        return select_checklist_for_region(checklist, region_id, stage="generation_refine")

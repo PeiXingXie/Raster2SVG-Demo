@@ -25,6 +25,7 @@ $Root = Get-ProjectRoot
 $DesktopPackagePath = Join-Path $Root "desktop\package.json"
 $DesktopLockPath = Join-Path $Root "desktop\package-lock.json"
 $PyprojectPath = Join-Path $Root "pyproject.toml"
+$PackageVersionPath = Join-Path $Root "src\deepagents_template\version.py"
 
 function Write-Utf8NoBom {
     param(
@@ -95,6 +96,18 @@ if ($UpdatedPyproject -eq $PyprojectText -and $PyprojectText -notmatch "version 
     throw "Failed to update version in pyproject.toml."
 }
 Write-Utf8NoBom -Path $PyprojectPath -Text $UpdatedPyproject
+
+$PackageVersionText = Get-Content -Raw -LiteralPath $PackageVersionPath
+$UpdatedPackageVersion = [regex]::Replace(
+    $PackageVersionText,
+    '(?m)^__version__\s*=\s*"[^"]+"',
+    "__version__ = `"$Version`"",
+    1
+)
+if ($UpdatedPackageVersion -eq $PackageVersionText -and $PackageVersionText -notmatch "__version__ = `"$Version`"") {
+    throw "Failed to update version in src/deepagents_template/version.py."
+}
+Write-Utf8NoBom -Path $PackageVersionPath -Text $UpdatedPackageVersion
 
 & (Join-Path $PSScriptRoot "validate-version.ps1") -ProjectRoot $Root
 

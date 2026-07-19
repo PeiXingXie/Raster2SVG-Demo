@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 from deepagents_template.prompt import build_region_combined_policy_prompts
 from deepagents_template.prompt.supervisor import build_required_fidelity_checks
 from deepagents_template.schemas import RegionCombinedPolicyModelResult, RegionPolicyDecision, RegionSupervisorMemory
+from deepagents_template.taxonomy import SYMBOL_FIDELITY_CHECK_KEYS
+from deepagents_template.workflow_errors import BudgetExceededError, RunCancelledError
 
 from .failures import fail_policy_evaluation
 from .rules import (
@@ -22,14 +24,6 @@ if TYPE_CHECKING:
     from deepagents_template.workflow_orchestration.workers import RegionCombinedPolicyModelWorker
 
 
-FIDELITY_CHECK_KEYS = ("vf", "is", "op", "ls", "si")
-FIDELITY_AXIS_ISSUE_FAMILIES = {
-    "vf": {"shape_fidelity"},
-    "is": {"internal_structure"},
-    "op": {"internal_structure"},
-    "ls": {"style_appearance"},
-    "si": {"internal_structure", "content_accuracy"},
-}
 FIDELITY_GENERIC_REASONS = {
     "pass",
     "ok",
@@ -39,24 +33,6 @@ FIDELITY_GENERIC_REASONS = {
     "same category",
     "semantically faithful",
 }
-FIDELITY_FAILURE_TERMS = (
-    "mismatch",
-    "mismatches",
-    "differ",
-    "differs",
-    "different",
-    "does not match",
-    "not match",
-    "missing",
-    "wrong",
-    "fails",
-    "failed",
-    "uncertain",
-    "unclear",
-    "unlike",
-    "generic substitution",
-    "generic replacement",
-)
 
 class FidelityVerificationValidationError(ValueError):
     """Recoverable contract error for required fidelity verification output."""
@@ -112,9 +88,11 @@ class RegionPolicyEngine:
                 duplicates,
             )
 
-        issue_families_by_object: dict[str, set[str]] = {}
-        for issue in proposed.review.object_issues:
-            issue_families_by_object.setdefault(str(issue.object_id).strip(), set()).add(str(issue.issue_family))
+        material_issue_object_ids = {
+            str(issue.object_id).strip()
+            for issue in proposed.review.object_issues
+            if issue.severity in {"medium", "high"}
+        }
 
         for object_id in required_ids:
             verification = by_object[object_id][0]
@@ -126,14 +104,15 @@ class RegionPolicyEngine:
                     [object_id],
                 )
             checks = getattr(verification, "checks", None)
-            if not isinstance(checks, dict) or set(checks) != set(FIDELITY_CHECK_KEYS):
+            checks_payload = checks.model_dump(mode="json") if hasattr(checks, "model_dump") else checks
+            if not isinstance(checks_payload, dict) or set(checks_payload) != set(SYMBOL_FIDELITY_CHECK_KEYS):
                 raise FidelityVerificationValidationError(
                     f"RegionCombinedPolicyModelResult has invalid fidelity check keys for: {object_id}",
                     [object_id],
                 )
             invalid_values = [
                 key
-                for key, value in checks.items()
+                for key, value in checks_payload.items()
                 if str(value).strip().upper() not in {"Y", "N"}
             ]
             if invalid_values:
@@ -143,54 +122,15 @@ class RegionPolicyEngine:
                 )
             failed_axes = [
                 key
-                for key in FIDELITY_CHECK_KEYS
-                if str(checks.get(key)).strip().upper() == "N"
+                for key in SYMBOL_FIDELITY_CHECK_KEYS
+                if str(checks_payload.get(key)).strip().upper() == "N"
             ]
-            if failed_axes:
-                issue_families = issue_families_by_object.get(object_id, set())
-                allowed_families = set().union(
-                    *(FIDELITY_AXIS_ISSUE_FAMILIES[axis] for axis in failed_axes)
-                )
-                if not issue_families:
-                    raise FidelityVerificationValidationError(
-                        "RegionCombinedPolicyModelResult has failed fidelity checks without object_issues for: "
-                        + object_id,
-                        [object_id],
-                    )
-                if not issue_families.intersection(allowed_families):
-                    raise FidelityVerificationValidationError(
-                        "RegionCombinedPolicyModelResult has failed fidelity checks with incompatible object issue family for: "
-                        + object_id,
-                        [object_id],
-                    )
-            elif any(term in normalized for term in FIDELITY_FAILURE_TERMS):
+            if failed_axes and object_id not in material_issue_object_ids:
                 raise FidelityVerificationValidationError(
-                    "RegionCombinedPolicyModelResult has all-Y fidelity checks but failing reason for: "
+                    "RegionCombinedPolicyModelResult has failed fidelity checks without object_issues of material severity for: "
                     + object_id,
                     [object_id],
                 )
-
-        issue_object_ids = {str(issue.object_id).strip() for issue in proposed.review.object_issues}
-        inconsistent = []
-        for object_id in required_ids:
-            verification = by_object[object_id][0]
-            reason = str(getattr(verification, "reason", "") or "")
-            failed_axes = [
-                key
-                for key in FIDELITY_CHECK_KEYS
-                if str((getattr(verification, "checks", None) or {}).get(key)).strip().upper() == "N"
-            ]
-            if not any(term in reason.lower() for term in FIDELITY_FAILURE_TERMS):
-                continue
-            if object_id in issue_object_ids:
-                continue
-            inconsistent.append(object_id)
-        if inconsistent:
-            raise FidelityVerificationValidationError(
-                "RegionCombinedPolicyModelResult has failing fidelity_verifications without object_issues for: "
-                + ", ".join(inconsistent),
-                inconsistent,
-            )
 
     @staticmethod
     def _merge_fidelity_retry_result(
@@ -233,6 +173,23 @@ class RegionPolicyEngine:
             }
         )
         return original.model_copy(update={"review": merged_review})
+
+    @staticmethod
+    def _drop_fidelity_verifications(
+        proposed: RegionCombinedPolicyModelResult,
+        object_ids: list[str],
+    ) -> RegionCombinedPolicyModelResult:
+        """Remove invalid diagnostic verifications while preserving the ordinary review."""
+
+        target_ids = {str(object_id).strip() for object_id in object_ids if str(object_id).strip()}
+        filtered = [
+            item
+            for item in proposed.review.fidelity_verifications
+            if str(item.object_id).strip() not in target_ids
+        ]
+        return proposed.model_copy(
+            update={"review": proposed.review.model_copy(update={"fidelity_verifications": filtered})}
+        )
 
     @staticmethod
     def _filter_payload_by_object_ids(payload: Any, object_ids: set[str]) -> Any:
@@ -328,6 +285,7 @@ class RegionPolicyEngine:
         region_retry_exhausted: bool,
         iteration: str,
         region_retry_task: str | None = None,
+        fidelity_retry_task: str | None = None,
         rendered_svg_path: Path | None = None,
         svg_file_path: Path | None = None,
     ) -> RegionPolicyDecision:
@@ -371,6 +329,9 @@ class RegionPolicyEngine:
             task_name_builder = getattr(self.pipeline, "_region_retry_task_name", None)
             if callable(task_name_builder):
                 region_retry_task = task_name_builder(str(region.get("region_id") or ""))
+        if fidelity_retry_task is None:
+            fidelity_retry_task = region_retry_task
+        fidelity_shares_region_budget = fidelity_retry_task == region_retry_task
         try:
             proposed, raw_response = self._run_combined_policy(
                 crop_path=crop_path,
@@ -386,83 +347,114 @@ class RegionPolicyEngine:
                 self._validate_fidelity_verifications(proposed, required_fidelity_checks)
             except FidelityVerificationValidationError as fidelity_exc:
                 begin_retry = getattr(self.pipeline, "_begin_retry", None)
-                if not region_retry_task or not callable(begin_retry) or not begin_retry(region_retry_task):
+                if not fidelity_retry_task or not callable(begin_retry) or not begin_retry(fidelity_retry_task):
                     request_context["fidelity_verification_retry"] = {
                         "trigger_error": str(fidelity_exc),
                         "target_object_ids": fidelity_exc.object_ids,
                         "used": False,
                         "skip_reason": "region retry exhausted",
-                        "retry_task": region_retry_task,
+                        "retry_task": fidelity_retry_task,
                     }
                     retry_state = getattr(self.pipeline, "_retry_state", None)
-                    if region_retry_task and callable(retry_state):
-                        request_context["fidelity_verification_retry"]["retry_state"] = retry_state(region_retry_task)
-                    raise fidelity_exc
-                retry_review_context = self._narrow_review_context_for_fidelity_retry(
-                    review_context,
-                    fidelity_exc.object_ids,
-                )
-                retry_prompt_review_context = {
-                    key: value for key, value in retry_review_context.items() if key != "svg_file_name"
-                }
-                retry_required_checks = build_required_fidelity_checks(
-                    retry_prompt_review_context.get("object_index") or {}
-                )
-                if not retry_required_checks:
-                    raise fidelity_exc
-                retry_prompt_request = {
-                    **prompt_request,
-                    "review_context": retry_prompt_review_context,
-                }
-                request_context["fidelity_verification_retry"] = {
-                    "trigger_error": str(fidelity_exc),
-                    "target_object_ids": fidelity_exc.object_ids,
-                    "required_fidelity_checks": retry_required_checks,
-                    "retry_task": region_retry_task,
-                }
-                retry_state = getattr(self.pipeline, "_retry_state", None)
-                if callable(retry_state):
-                    retry_state_payload = retry_state(region_retry_task)
-                    request_context["fidelity_verification_retry"]["retry_state"] = retry_state_payload
-                    effective_region_retry_exhausted = bool(retry_state_payload.get("exhausted"))
+                    if fidelity_retry_task and callable(retry_state):
+                        request_context["fidelity_verification_retry"]["retry_state"] = retry_state(fidelity_retry_task)
+                    proposed = self._drop_fidelity_verifications(proposed, fidelity_exc.object_ids)
+                    request_context["fidelity_verification_retry"]["degraded"] = True
                 else:
-                    retry_exhausted = getattr(self.pipeline, "_retry_exhausted", None)
-                    if callable(retry_exhausted):
-                        effective_region_retry_exhausted = bool(retry_exhausted(region_retry_task))
-                retry_context_for_retry = {
-                    **retry_context_summary,
-                    "region_retry_available": not effective_region_retry_exhausted,
-                    "fidelity_verification_retry_consumed_region_retry": True,
-                }
-                if callable(retry_state):
-                    retry_context_for_retry["region_retry_state"] = retry_state(region_retry_task)
-                retry_prompt_request = {
-                    **retry_prompt_request,
-                    "retry_context_summary": retry_context_for_retry,
-                }
-                retry_system_prompt, retry_user_prompt = build_region_combined_policy_prompts(**retry_prompt_request)
-                llm_request["fidelity_verification_retry"] = {
-                    "system_prompt": retry_system_prompt,
-                    "user_prompt": retry_user_prompt,
-                }
-                retry_proposed, retry_raw_response = self._run_combined_policy(
-                    crop_path=crop_path,
-                    region=region,
-                    review_context=retry_review_context,
-                    memory_summary=memory_summary,
-                    retry_context_summary=retry_context_for_retry,
-                    strategy_enabled=strategy_enabled,
-                    rendered_svg_path=rendered_svg_path,
-                    svg_file_path=svg_file_path,
-                )
-                self._validate_fidelity_verifications(retry_proposed, retry_required_checks)
-                proposed = self._merge_fidelity_retry_result(
-                    proposed,
-                    retry_proposed,
-                    fidelity_exc.object_ids,
-                )
-                self._validate_fidelity_verifications(proposed, required_fidelity_checks)
-                request_context["fidelity_verification_retry"]["used"] = True
+                    retry_review_context = self._narrow_review_context_for_fidelity_retry(
+                        review_context,
+                        fidelity_exc.object_ids,
+                    )
+                    retry_prompt_review_context = {
+                        key: value for key, value in retry_review_context.items() if key != "svg_file_name"
+                    }
+                    retry_required_checks = build_required_fidelity_checks(
+                        retry_prompt_review_context.get("object_index") or {}
+                    )
+                    request_context["fidelity_verification_retry"] = {
+                        "trigger_error": str(fidelity_exc),
+                        "target_object_ids": fidelity_exc.object_ids,
+                        "required_fidelity_checks": retry_required_checks,
+                        "retry_task": fidelity_retry_task,
+                    }
+                    try:
+                        if not retry_required_checks:
+                            raise fidelity_exc
+                        retry_state = getattr(self.pipeline, "_retry_state", None)
+                        if callable(retry_state):
+                            retry_state_payload = retry_state(fidelity_retry_task)
+                            request_context["fidelity_verification_retry"]["retry_state"] = retry_state_payload
+                            if fidelity_shares_region_budget:
+                                effective_region_retry_exhausted = bool(retry_state_payload.get("exhausted"))
+                        else:
+                            retry_exhausted = getattr(self.pipeline, "_retry_exhausted", None)
+                            if callable(retry_exhausted):
+                                effective_region_retry_exhausted = bool(retry_exhausted(region_retry_task))
+                        retry_context_for_retry = {
+                            **retry_context_summary,
+                            "region_retry_available": not effective_region_retry_exhausted,
+                            "fidelity_verification_retry_consumed_region_retry": True,
+                        }
+                        if callable(retry_state):
+                            if region_retry_task:
+                                retry_context_for_retry["region_retry_state"] = retry_state(region_retry_task)
+                            retry_context_for_retry["fidelity_retry_state"] = retry_state(fidelity_retry_task)
+                        retry_prompt_request = {
+                            **prompt_request,
+                            "review_context": retry_prompt_review_context,
+                            "retry_context_summary": retry_context_for_retry,
+                        }
+                        retry_system_prompt, retry_user_prompt = build_region_combined_policy_prompts(**retry_prompt_request)
+                        llm_request["fidelity_verification_retry"] = {
+                            "system_prompt": retry_system_prompt,
+                            "user_prompt": retry_user_prompt,
+                        }
+                        retry_proposed, retry_raw_response = self._run_combined_policy(
+                            crop_path=crop_path,
+                            region=region,
+                            review_context=retry_review_context,
+                            memory_summary=memory_summary,
+                            retry_context_summary=retry_context_for_retry,
+                            strategy_enabled=strategy_enabled,
+                            rendered_svg_path=rendered_svg_path,
+                            svg_file_path=svg_file_path,
+                        )
+                        self._validate_fidelity_verifications(retry_proposed, retry_required_checks)
+                        proposed = self._merge_fidelity_retry_result(
+                            proposed,
+                            retry_proposed,
+                            fidelity_exc.object_ids,
+                        )
+                        self._validate_fidelity_verifications(proposed, required_fidelity_checks)
+                        request_context["fidelity_verification_retry"]["used"] = True
+                    except (BudgetExceededError, RunCancelledError):
+                        raise
+                    except Exception as retry_exc:
+                        proposed = self._drop_fidelity_verifications(proposed, fidelity_exc.object_ids)
+                        request_context["fidelity_verification_retry"].update(
+                            {
+                                "used": True,
+                                "degraded": True,
+                                "retry_error": f"{type(retry_exc).__name__}: {retry_exc}",
+                            }
+                        )
+                if request_context["fidelity_verification_retry"].get("degraded"):
+                    push_event = getattr(self.pipeline, "_push_event", None)
+                    if callable(push_event):
+                        push_event(
+                            "region-process",
+                            f"Fidelity verification degraded for {region.get('region_id')}",
+                            "Structured fidelity verification remained unavailable; continuing with the ordinary visual review.",
+                            payload={
+                                "region_id": region.get("region_id"),
+                                "object_ids": fidelity_exc.object_ids,
+                                "fidelity_verification_retry": request_context["fidelity_verification_retry"],
+                            },
+                            status="running",
+                            level="warning",
+                        )
+        except (BudgetExceededError, RunCancelledError):
+            raise
         except Exception as exc:
             fail_policy_evaluation(
                 self.pipeline,

@@ -27,6 +27,7 @@ from deepagents_template.schemas import (
     RegionReviewResult,
     RegionSupervisorMemory,
     StopDecision,
+    SupervisorIssueMemory,
 )
 
 
