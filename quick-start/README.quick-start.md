@@ -112,13 +112,17 @@ dist/deploy-packages/
 By default the package includes:
 
 - `src/`
-- selected `desktop/` source files and configuration
+- selected `desktop/` source files, configuration, and runtime icons
 - `quick-start/`
+- `architecture-summary/`
+- `packaging/README.packaging.md`
 - `pyproject.toml`
 - `README.md`
 - `README.developer.md`
+- `RELEASE_NOTES.md`
 - `docs.development.md`
 - `docs.installer.md` compatibility note
+- `docs.settings-mapping.md`
 - `.env.example`
 - `environment.yml`
 - `start-dev.ps1`
@@ -126,6 +130,7 @@ By default the package includes:
 - `start-dev.sh`
 - `start-service.ps1`
 - `start-service.bat`
+- `stop-dev.ps1`
 
 By default it does not include:
 
@@ -133,6 +138,8 @@ By default it does not include:
 - `artifacts/`
 - `.frontend_runtime_overrides.json`
 - `desktop/node_modules/`
+- desktop icon candidate/source artwork under `desktop/assets/icon-candidates/`
+- generated Python caches such as `__pycache__/`, `*.pyc`, and `*.pyo`
 - local Python virtual environments such as `.venv`, `.venv_test`, and `.venv_package`
 
 The source bundle intentionally excludes generated dependencies. If the target machine needs the Electron desktop shell, run `npm install` under `desktop/` on that machine to recreate `desktop/node_modules/`.

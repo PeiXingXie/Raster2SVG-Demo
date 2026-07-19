@@ -1,25 +1,33 @@
-# 状态、Artifact、恢复与配置
+# State, Artifacts, Resume, and Configuration
 
-## 1. Run 状态机
+## 1. Run State Machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> queued
-    queued --> running: 后台 Worker 开始
-    running --> completed: 最终报告与产物写入完成
-    running --> paused: 模型调用预算耗尽
-    running --> failed: 未处理异常或阶段失败
-    paused --> running: 追加/结转预算并恢复
-    failed --> running: 修复外部原因后从 checkpoint 恢复
+    queued --> running: background worker starts
+    queued --> cancelled: cancelled before execution
+    running --> completed: final report and artifacts written
+    running --> paused: model-call budget exhausted
+    running --> failed: unhandled exception or stage failure
+    running --> cancelled: user cancellation
+    paused --> running: add/carry budget and resume
+    failed --> running: resume from checkpoint after external cause is fixed
     completed --> [*]
+    cancelled --> [*]
 
     note right of paused
       pause_reason = budget_exhausted
-      保留 checkpoints、regions、retry 和 artifacts
+      checkpoints, regions, retry, and artifacts are retained
+    end note
+
+    note right of cancelled
+      pause_reason = cancelled_by_user
+      queued Run may not have entered the Pipeline
     end note
 ```
 
-## 2. Checkpoint 与恢复路线
+## 2. Checkpoints and Resume Route
 
 ```mermaid
 flowchart LR
@@ -31,7 +39,7 @@ flowchart LR
     C6 --> C7["final_svg_completed"]
     C7 --> C8["report_completed"]
 
-    R["Resume Plan"] -->|"查找最后可靠 checkpoint"| C1
+    R["Resume Plan"] -->|"find latest reliable checkpoint"| C1
     R --> C2
     R --> C3
     R --> C4
@@ -40,140 +48,149 @@ flowchart LR
     R --> C7
 ```
 
-恢复时的基本规则：
+Basic resume rules:
 
-- checkpoint 为真且对应文件存在：复用文件；
-- checkpoint 为真但关键文件缺失：应视为状态不一致并进入失败诊断；
-- Region 初始或最终结果可逐个复用，未完成 Region 继续处理；
-- 恢复不是复制一份旧结果，而是继续同一 Artifact 目录中的状态机；
-- `budget_mode` 决定剩余预算结转还是额外补充。
+- if a checkpoint is true and the corresponding files exist, reuse those files;
+- if a checkpoint is true but key files are missing, treat it as inconsistent state and enter failure diagnostics;
+- initial or final Region results can be reused per Region, while incomplete Regions continue processing;
+- resume does not copy an old result into a new run; it continues the state machine in the same Artifact directory;
+- `budget_mode` decides whether remaining budget is carried forward or extra budget is added.
 
-## 3. Run State 内容
+## 3. Run State Content
 
-| 字段组 | 说明 |
+| Field group | Description |
 | --- | --- |
-| 标识 | `run_id`、`thread_id`、`project_name` |
-| 总状态 | `status`、`pause_reason`、`current_stage`、`resume_token` |
-| 请求快照 | 原始 `AgentRequest`，用于恢复时重建 Pipeline |
-| Budget | limit、used、remaining、carry_forward/top_up |
-| Retry | max_retry、各 task counts、exhausted tasks |
-| Checkpoints | 各阶段是否完成 |
-| Regions | 每个 Region 的状态、阶段、最后完成步骤、目录 |
-| Failure | 类型、阶段、root cause、结构化 diagnostic |
-| Timestamps | started、updated、paused、finished |
+| Identity | `run_id`, `thread_id`, `project_name` |
+| Overall state | `status`, `pause_reason`, `current_stage`, `resume_token`; `status` includes `queued`, `running`, `paused`, `completed`, `failed`, `cancelled` |
+| Request snapshot | Frozen `AgentRequest` captured at queue time and used to rebuild the Pipeline during resume |
+| Budget | limit, used, remaining, carry_forward/top_up |
+| Retry | max_retry, per-task counts, exhausted tasks |
+| Checkpoints | Whether each stage has completed |
+| Regions | Per-Region state, stage, last completed step, and directory |
+| Failure | Type, stage, root cause, structured diagnostic |
+| Timestamps | started, updated, paused, finished |
 
-## 4. Artifact 目录逻辑结构
+## 4. Artifact Directory Logical Structure
 
-实际文件会随运行阶段和功能开关变化，建议按以下逻辑理解：
+Actual files vary by stage and feature flags, but the directory should be understood as:
 
 ```text
 <run-dir>/
-├─ input/
-│  ├─ request.json
-│  ├─ input_metadata.json
-│  └─ <copied-source-image>
-├─ intermediate/
-│  ├─ layout_detection.json
-│  ├─ layout_detection_raw.txt
-│  ├─ requirement_summary.json
-│  ├─ checklist.json
-│  ├─ regions.json
-│  ├─ template.svg
-│  ├─ initial.svg
-│  ├─ initial_review.json
-│  ├─ region_results.json
-│  └─ regions/
-│     └─ <region-id>/
-│        ├─ crop.png
-│        ├─ region_plan.json
-│        ├─ initial_result.json
-│        ├─ final_result.json
-│        ├─ region generation/review intermediate files
-│        ├─ final_region_elements.svgfrag
-│        └─ objects/<object-id>/...
-├─ output/
-│  ├─ final.svg
-│  ├─ final_review.json
-│  ├─ final_review_raw.txt
-│  ├─ report.json
-│  ├─ report.md
-│  ├─ review_assets/...
-│  └─ manual_adjustments/
-│     └─ <adjustment-version>/...
-├─ run_state.json
-└─ runtime/model/event/metadata logs
+|- input/
+|  |- request.json
+|  |- input_metadata.json
+|  `- <copied-source-image>
+|- intermediate/
+|  |- layout_detection.json
+|  |- layout_detection_raw.txt
+|  |- requirement_summary.json
+|  |- checklist.json
+|  |- regions.json
+|  |- template.svg
+|  |- initial.svg
+|  |- initial_review.json
+|  |- region_results.json
+|  `- regions/
+|     `- <region-id>/
+|        |- crop.png
+|        |- region_plan.json
+|        |- initial_result.json
+|        |- final_result.json
+|        |- region generation/review intermediate files
+|        |- final_region_elements.svgfrag
+|        `- objects/<object-id>/...
+|- output/
+|  |- final.svg
+|  |- final_review.json
+|  |- final_review_raw.txt
+|  |- report.json
+|  |- report.md
+|  |- review_assets/...
+|  `- manual_adjustments/
+|     `- <adjustment-version>/...
+|- run_state.json
+`- runtime/model/event/metadata logs
 ```
 
-## 5. Artifact 的三种角色
+## 5. Four Roles of Artifacts
 
 ```mermaid
 flowchart TB
-    Artifact["Artifact Directory"] --> Recovery["恢复依据<br/>checkpoint + cached results"]
-    Artifact --> Debug["调试证据<br/>raw response + review + render error"]
-    Artifact --> Product["用户结果<br/>SVG + PNG preview + report + manual versions"]
+    Artifact["Artifact Directory"] --> Recovery["Resume evidence<br/>checkpoint + cached results"]
+    Artifact --> Debug["Debug evidence<br/>raw responses + reviews + render errors"]
+    Artifact --> Product["User result<br/>SVG + PNG preview + report + manual versions"]
+    Artifact --> History["History index<br/>metadata + existing previews"]
 ```
 
-因此 Artifact 格式变更不是单纯的内部重构，可能同时影响：
+Artifact format changes are therefore not merely internal refactors. They may affect:
 
-- 前端 ArtifactSnapshot；
-- Resume Plan；
-- 历史项目兼容；
-- 人工调整；
-- Debug Review；
-- 用户下载与项目重命名。
+- frontend `ArtifactSnapshot`;
+- Resume Plan;
+- historical project compatibility;
+- manual adjustment;
+- user downloads and project renaming.
 
-## 6. Workflow Trace
+## 6. Artifact Concurrency Protection
 
-Workflow Trace 是从运行事件和 Artifact 中构造的前端执行树。Node 记录：
+Mutable operations on the same Artifact Directory must first acquire an Artifact lease. The current implementation uses a process-local registry plus adjacent `.shape-studio-locks/*.lock` files. It covers conversion, resume, manual adjustment, rename, and delete operations. If acquisition fails, the API returns a conflict rather than allowing two operations to write to or delete the same Run directory.
 
-- 父子关系；
-- stage/region/object/loop/terminal 类型；
-- pending、running、success、retrying、blocked、failed 等状态；
-- 串行或并行模式；
-- Region/Object 目标；
-- iteration、route、开始结束时间和耗时；
-- 预算、循环次数和失败摘要。
+The Active Run set quickly blocks deletion of running projects. Artifact leases are the more general directory-level write protection. Both constraints should be preserved when maintaining Artifact read/write logic.
 
-Trace 是可观测性视图，不应被当作唯一恢复状态；恢复以 `run_state.json` 和实际文件为准。
+## 7. Workflow Trace
 
-## 7. 配置来源与覆盖关系
+Workflow Trace is the frontend execution tree built from runtime events and Artifacts. Nodes record:
+
+- parent/child relationships;
+- stage/region/object/loop/terminal kind;
+- pending, running, success, retrying, blocked, failed, and related statuses;
+- serial or parallel execution mode;
+- Region/Object targets;
+- iteration, route, start/end time, and duration;
+- budget, loop counts, and failure summaries.
+
+Trace is an observability view. It should not be treated as the only resume state; resume is based on `run_state.json` and actual files.
+
+## 8. Configuration Sources and Override Order
 
 ```mermaid
 flowchart TD
-    Defaults["Settings 代码默认值"] --> Env[".env / 环境变量"]
-    Env --> Runtime["持久化 Runtime Overrides"]
-    Runtime --> Request["本次 AgentRequest 显式参数"]
-    Request --> Effective["resolved_* 有效配置"]
+    Defaults["Settings code defaults"] --> Env[".env / environment variables"]
+    Env --> Runtime["Persisted Runtime Overrides"]
+    Runtime --> Request["Explicit values in this AgentRequest"]
+    Request --> Frozen["AgentRequest frozen at queue time"]
+    Frozen --> Effective["Pipeline resolved_* effective configuration"]
 
-    Note["仅显式非空值覆盖下层；不同字段以 config.py 的 resolved_* 为最终准则"] -.-> Effective
+    Note["Only explicit non-empty values override lower layers; each field follows config.py resolved_* rules"] -.-> Effective
 ```
 
-概念上的优先级是：
+Conceptually, priority is:
 
 ```text
-本次请求显式值 > Runtime Overrides > 环境变量/.env > 代码默认值
+explicit values in this request > Runtime Overrides > environment/.env > code defaults
 ```
 
-维护时必须以每个 `resolved_*` 实现为准，因为部分字段还包含兼容逻辑或联动规则，例如并发数可能依赖 processing mode。
+Maintenance must follow each `resolved_*` implementation because some fields include compatibility or coupling rules. For example, concurrency can depend on processing mode.
 
-## 8. 关键配置分组
+Before a Run is accepted into the queue, the API freezes provider, base URL, API format, concurrency, retry/budget, and other runtime settings into the request. Later Runtime Override changes do not affect already queued Runs. Resume also uses the request snapshot in the old Run directory as the reconstruction basis.
 
-| 分组 | 主要配置 |
+## 9. Key Configuration Groups
+
+| Group | Main settings |
 | --- | --- |
-| 模型连接 | API Key、Base URL、API Provider、API Format |
-| 模型选择 | Agent/Coordinator Model、Subagent/Worker Model |
-| 调用行为 | max retries、previous response id、request timeout |
-| 工作流 | workflow mode、region processing mode |
-| 并发 | region concurrency、bbox issue concurrency |
-| 质量循环 | max retry、fusion max retry、stagnation rounds |
-| 成本控制 | max budget、resume budget mode |
-| 记忆 | supervisor memory enabled/persist enabled |
-| 文件与服务 | artifact root、config dir、host、port |
-| 待移除遗留项 | SAM enabled/provider/remote URL/fallback 配置 |
+| Model connection | API Key, Base URL, API Provider, API Format |
+| Model selection | Agent/Coordinator Model, Subagent/Worker Model |
+| Call behavior | max retries, previous response id, request timeout |
+| Workflow | workflow mode, region processing mode |
+| Concurrency | region concurrency, bbox issue concurrency |
+| Quality loops | max retry, fusion max retry, stagnation rounds |
+| Cost control | max budget, resume budget mode |
+| Memory | supervisor memory enabled/persist enabled |
+| Files and service | artifact root, config dir, host, port |
+| Pending-removal legacy items | SAM enabled/provider/remote URL/fallback settings |
 
-## 9. 敏感信息
+## 10. Sensitive Information
 
-- Runtime Override API 不应向前端回传 API Key 明文，只返回是否已配置。
-- 安装版配置写入用户数据目录，而不是安装目录或项目源码目录。
-- Debug 输出和请求日志应避免把完整密钥写入 Artifact。
-- 分享 Run 目录前应检查 request/config/model call 日志中是否包含服务地址或其他敏感上下文。
+- Runtime Override APIs must not return plaintext API Keys to the frontend; they should only report whether a key is configured.
+- Installed builds write configuration to the user data directory, not the installation directory or source tree.
+- Debug output and request logs should avoid writing full secrets into Artifacts.
+- Before sharing a Run directory, inspect request/config/model-call logs for service URLs or other sensitive context.

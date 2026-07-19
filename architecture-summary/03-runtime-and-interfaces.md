@@ -1,39 +1,39 @@
-# 运行时、接口与交互时序
+# Runtime, Interfaces, and Interaction Sequences
 
-## 1. 桌面安装版启动时序
+## 1. Installed Desktop Startup Sequence
 
 ```mermaid
 sequenceDiagram
-    actor User as 用户
+    actor User as User
     participant E as Electron Main
-    participant FS as 用户数据目录
+    participant FS as User data directory
     participant B as Bundled Backend
     participant API as FastAPI
     participant UI as desktop.html
 
-    User->>E: 启动 Shape Studio
-    E->>E: 判断 packaged mode
-    E->>E: 在 127.0.0.1 查找空闲端口
-    E->>FS: 创建 artifacts/runs 与 logs
+    User->>E: Launch Shape Studio
+    E->>E: Detect packaged mode
+    E->>E: Find a free port on 127.0.0.1
+    E->>FS: Create artifacts/runs and logs
     E->>B: spawn raster-svg-api(.exe)
-    B->>API: 使用 APP_HOST/APP_PORT 启动
-    E->>API: 轮询 GET /health
-    alt 后端健康
+    B->>API: Start with APP_HOST/APP_PORT
+    E->>API: Poll GET /health
+    alt backend healthy
         API-->>E: 200 {status: ok}
-        E->>UI: 打开 /static/desktop.html
-    else 超时或后端缺失
-        E->>User: 显示启动失败及 backend.log 路径
-        E->>E: 退出应用
+        E->>UI: Open /static/desktop.html
+    else timeout or missing backend
+        E->>User: Show startup failure and backend.log path
+        E->>E: Exit application
     end
-    User->>E: 关闭应用
-    E->>B: 终止后端进程树
+    User->>E: Close application
+    E->>B: Terminate backend process tree
 ```
 
-## 2. 一次转换请求的端到端时序
+## 2. End-to-End Conversion Request Sequence
 
 ```mermaid
 sequenceDiagram
-    actor User as 用户
+    actor User as User
     participant UI as Desktop UI
     participant API as FastAPI
     participant TS as ThreadStore
@@ -46,59 +46,66 @@ sequenceDiagram
     API->>TS: create_thread()
     TS-->>UI: thread_id
 
-    User->>UI: 选择图片并开始
+    User->>UI: Select image and start
     UI->>API: POST /uploads(base64)
-    API->>AF: 保存到 _uploads
+    API->>AF: Save to _uploads
     AF-->>UI: image_path
 
     UI->>API: POST /invoke(request + thread_id)
-    API->>TS: 创建 queued/running Run
-    API->>AF: 写 metadata
-    API->>EX: submit background conversion
+    API->>API: Freeze effective runtime settings for this request
+    API->>TS: Create queued Run
+    API->>AF: Write metadata
+    API->>AF: Acquire Artifact lease
+    API->>EX: Submit background conversion to BoundedExecutor
     API-->>UI: run_id + started
 
     EX->>PL: RasterToSvgPipeline.run()
-    loop 每个模型工作单元
-        PL->>M: 图片/SVG/结构化 Prompt
-        M-->>PL: 结构化结果 + raw text
-        PL->>AF: 写中间结果、trace、model logs
+    loop each model work unit
+        PL->>M: image/SVG/structured Prompt
+        M-->>PL: structured result + raw text
+        PL->>AF: Write intermediates, trace, model logs
         PL->>TS: push_event / update_run
     end
 
-    par UI 状态轮询
+    par UI status polling
         UI->>API: GET /threads/{id}/snapshot
-        API->>TS: 读取消息、事件和 Run
+        API->>TS: Read messages, events, and Run
         TS-->>UI: AgentResponse
-    and UI Artifact 轮询
+    and UI Artifact polling
         UI->>API: GET /threads/{id}/artifacts
-        API->>AF: 汇总预览、文件和 Workflow Trace
+        API->>AF: Summarize previews, files, and Workflow Trace
         AF-->>UI: ArtifactSnapshot
     end
 
     PL-->>EX: report markdown
     EX->>TS: finish_run(completed)
-    EX->>AF: 写 output 与 metadata
-    UI->>API: 最后一次 snapshot/artifacts
-    API-->>UI: final.svg、preview、report、files
+    EX->>AF: Write output and metadata
+    EX->>AF: Release Artifact lease
+    UI->>API: Final snapshot/artifacts poll
+    API-->>UI: final.svg, preview, report, files
 ```
 
-## 3. 后台执行模型
+If the user cancels a queued/running Run, the API sets that Run's cancellation event. A queued future can be cancelled before execution starts. A Run already inside the Pipeline stops cooperatively at stage boundaries and around model calls, then writes `cancelled` status.
 
-HTTP `/invoke` 不等待完整转换：
+## 3. Background Execution Model
 
-1. API 验证 Thread 和请求；
-2. 创建 Run 和 Artifact 目录；
-3. 将 `_run_agent_in_background` 提交到线程池；
-4. 立即向前端返回 Run Start Response；
-5. 前端通过轮询读取运行进度。
+HTTP `/invoke` does not wait for full conversion:
 
-当前 API 全局线程池为有限 Worker 数，防止单个服务进程无限创建顶层 Run 线程。每个 Pipeline 内部还可能为 Region/Object 创建局部线程池，因此容量规划需要同时考虑：
+1. the API validates the Thread and request;
+2. it creates the Run and Artifact directory;
+3. it submits `_run_agent_in_background` to `BoundedExecutor`;
+4. it immediately returns a Run Start Response to the frontend;
+5. the frontend polls for progress.
+
+The conversion executor has a fixed top-level worker count and uses `SHAPE_STUDIO_MAX_QUEUED_RUNS` to cap the wait queue. If the queue is full, the API returns 429. Manual adjustment has its own executor and queue, so long conversions do not block post-processing. Each Pipeline may also create local Region/Object thread pools, so capacity planning must consider:
 
 ```text
-并发 Run 数 × 每个 Run 的 Region 并发 × 模型端限流
+concurrent Runs x Region concurrency per Run x borrowed object-repair slots x model-side rate limits
 ```
 
-## 4. Thread、Run 与 Artifact 的关系
+There is also a service boundary: FastAPI only accepts loopback clients. Installed and development builds should be deployed as "local UI calling local backend", not as an exposed LAN service.
+
+## 4. Thread, Run, and Artifact Relationship
 
 ```mermaid
 erDiagram
@@ -131,60 +138,68 @@ erDiagram
     }
 ```
 
-- Thread 是前端会话容器，可以保留多次 Run 历史。
-- Run 是一次具体转换或恢复执行。
-- Artifact Directory 是 Run 的持久化事实来源。
-- ThreadStore 主要是进程内运行视图；服务重启后的恢复依赖磁盘 Artifact 和 Run State。
+- Thread is the frontend session container and can hold multiple Runs in history.
+- Run is one concrete conversion or resume execution.
+- Artifact Directory is the persisted source of truth for a Run.
+- ThreadStore is mainly a process-local runtime view; after service restart, resume depends on disk Artifacts and Run State.
+- The global History page does not depend on the in-memory ThreadStore. It scans persisted Run metadata and can attach a historical Run back to its owning Thread.
+- Artifact lease is a process-local registry plus file lock that protects the same Artifact Directory from concurrent conversion, resume, manual adjustment, rename, or delete.
 
-## 5. 主要接口契约
+## 5. Main API Contracts
 
-### 5.1 配置与宿主
+### 5.1 Configuration and Host
 
-| Method | Path | 作用 |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/config/defaults` | 返回前端默认配置。 |
-| GET | `/config/runtime-overrides` | 读取持久化覆盖配置，不回传 API Key 明文。 |
-| POST | `/config/runtime-overrides` | 合并并保存覆盖配置。 |
-| DELETE | `/config/runtime-overrides` | 清空覆盖配置。 |
-| GET | `/frontend/host-info` | 返回 desktop/web host mode 和 URL。 |
+| GET | `/config/defaults` | Return frontend defaults. |
+| GET | `/config/runtime-overrides` | Read persisted overrides without returning plaintext API Key. |
+| POST | `/config/runtime-overrides` | Merge and save override configuration. |
+| DELETE | `/config/runtime-overrides` | Clear override configuration. |
+| GET | `/frontend/host-info` | Return desktop/web host mode and URL. |
+| POST | `/dev/shutdown` | Local development shutdown endpoint; requires the development token and is not a product API. |
 
-### 5.2 执行与监控
+### 5.2 Execution and Monitoring
 
-| Method | Path | 作用 |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/uploads` | 保存输入图片。 |
-| POST | `/threads` | 创建 Thread。 |
-| GET | `/threads/{thread_id}` | 读取 Thread 原始状态。 |
-| POST | `/invoke` | 创建新的后台转换 Run。 |
-| GET | `/threads/{thread_id}/snapshot` | 获取适合 UI 的运行快照。 |
-| GET | `/threads/{thread_id}/artifacts` | 获取 Artifact 视图。 |
-| GET | `/threads/{thread_id}/artifacts/file` | 预览或下载 Artifact 文件。 |
+| POST | `/uploads` | Save an input image. |
+| POST | `/threads` | Create a Thread. |
+| GET | `/runs` | Page global History projects with status filters, search, and sorting. |
+| POST | `/runs/{run_id}/open` | Attach a persisted historical Run back to its owning Thread. |
+| GET | `/runs/{run_id}/history-preview` | Return read-only input/output preview URLs for History cards. |
+| GET | `/runs/{run_id}/preview/{kind}` | Read a historical Run's input or output preview file. |
+| GET | `/threads/{thread_id}` | Read raw Thread state. |
+| POST | `/invoke` | Create a new background conversion Run. |
+| GET | `/threads/{thread_id}/snapshot` | Return a UI-friendly runtime snapshot. |
+| GET | `/threads/{thread_id}/artifacts` | Return the Artifact view. |
+| GET | `/threads/{thread_id}/artifacts/file` | Preview or download an Artifact file. |
+| POST | `/threads/{thread_id}/runs/{run_id}/cancel` | Request cancellation for a queued/running Run. |
 
-### 5.3 恢复与后处理
+### 5.3 Resume and Post-Processing
 
-| Method | Path | 作用 |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/runs/resume-plan` | 根据当前 Thread 拥有的 Run ID 计算可恢复阶段。 |
-| POST | `/runs/resume` | 校验 Run 所有权后在原 Thread 中继续转换。 |
-| POST | `/threads/{thread_id}/manual-adjust` | 创建人工调整版本。 |
-| POST | `/threads/{thread_id}/debug-review` | 独立执行审查工具。 |
-| PATCH | `/threads/{thread_id}/runs/{run_id}` | 重命名项目。 |
-| DELETE | `/threads/{thread_id}/runs/{run_id}` | 删除非活动 Run。 |
+| GET | `/runs/resume-plan` | Compute resumable stages for a Run owned by the current Thread. |
+| POST | `/runs/resume` | Continue conversion in the original Thread after ownership validation. |
+| POST | `/resume` | Legacy approval resume; currently returns 410 and points users to `/runs/resume`. |
+| POST | `/threads/{thread_id}/manual-adjust` | Create a manual-adjustment version. |
+| PATCH | `/threads/{thread_id}/runs/{run_id}` | Rename a project. |
+| DELETE | `/threads/{thread_id}/runs/{run_id}` | Delete a non-active Run. |
 
-## 6. 前端维护边界
+## 6. Frontend Maintenance Boundary
 
-### 现行维护对象
+### Current Maintenance Targets
 
-- `desktop.html`；
-- `desktop-app.js`；
-- `static/js/api-client.js`；
-- `static/js/state.js`；
-- `static/js/renderers/*`；
-- `static/js/components/*`。
+- `desktop.html`;
+- `desktop-app.js`;
+- `static/js/api-client.js`;
+- `static/js/state.js`;
+- `static/js/renderers/*`;
+- `static/js/components/*`.
 
-### 遗留对象
+### Legacy Targets
 
-- 根路径 `/` 返回的 `index.html`；
-- 与旧 Web 页面强绑定的 `app.js` 和样式。
+- `index.html` returned by the root path `/`;
+- `app.js` and styles tightly coupled to the old Web page.
 
-浏览器 Web 页面缺乏持续维护，可能在配置字段、人工调整、历史项目或 Workflow Trace 等功能上落后。修复桌面功能时，不应默认要求旧 Web 页面同步具备完全一致能力，除非项目重新决定恢复该入口。
+The browser Web page is under-maintained and may lag behind configuration fields, manual adjustment, History, or Workflow Trace behavior. Fixing desktop functionality should not imply that the old Web page must gain the same capability unless the project explicitly decides to revive that entry.

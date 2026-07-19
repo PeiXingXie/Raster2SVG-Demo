@@ -27,8 +27,8 @@ copy_path() {
 }
 
 copy_desktop_source() {
-  copy_path "${PROJECT_ROOT}/desktop/assets" "${STAGE_DIR}/desktop/assets"
-  copy_path "${PROJECT_ROOT}/desktop/build" "${STAGE_DIR}/desktop/build"
+  copy_path "${PROJECT_ROOT}/desktop/assets/icon.png" "${STAGE_DIR}/desktop/assets/icon.png"
+  copy_path "${PROJECT_ROOT}/desktop/assets/icon.ico" "${STAGE_DIR}/desktop/assets/icon.ico"
   copy_path "${PROJECT_ROOT}/desktop/bootstrap.bat" "${STAGE_DIR}/desktop/bootstrap.bat"
   copy_path "${PROJECT_ROOT}/desktop/bootstrap.ps1" "${STAGE_DIR}/desktop/bootstrap.ps1"
   copy_path "${PROJECT_ROOT}/desktop/bootstrap.sh" "${STAGE_DIR}/desktop/bootstrap.sh"
@@ -40,6 +40,15 @@ copy_desktop_source() {
   copy_path "${PROJECT_ROOT}/desktop/start-desktop.bat" "${STAGE_DIR}/desktop/start-desktop.bat"
   copy_path "${PROJECT_ROOT}/desktop/start-desktop.ps1" "${STAGE_DIR}/desktop/start-desktop.ps1"
   copy_path "${PROJECT_ROOT}/desktop/start-desktop.sh" "${STAGE_DIR}/desktop/start-desktop.sh"
+}
+
+remove_packaging_caches() {
+  find "${STAGE_DIR}" -type d \
+    \( -name '__pycache__' -o -name '.pytest_cache' -o -name '.ruff_cache' -o -name '.mypy_cache' \) \
+    -prune -exec rm -rf {} +
+  find "${STAGE_DIR}" -type f \
+    \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' -o -name '*.log' \) \
+    -delete
 }
 
 if [[ -e "${STAGE_DIR}" || -e "${ARCHIVE_PATH}" ]]; then
@@ -60,11 +69,15 @@ echo "Package name: ${PACKAGE_NAME}"
 copy_path "${PROJECT_ROOT}/src" "${STAGE_DIR}/src"
 copy_desktop_source
 copy_path "${PROJECT_ROOT}/quick-start" "${STAGE_DIR}/quick-start"
+copy_path "${PROJECT_ROOT}/architecture-summary" "${STAGE_DIR}/architecture-summary"
+copy_path "${PROJECT_ROOT}/packaging/README.packaging.md" "${STAGE_DIR}/packaging/README.packaging.md"
 copy_path "${PROJECT_ROOT}/pyproject.toml" "${STAGE_DIR}/pyproject.toml"
 copy_path "${PROJECT_ROOT}/README.md" "${STAGE_DIR}/README.md"
 copy_path "${PROJECT_ROOT}/README.developer.md" "${STAGE_DIR}/README.developer.md"
+copy_path "${PROJECT_ROOT}/RELEASE_NOTES.md" "${STAGE_DIR}/RELEASE_NOTES.md"
 copy_path "${PROJECT_ROOT}/docs.development.md" "${STAGE_DIR}/docs.development.md"
 copy_path "${PROJECT_ROOT}/docs.installer.md" "${STAGE_DIR}/docs.installer.md"
+copy_path "${PROJECT_ROOT}/docs.settings-mapping.md" "${STAGE_DIR}/docs.settings-mapping.md"
 copy_path "${PROJECT_ROOT}/.env.example" "${STAGE_DIR}/.env.example"
 copy_path "${PROJECT_ROOT}/environment.yml" "${STAGE_DIR}/environment.yml"
 copy_path "${PROJECT_ROOT}/start-dev.ps1" "${STAGE_DIR}/start-dev.ps1"
@@ -72,6 +85,7 @@ copy_path "${PROJECT_ROOT}/start-dev.bat" "${STAGE_DIR}/start-dev.bat"
 copy_path "${PROJECT_ROOT}/start-dev.sh" "${STAGE_DIR}/start-dev.sh"
 copy_path "${PROJECT_ROOT}/start-service.ps1" "${STAGE_DIR}/start-service.ps1"
 copy_path "${PROJECT_ROOT}/start-service.bat" "${STAGE_DIR}/start-service.bat"
+copy_path "${PROJECT_ROOT}/stop-dev.ps1" "${STAGE_DIR}/stop-dev.ps1"
 
 if [[ "${INCLUDE_ENV}" == "true" && -f "${PROJECT_ROOT}/.env" ]]; then
   copy_path "${PROJECT_ROOT}/.env" "${STAGE_DIR}/.env"
@@ -117,6 +131,8 @@ Quick start:
     ./start-api.sh
     ../desktop/start-desktop.sh
 EOF
+
+remove_packaging_caches
 
 tar -czf "${ARCHIVE_PATH}" -C "${OUTPUT_ROOT}" "${PACKAGE_NAME}"
 

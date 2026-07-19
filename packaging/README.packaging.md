@@ -164,7 +164,7 @@ Current verified Windows installer size is about 156 MB.
 
 macOS packages must be built on a Mac. Do not build the macOS package directly on Windows.
 
-Important current status: macOS/Linux do not yet have supported product-user installers in this project. The notes below are for developer-side packaging experiments and future release work. Actual macOS/Linux users should start the backend service and use the browser UI.
+Important current status: macOS/Linux do not yet have supported product-user installers in this project. The notes below are for developer-side packaging experiments and future release work. macOS/Linux source users should start the backend and launch the Electron desktop shell using the root `start-dev` entrypoint. The browser UI is an early development/diagnostic surface and is not the preferred user experience.
 
 `desktop/package.json` already contains the macOS DMG target:
 
@@ -335,7 +335,7 @@ dist/installers/mac/
 
 ### 4. Current macOS User Path
 
-Do not treat the experimental `.dmg` as the current supported user path. For now, macOS users should start the backend service with the deployment/startup scripts and open the browser UI:
+Do not treat the experimental `.dmg` as the current supported user path. For now, macOS users should start the backend and launch the Electron desktop shell through the root development entrypoint. Use the browser UI only for development diagnostics or when Electron cannot be started:
 
 ```text
 http://127.0.0.1:8120/

@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     )
     base_url: str | None = Field(default=None, validation_alias=AliasChoices("BASE_URL", "OPENAI_BASE_URL"))
     api_provider: str = Field(default="openai_compatible", alias="API_PROVIDER")
-    api_format: str = Field(default="openai_responses", alias="API_FORMAT")
+    api_format: str = Field(default="openai_chat_completions", alias="API_FORMAT")
     langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     langsmith_project: str = Field(default="shape-studio", alias="LANGSMITH_PROJECT")

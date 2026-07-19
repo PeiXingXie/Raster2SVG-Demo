@@ -31,11 +31,13 @@ This document focuses on:
 
 ## Role of the Desktop Client
 
-The project keeps the FastAPI-hosted web frontend for:
+The project keeps the FastAPI-hosted browser frontend for:
 
-- development
-- debugging
-- monitoring
+- early development
+- debugging and monitoring
+- fallback use when the Electron shell cannot be started
+
+The Electron desktop frontend is the preferred user-facing experience. The browser frontend is an older development surface and may not be fully compatible with the desktop shell.
 
 The desktop client uses a desktop-specific shell page while sharing the same backend and frontend modules as the web UI:
 

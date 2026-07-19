@@ -1,36 +1,37 @@
-# 系统分层架构
+# Layered System Architecture
 
-## 1. 分层总图
+## 1. Layer Diagram
 
 ```mermaid
 flowchart TB
-    subgraph Entry["入口与宿主层"]
-        Desktop["Electron Desktop<br/>主产品入口"]
-        DevCLI["CLI / 开发启动脚本"]
-        Browser["Browser Web<br/>遗留、缺乏维护"]
+    subgraph Entry["Entry and host layer"]
+        Desktop["Electron Desktop<br/>primary product entry"]
+        DevCLI["CLI / development startup scripts"]
+        Browser["Browser Web<br/>legacy, under-maintained"]
     end
 
-    subgraph Presentation["表现层"]
+    subgraph Presentation["Presentation layer"]
         DesktopPage["desktop.html + desktop-app.js"]
-        SharedJS["模块化 JS<br/>state / api-client / renderers / components"]
-        LegacyPage["index.html + app.js<br/>遗留页面"]
+        SharedJS["Modular JS<br/>state / api-client / renderers / components"]
+        LegacyPage["index.html + app.js<br/>legacy page"]
     end
 
-    subgraph Interface["服务接口层"]
+    subgraph Interface["Service interface layer"]
         FastAPI["FastAPI app"]
-        ConfigAPI["配置与 Host 信息"]
-        RunAPI["上传 / Thread / Invoke / Resume"]
-        ArtifactAPI["Artifact / 文件 / 调整 / Debug Review"]
+        ConfigAPI["Configuration and host information"]
+        RunAPI["Upload / Thread / Invoke / Cancel / Resume / History"]
+        ArtifactAPI["Artifact / file / adjustment"]
     end
 
-    subgraph Runtime["运行时与任务层"]
+    subgraph Runtime["Runtime and task layer"]
         ThreadStore["ThreadStore"]
-        Executor["ThreadPoolExecutor"]
+        Executor["BoundedExecutor<br/>conversion queue"]
+        ManualExecutor["BoundedExecutor<br/>manual adjustment queue"]
         Pipeline["RasterToSvgPipeline"]
         Trace["Event / Workflow Trace"]
     end
 
-    subgraph Orchestration["工作流编排层"]
+    subgraph Orchestration["Workflow orchestration layer"]
         Layout["Layout Planning"]
         BBox["BBox Review/Adjustment"]
         Region["Region Processing"]
@@ -39,30 +40,31 @@ flowchart TB
         Manual["Manual Adjustment"]
     end
 
-    subgraph Domain["领域规则与基础能力层"]
+    subgraph Domain["Domain rules and foundation layer"]
         Policy["policy/*"]
         Geometry["geometry / bbox validation / sanitization"]
         SVG["SVG templates / rendering / validation"]
         Failure["failure diagnostics / error reporting"]
     end
 
-    subgraph Model["模型访问层"]
+    subgraph Model["Model access layer"]
         Factory["modeling.factory"]
         Adapter["modeling.adapters"]
         Prompt["prompt/*"]
         Provider["OpenAI-compatible API"]
     end
 
-    subgraph Persistence["状态与产物层"]
+    subgraph Persistence["State and artifact layer"]
         RunState["run_state.json / checkpoints"]
         Artifacts["input / intermediate / output"]
         Metadata["thread/run metadata"]
+        Leases["artifact leases / lock files"]
         Logs["events / model calls / logs"]
     end
 
     Desktop --> DesktopPage
     DevCLI --> FastAPI
-    Browser -. "遗留" .-> LegacyPage
+    Browser -. "legacy" .-> LegacyPage
     DesktopPage --> SharedJS
     LegacyPage -.-> SharedJS
     SharedJS --> FastAPI
@@ -73,6 +75,8 @@ flowchart TB
     RunAPI --> ThreadStore
     RunAPI --> Executor
     Executor --> Pipeline
+    ArtifactAPI --> ManualExecutor
+    ManualExecutor --> Manual
     Pipeline --> Trace
 
     Pipeline --> Layout
@@ -80,7 +84,6 @@ flowchart TB
     Pipeline --> Region
     Region --> Object
     Pipeline --> Fusion
-    ArtifactAPI --> Manual
 
     Layout --> Policy
     BBox --> Geometry
@@ -104,120 +107,128 @@ flowchart TB
     Pipeline --> Artifacts
     Pipeline --> Logs
     ArtifactAPI --> Artifacts
+    ArtifactAPI --> Leases
+    RunAPI --> Leases
 ```
 
-## 2. 各层职责与边界
+## 2. Layer Responsibilities and Boundaries
 
-### 2.1 入口与宿主层
+### 2.1 Entry and Host Layer
 
-- Electron 是当前需要重点维护的产品入口。
-- Electron 负责选择空闲端口、启动打包后端、等待 `/health`、创建窗口和关闭后端。
-- CLI 和启动脚本用于开发、诊断及源代码部署。
-- 浏览器 Web 入口虽然仍可由 FastAPI 根路径提供，但已缺乏维护和更新，可能出现错误；它只应作为遗留/诊断入口记录。
+- Electron is the product entry point that should receive primary maintenance.
+- Electron selects a free local port, starts the packaged backend, waits for `/health`, creates the application window, and shuts down the backend.
+- CLI and startup scripts are for development, diagnostics, and source deployment.
+- The browser Web entry can still be served by the FastAPI root route, but it is under-maintained and may be broken. Treat it as a legacy/diagnostic entry only.
 
-### 2.2 表现层
+### 2.2 Presentation Layer
 
-桌面页面通过 JavaScript 模块完成：
+The desktop page uses JavaScript modules to:
 
-- 创建 Thread；
-- 获取默认配置和 Runtime Overrides；
-- 上传图片并启动 Run；
-- 轮询 Snapshot 和 Artifact；
-- 展示执行 Trace、区域/对象 bbox、SVG/PNG 预览；
-- 发起恢复、人工调整和 Debug Review；
-- 下载、重命名或删除历史 Run。
+- create a Thread;
+- read default configuration and Runtime Overrides;
+- upload an image and start a Run;
+- poll Snapshot and Artifact state;
+- display Workflow Trace, region/object bbox overlays, SVG/PNG previews;
+- start resume and manual adjustment flows;
+- download, rename, or delete historical Runs.
 
-表现层不直接执行图像转换，也不直接访问模型服务。
+The presentation layer does not perform image conversion and does not call model services directly.
 
-### 2.3 服务接口层
+### 2.3 Service Interface Layer
 
-FastAPI 是所有交互入口的统一边界，主要接口组包括：
+FastAPI is the unified boundary for all interactive entry points. Major API groups are:
 
-| 接口组 | 作用 |
+| API group | Purpose |
 | --- | --- |
-| `/health` | 后端存活检查，Electron 启动时使用。 |
-| `/config/*` | 默认值、Runtime Overrides 的读取、写入和重置。 |
-| `/frontend/host-info` | 告知前端当前宿主模式和服务地址。 |
-| `/uploads` | 将 base64 图片写入 Artifact 上传目录。 |
-| `/threads` | 创建和读取会话。 |
-| `/invoke` | 创建后台转换 Run。 |
-| `/resume` | Legacy Agent 审批恢复接口。 |
-| `/runs/resume` | 根据持久化 Run State 恢复转换管线。 |
-| `/threads/{id}/snapshot` | 获取运行状态、消息和事件。 |
-| `/threads/{id}/artifacts` | 获取预览、文件、Trace 和恢复信息。 |
-| `/threads/{id}/manual-adjust` | 对完成后的 SVG 进行人工目标驱动调整。 |
-| `/threads/{id}/debug-review` | 显式运行区域、对象或融合审查。 |
+| `/health` | Backend liveness check used during Electron startup. |
+| `/config/*` | Read, write, and reset defaults and Runtime Overrides. |
+| `/frontend/host-info` | Tell the frontend the current host mode and service URL. |
+| `/uploads` | Persist base64 image uploads into the artifact upload area. |
+| `/threads` | Create and read session containers. |
+| `/invoke` | Create a background conversion Run. |
+| `/runs` | Page, search, open, and preview historical projects. |
+| `/threads/{id}/runs/{run_id}/cancel` | Request cancellation for a queued or running Run. |
+| `/resume` | Legacy approval-resume endpoint; currently returns 410. |
+| `/runs/resume` | Resume the conversion pipeline from persisted Run State. |
+| `/threads/{id}/snapshot` | Read runtime status, messages, and events. |
+| `/threads/{id}/artifacts` | Read previews, files, Workflow Trace, and resume information. |
+| `/threads/{id}/manual-adjust` | Apply user-targeted post-processing to a completed SVG. |
 
-### 2.4 运行时与任务层
+FastAPI currently rejects non-loopback clients through a local-only middleware. Installed builds and development scripts should be understood as "local UI calling local backend", not as a LAN service.
 
-- `ThreadStore` 保存当前进程内的 Thread、Run、消息、事件和审批状态。
-- FastAPI 的线程池将耗时转换从 HTTP 请求线程中移出。
-- `RasterToSvgPipeline` 是直接多模态转换主路径。
-- Pipeline 在运行时同步更新 Thread 事件，并将关键状态写入 Artifact 目录。
-- API 侧维护 Active Run 集合，防止运行中的产物被删除。
+### 2.4 Runtime and Task Layer
 
-### 2.5 工作流编排层
+- `ThreadStore` keeps the process-local view of Threads, Runs, messages, events, and approval state.
+- FastAPI uses `BoundedExecutor` to move long conversions out of the HTTP request thread and cap the top-level conversion queue.
+- Manual adjustment uses a separate `BoundedExecutor` so post-processing does not share the conversion queue.
+- Effective runtime settings are frozen when a Run is accepted, so later Runtime Override changes do not affect queued Runs.
+- The API registers a cancellation event for queued/running Runs. A queued task may be cancelled before execution; a running Pipeline stops cooperatively when it checks the event.
+- `RasterToSvgPipeline` is the direct multimodal conversion main path.
+- The Pipeline updates Thread events during execution and writes key state into the Artifact directory.
+- The API keeps an Active Run set and Artifact leases to prevent conversion, resume, rename, delete, or manual adjustment from mutating the same artifact directory concurrently.
 
-`WorkflowAgentSuite` 组合以下主管能力：
+### 2.5 Workflow Orchestration Layer
 
-- Layout Planning Supervisor；
-- BBox Adjustment Supervisor；
-- Region Supervisor；
-- Object Repair Supervisor；
-- Fusion Supervisor。
+`WorkflowAgentSuite` combines these supervisor capabilities:
 
-这里的“Agent”主要表示带明确输入输出合同的模型工作单元，而不是让模型自由决定整个程序控制流。程序仍掌握循环、预算、并发和停止条件。
+- Layout Planning Supervisor;
+- BBox Adjustment Supervisor;
+- Region Supervisor;
+- Object Repair Supervisor;
+- Fusion Supervisor.
 
-### 2.6 领域与策略层
+Here "Agent" means a model work unit with explicit input/output contracts. It does not mean the model freely controls the whole program flow. Code still owns loops, budgets, concurrency, and stop conditions.
 
-领域层将模型输出约束为可执行决策，包括：
+### 2.6 Domain and Policy Layer
 
-- bbox 合法性、越界、坐标空间和清洗；
-- Region/Object/Fusion review 的接受、修复或失败规则；
-- SVG 模板、fragment 合并、渲染和合法性检查；
-- 停滞检测、重试耗尽和失败分类；
-- 人工选择区域/对象后的编辑范围计算。
+The domain layer constrains model output into executable decisions:
 
-### 2.7 模型访问层
+- bbox validity, overflow handling, coordinate spaces, and sanitization;
+- accept, repair, and failure rules for Region/Object/Fusion review;
+- SVG templates, fragment merging, rendering, and validity checks;
+- stagnation detection, retry exhaustion, and failure classification;
+- edit-scope calculation after manual region/object selection.
 
-模型访问层负责：
+### 2.7 Model Access Layer
 
-- 解析 provider、base URL、API format 和模型名称；
-- 将图片、SVG 文件和结构化上下文装配为模型请求；
-- 要求模型返回 Pydantic 对应的结构化结果；
-- 记录模型请求、响应、原始文本和 warning；
-- 实施模型调用预算。
+The model access layer:
 
-### 2.8 状态与产物层
+- resolves provider, base URL, API format, and model names;
+- packages images, SVG files, and structured context into model requests;
+- asks models to return Pydantic-compatible structured results;
+- records model requests, responses, raw text, and warnings;
+- enforces model-call budgets.
 
-文件系统既是用户结果存储，也是调试和恢复基础。完成阶段的中间文件可在恢复时直接读取，避免重复模型调用。
+### 2.8 State and Artifact Layer
 
-## 3. 确定性程序与模型的责任边界
+The filesystem is both user-result storage and the foundation for debugging, History, and resume. Completed intermediates can be read directly during resume to avoid repeated model calls. History lists and previews are derived from persisted Artifact metadata and existing input/output files.
+
+## 3. Deterministic Code vs. Model Responsibility
 
 ```mermaid
 flowchart LR
-    subgraph Deterministic["确定性程序负责"]
-        D1["输入检查与文件复制"]
-        D2["坐标归一化与 bbox 校验"]
-        D3["阶段编排与并发调度"]
-        D4["预算、重试、停滞和停止条件"]
-        D5["SVG 合并、渲染与合法性检查"]
-        D6["状态、Artifact、日志与恢复"]
+    subgraph Deterministic["Deterministic code owns"]
+        D1["Input validation and file copy"]
+        D2["Coordinate normalization and bbox validation"]
+        D3["Stage orchestration and concurrency scheduling"]
+        D4["Budget, retry, stagnation, and stop conditions"]
+        D5["SVG merge, rendering, and validity checks"]
+        D6["State, Artifact, logs, and resume"]
     end
 
-    subgraph ModelWork["多模态模型负责"]
-        M1["理解整体布局"]
-        M2["识别区域内对象"]
-        M3["生成 SVG fragment"]
-        M4["根据视觉差异审查"]
-        M5["修复对象、区域或融合结果"]
+    subgraph ModelWork["Multimodal models own"]
+        M1["Overall layout understanding"]
+        M2["Object recognition inside regions"]
+        M3["SVG fragment generation"]
+        M4["Visual-difference review"]
+        M5["Object, region, or fusion repair"]
     end
 
-    D3 -->|"构造受约束任务"| M1
+    D3 -->|"build constrained tasks"| M1
     D3 --> M2
     D3 --> M3
-    M4 -->|"结构化结果"| D4
+    M4 -->|"structured result"| D4
     M5 --> D5
 ```
 
-边界重点：模型给出候选结果与审查意见，是否继续循环、是否耗尽预算、文件写到哪里以及怎样恢复，由程序决定。
+The important boundary is that models propose candidate outputs and review judgments. Code decides whether to continue a loop, whether retry capacity remains, where files are written, and how resume proceeds.
