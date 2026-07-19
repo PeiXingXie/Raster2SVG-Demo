@@ -94,7 +94,7 @@ export const RUNTIME_FIELD_SPECS = [
   { id: "region-repair-max-attempts", key: "region_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
   { id: "object-repair-max-attempts", key: "object_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
   { id: "fusion-repair-max-attempts", key: "fusion_repair_max_attempts", type: "integer", min: 0, preserveBlankWithoutOverride: true },
-  { id: "manual-refine-worker-budget", key: "manual_refine_worker_budget", type: "integer", min: 1, preserveBlankWithoutOverride: true, summaryLabel: "manual refine depth", summary: true, summaryOrder: 7, summarySuffix: "calls" },
+  { id: "manual-refine-worker-budget", key: "manual_refine_worker_budget", type: "integer", min: 1, preserveBlankWithoutOverride: true },
   { id: "agent-model", key: "agent_model", summaryLabel: "Coordinator Model", summary: true, summaryOrder: 8, summarySpan: 2 },
   { id: "subagent-model", key: "subagent_model", summaryLabel: "Worker Model", summary: true, summaryOrder: 9, summarySpan: 2 },
   { id: "agent-name", key: "agent_name" },

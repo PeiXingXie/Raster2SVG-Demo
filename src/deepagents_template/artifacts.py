@@ -804,7 +804,11 @@ class ArtifactStore:
                 continue
             request_payload = self._load_json_file(adjustment_dir / "request.json")
             base_frame_id = request_payload.get("base_frame_id") if isinstance(request_payload, dict) else None
+            base_adjustment_id = request_payload.get("base_adjustment_id") if isinstance(request_payload, dict) else None
             base_frame = frames_by_id.get(str(base_frame_id)) if base_frame_id else None
+            base_adjustment_title = (
+                f"Adjustment {str(base_adjustment_id).removeprefix('adjustment-')}" if base_adjustment_id else None
+            )
             base_snapshot_path = adjustment_dir / "base_before_adjustment.svg"
             stat = manual_svg_path.stat()
             workflow_trace, adjustment_error = self.build_manual_workflow_trace(
@@ -818,7 +822,8 @@ class ArtifactStore:
                     "relative_path": str(manual_svg_path.relative_to(run_dir)),
                     "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC),
                     "base_frame_id": base_frame_id,
-                    "base_title": base_frame.get("title") if base_frame else None,
+                    "base_adjustment_id": base_adjustment_id,
+                    "base_title": base_adjustment_title or (base_frame.get("title") if base_frame else None),
                     "base_relative_path": (
                         str(base_snapshot_path.relative_to(run_dir))
                         if base_snapshot_path.is_file()
@@ -857,9 +862,19 @@ class ArtifactStore:
         if not manual_root.is_dir():
             return empty_trace, None
 
+        def adjustment_activity_mtime(path: Path) -> float:
+            candidates = [
+                path / "session_state.json",
+                path / "error.json",
+                path / "final_after_adjustment.svg",
+                path / "request.json",
+            ]
+            mtimes = [item.stat().st_mtime for item in candidates if item.is_file()]
+            return max(mtimes) if mtimes else path.stat().st_mtime
+
         adjustment_dirs = sorted(
             (path for path in manual_root.iterdir() if path.is_dir()),
-            key=lambda item: (item.stat().st_mtime, item.name),
+            key=lambda item: (adjustment_activity_mtime(item), item.name),
         )
         if not adjustment_dirs:
             return empty_trace, None

@@ -118,9 +118,11 @@ The instruction and reference image guide the refinement; they are not a strict 
 ### Install
 
 1. Open the repository's Releases page.
-2. Download `Shape Studio Setup <version>.exe`.
+2. Download the latest `Shape Studio Setup <version>.exe`.
 3. Run the installer.
 4. Open `Shape Studio` from the Start Menu or desktop shortcut.
+
+Older installer builds may contain fixed bugs, so always use the newest release when you install from a package.
 
 ### Configure And Run
 

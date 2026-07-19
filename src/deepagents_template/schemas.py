@@ -2455,6 +2455,7 @@ class ArtifactManualAdjustmentVersion(BaseModel):
     download_url: str
     modified_at: datetime
     base_frame_id: str | None = Field(default=None)
+    base_adjustment_id: str | None = Field(default=None)
     base_title: str | None = Field(default=None)
     base_preview_url: str | None = Field(default=None)
     base_download_url: str | None = Field(default=None)
@@ -2643,6 +2644,7 @@ class ManualAdjustmentRequest(BaseModel):
     thread_id: str
     run_id: str | None = Field(default=None)
     base_frame_id: str | None = Field(default=None)
+    base_adjustment_id: str | None = Field(default=None)
     mode: Literal["worker", "agent"] = Field(default="worker")
     agent_budget: int | None = Field(default=None, ge=1, le=12)
     target_region_id: str | None = Field(default=None)

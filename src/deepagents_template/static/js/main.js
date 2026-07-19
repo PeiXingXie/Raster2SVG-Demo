@@ -3202,6 +3202,36 @@ function resolveSelectionFromCurrentState(snapshot) {
   };
 }
 
+function getManualAdjustmentBaseNode(
+  snapshot,
+  selectedOutputFrameIndex = appState.selectedOutputFrameIndex,
+  selectedManualAdjustmentId = appState.selectedManualAdjustmentId
+) {
+  const selectedAdjustment = selectedManualAdjustmentId
+    ? (snapshot?.manual_adjustments || []).find((item) => item.adjustment_id === selectedManualAdjustmentId) || null
+    : null;
+  if (selectedAdjustment) {
+    return {
+      kind: "adjustment",
+      frameId: null,
+      adjustmentId: selectedAdjustment.adjustment_id || null,
+      title: selectedAdjustment.title || selectedAdjustment.adjustment_id || "Adjustment",
+      previewUrl: selectedAdjustment.preview_url || null,
+      downloadUrl: selectedAdjustment.download_url || null,
+    };
+  }
+  const frames = Array.isArray(snapshot?.output_frames) ? snapshot.output_frames : [];
+  const selectedFrame = frames[selectedOutputFrameIndex] || null;
+  return {
+    kind: "frame",
+    frameId: selectedFrame?.frame_id || null,
+    adjustmentId: null,
+    title: selectedFrame?.title || null,
+    previewUrl: selectedFrame?.preview_url || null,
+    downloadUrl: selectedFrame?.download_url || null,
+  };
+}
+
 function confirmManualSelection(snapshot) {
   if (!getRefineReadinessState(snapshot).canSelectTarget) {
     return;
@@ -3217,10 +3247,13 @@ function confirmManualSelection(snapshot) {
   }
   elements.manualObjectIds.value = resolved.objectIds.join(", ");
   elements.manualRegionId.value = resolved.regionId || "";
-  const activeFrame = snapshot?.output_frames?.[appState.selectedOutputFrameIndex] || null;
+  const baseNode = getManualAdjustmentBaseNode(snapshot);
   appState.manualConfirmedTarget = {
-    baseFrameId: activeFrame?.frame_id || null,
-    baseFrameTitle: activeFrame?.title || null,
+    baseKind: baseNode.kind,
+    baseFrameId: baseNode.frameId,
+    baseAdjustmentId: baseNode.adjustmentId,
+    baseTitle: baseNode.title,
+    baseFrameTitle: baseNode.title,
     selectionBox: resolved.selectionBox,
     regionId: resolved.regionId,
     regionIds: resolved.regionIds,
@@ -3244,10 +3277,13 @@ function confirmManualReferenceSelection(snapshot) {
     return;
   }
   if (hasDrawnSelection) {
-    const activeFrame = snapshot?.output_frames?.[appState.selectedOutputFrameIndex] || null;
+    const baseNode = getManualAdjustmentBaseNode(snapshot);
     appState.manualConfirmedReferenceSelection = {
-      baseFrameId: activeFrame?.frame_id || null,
-      baseFrameTitle: activeFrame?.title || null,
+      baseKind: baseNode.kind,
+      baseFrameId: baseNode.frameId,
+      baseAdjustmentId: baseNode.adjustmentId,
+      baseTitle: baseNode.title,
+      baseFrameTitle: baseNode.title,
       selectionBox: appState.manualReferenceSelectionShape.bbox,
       selectionKind: appState.manualReferenceSelectionShape.kind || getNormalizedReferenceSelectionKind(),
     };
@@ -3502,7 +3538,7 @@ function renderConfirmedTargetCard(activeFrame) {
   } else if (isSimpleMode) {
     elements.manualConfirmedTarget.innerHTML = `
       <div class="manual-confirmed-pill-row">
-        <span class="workflow-trace-chip">${target.baseFrameTitle || activeFrame?.title || "base frame pending"}</span>
+        <span class="workflow-trace-chip">${target.baseTitle || target.baseFrameTitle || activeFrame?.title || "base node pending"}</span>
         <span class="workflow-trace-chip">${target.selectionScope || "local target"}</span>
         <span class="workflow-trace-chip">${target.regionId || (target.regionIds?.length ? target.regionIds.join(", ") : "region pending")}</span>
         <span class="workflow-trace-chip">${referenceSourceLabel}</span>
@@ -3510,7 +3546,7 @@ function renderConfirmedTargetCard(activeFrame) {
     `;
   } else {
     elements.manualConfirmedTarget.innerHTML = `
-      <div class="manual-confirmed-row"><span class="summary-label">Base frame</span><span class="summary-value">${target.baseFrameTitle || activeFrame?.title || "-"}</span></div>
+      <div class="manual-confirmed-row"><span class="summary-label">Base node</span><span class="summary-value">${target.baseTitle || target.baseFrameTitle || activeFrame?.title || "-"}</span></div>
       <div class="manual-confirmed-row"><span class="summary-label">Scope</span><span class="summary-value">${target.selectionScope || "-"}</span></div>
       <div class="manual-confirmed-row"><span class="summary-label">Region</span><span class="summary-value">${target.regionId || (target.regionIds?.length ? target.regionIds.join(", ") : "-")}</span></div>
       <div class="manual-confirmed-row"><span class="summary-label">Objects</span><span class="summary-value">${target.objectIds?.length ? target.objectIds.join(", ") : "-"}</span></div>
@@ -3730,7 +3766,9 @@ function renderManualRecentActivityPanel(snapshot) {
     return;
   }
   const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
-  const trace = selectedManualAdjustment?.workflow_trace || snapshot?.manual_workflow_trace || null;
+  const trace = appState.manualAdjustmentRequestInFlight
+    ? snapshot?.manual_workflow_trace || selectedManualAdjustment?.workflow_trace || null
+    : selectedManualAdjustment?.workflow_trace || snapshot?.manual_workflow_trace || null;
   const hasTraceNodes = Array.isArray(trace?.nodes) && trace.nodes.length > 0;
   const shouldShow = Boolean(appState.manualAdjustmentRequestInFlight || selectedManualAdjustment || hasTraceNodes);
   if (!shouldShow) {
@@ -3771,9 +3809,19 @@ function renderManualAdjustmentPanel(snapshot) {
     summary += ` Confirmed scope=${appState.manualConfirmedTarget.selectionScope}.`;
   }
   elements.manualTargetSummary.textContent = summary;
-  const activeFrame = snapshot?.output_frames?.[appState.selectedOutputFrameIndex] || null;
+  const activeBaseNode = getManualAdjustmentBaseNode(snapshot);
   const selectedManualAdjustment = getSelectedManualAdjustment(snapshot);
-  elements.manualBaseFrame.value = activeFrame ? `${activeFrame.title} (${activeFrame.frame_id})` : "";
+  elements.manualBaseFrame.value = activeBaseNode?.title
+    ? `${activeBaseNode.title}${activeBaseNode.frameId ? ` (${activeBaseNode.frameId})` : ""}`
+    : "";
+  const activeFrame = activeBaseNode
+    ? {
+        frame_id: activeBaseNode.frameId,
+        title: activeBaseNode.title,
+        preview_url: activeBaseNode.previewUrl,
+        download_url: activeBaseNode.downloadUrl,
+      }
+    : null;
   const readiness = getRefineReadinessState(snapshot);
   const canConfigureReferences = Boolean(readiness.canUseCurrentOutput);
   const referenceImagesEnabled = Boolean(canConfigureReferences && elements.manualUseReferenceImages.checked);
@@ -3807,7 +3855,10 @@ function renderManualAdjustmentPanel(snapshot) {
   renderManualRecentActivityPanel(snapshot);
   renderConfirmedTargetCard(activeFrame);
   renderManualAdjustmentResult(snapshot, activeFrame);
-  renderManualWorkflowTrace(selectedManualAdjustment || snapshot, (node) => {
+  const manualTraceSource = appState.manualAdjustmentRequestInFlight
+    ? snapshot
+    : selectedManualAdjustment || snapshot;
+  renderManualWorkflowTrace(manualTraceSource, (node) => {
     if (node?.event_index == null) {
       return;
     }
@@ -4017,7 +4068,11 @@ function buildManualAdjustmentPayload(snapshot, manualDraft, workspaceState) {
     .map((item) => item.trim())
     .filter(Boolean);
   let targetRegionId = manualDraft.regionId.trim() || null;
-  const activeFrame = snapshot.output_frames?.[workspaceState.selectedOutputFrameIndex] || null;
+  const activeBaseNode = getManualAdjustmentBaseNode(
+    snapshot,
+    workspaceState.selectedOutputFrameIndex,
+    workspaceState.selectedManualAdjustmentId
+  );
   const confirmedTarget = workspaceState.manualConfirmedTarget;
   if (!targetObjectIds.length && !targetRegionId) {
     if (confirmedTarget?.objectIds?.length) {
@@ -4042,7 +4097,8 @@ function buildManualAdjustmentPayload(snapshot, manualDraft, workspaceState) {
   const payload = {
     thread_id: workspaceState.threadId,
     run_id: snapshot.run_id,
-    base_frame_id: confirmedTarget?.baseFrameId || activeFrame?.frame_id || null,
+    base_frame_id: confirmedTarget?.baseFrameId || activeBaseNode?.frameId || null,
+    base_adjustment_id: confirmedTarget?.baseAdjustmentId || activeBaseNode?.adjustmentId || null,
     mode: manualDraft.mode || "worker",
     target_object_ids: targetObjectIds,
     target_region_id: targetRegionId,

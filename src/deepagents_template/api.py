@@ -603,11 +603,7 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
     output_frames_payload = artifact_store.build_output_frames(run.artifact_dir)
     manual_adjustments_payload = artifact_store.build_manual_adjustments(run.artifact_dir, output_frames_payload)
     region_results_payload = artifact_store.load_payload(run.artifact_dir, "intermediate/region_results.json") or []
-    selected_adjustment_id = manual_adjustments_payload[-1]["adjustment_id"] if manual_adjustments_payload else None
-    manual_workflow_trace, manual_adjustment_error = artifact_store.build_manual_workflow_trace(
-        run.artifact_dir,
-        adjustment_id=selected_adjustment_id,
-    )
+    manual_workflow_trace, manual_adjustment_error = artifact_store.build_manual_workflow_trace(run.artifact_dir)
 
     files: list[ArtifactFileEntry] = []
     for item in artifact_store.list_files(run.artifact_dir):
@@ -671,6 +667,7 @@ def build_artifact_response(thread: ThreadState, run_id: str | None = None) -> A
                 ),
                 modified_at=item["modified_at"],
                 base_frame_id=item.get("base_frame_id"),
+                base_adjustment_id=item.get("base_adjustment_id"),
                 base_title=item.get("base_title"),
                 base_preview_url=base_preview_url,
                 base_download_url=f"{base_preview_url}&download=true" if base_preview_url else None,

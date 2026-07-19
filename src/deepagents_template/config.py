@@ -103,8 +103,8 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     langsmith_project: str = Field(default="shape-studio", alias="LANGSMITH_PROJECT")
 
-    agent_model: str = Field(default="gpt-5.4-medium", alias="AGENT_MODEL")
-    subagent_model: str = Field(default="gpt-5.4-medium", alias="SUBAGENT_MODEL")
+    agent_model: str = Field(default="gpt-5.5", alias="AGENT_MODEL")
+    subagent_model: str = Field(default="gpt-5.5", alias="SUBAGENT_MODEL")
     agent_name: str = Field(default="shape-studio-coordinator", alias="AGENT_NAME")
     use_previous_response_id: bool = Field(default=False, alias="USE_PREVIOUS_RESPONSE_ID")
     max_retries: int = Field(default=2, validation_alias=AliasChoices("MAX_RETRIES", "OPENAI_MAX_RETRIES"))

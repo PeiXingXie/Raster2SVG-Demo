@@ -478,6 +478,15 @@ class MultimodalJsonCaller:
                     )
                 return parsed, raw_text
             except Exception as exc:
+                if (
+                    isinstance(exc, TypeError)
+                    and "expected a string, mapping, or sdk response object with choices" in str(exc).lower()
+                ):
+                    exc = InvalidModelResponseError(
+                        "Model response returned no assistant content from the chat completions adapter.",
+                        cause=exc,
+                        failure_kind="provider_empty_payload",
+                    )
                 last_error = exc
                 if attempt < attempts_total and is_retryable_response_error(exc):
                     if self.warning_callback is not None:

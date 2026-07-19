@@ -848,13 +848,28 @@ class ManualAdjustmentService:
             raise ValueError("Worker returned an empty SVG fragment.")
         if target.scope in {"object", "object_collection"}:
             expected = set(target.target_ids)
+            allowed = expected | self._target_ids_in_fragment(target.current_svg_fragment)
             declared = set(result.target_ids or target.target_ids)
-            if not declared.issubset(expected):
+            if not declared.issubset(allowed):
                 raise ValueError("Worker declared target IDs outside the selected object scope.")
             if not result.preserved_ids:
                 result.preserved_ids = target.target_ids[:]
             if not expected.intersection(set(result.preserved_ids)):
                 raise ValueError("Worker failed to preserve any selected target IDs.")
+
+    @staticmethod
+    def _target_ids_in_fragment(fragment: str) -> set[str]:
+        text = (fragment or "").strip()
+        if not text:
+            return set()
+        wrapper = ET.fromstring(f'<fragment xmlns="{SVG_NAMESPACE}">{text}</fragment>')
+        target_ids: set[str] = set()
+        for element in wrapper.iter():
+            for attr in ("data-object-id", MANUAL_OBJECT_ATTR, MANUAL_TARGET_KEY_ATTR):
+                target_id = str(element.attrib.get(attr) or "").strip()
+                if target_id:
+                    target_ids.add(target_id)
+        return target_ids
 
     def _build_merge_notes(self, target: ManualTarget, result: ManualSvgAdjustmentResult) -> list[str]:
         notes = []
@@ -1041,6 +1056,18 @@ class ManualAdjustmentService:
         payload: ManualAdjustmentRequest,
         artifact_snapshot: ArtifactSnapshot,
     ) -> str | None:
+        if payload.base_adjustment_id:
+            adjustment_id = payload.base_adjustment_id.strip()
+            manual_root = self.manual_root.resolve()
+            adjustment_dir = (self.manual_root / adjustment_id).resolve()
+            try:
+                adjustment_dir.relative_to(manual_root)
+            except ValueError:
+                adjustment_dir = None
+            if adjustment_dir is not None:
+                adjustment_path = adjustment_dir / "final_after_adjustment.svg"
+                if adjustment_path.is_file():
+                    return adjustment_path.read_text(encoding="utf-8")
         if not payload.base_frame_id:
             return None
         frame = next((item for item in artifact_snapshot.output_frames if item.frame_id == payload.base_frame_id), None)
