@@ -52,12 +52,29 @@ chmod +x start-dev.sh
 On first run, the script creates or reuses the project Python environment, creates `.env` from `.env.example` when needed, and bootstraps Electron dependencies under `desktop/`. Follow this order:
 
 1. Run the `start-dev` command above and wait for the desktop window to open after the backend health check succeeds.
-2. Enter the model API settings in the desktop Settings panel.
+2. Complete [Configure Before First Conversion](#configure-before-first-conversion) in the desktop Settings panel.
 3. Start a real conversion from the desktop window.
 
 The project-root `.env` is an advanced or fallback configuration path: you can edit it after stopping the app and then restart `start-dev` when you need to configure the backend outside the desktop UI. Use the desktop window for normal work; the printed browser URL is a development and diagnostic fallback, and the early browser frontend may not be fully compatible with the desktop experience.
 
 The root `start-dev.ps1` / `start-dev.sh` scripts are the normal source-running entrypoints. Use the lower-level `bootstrap`, `start-api`, and `desktop/bootstrap` scripts only when following the detailed development instructions, troubleshooting startup, or deploying a source bundle to another machine. See [README.developer.md](./README.developer.md) and [docs.development.md](./docs.development.md) for environment selection and manual controls.
+
+## Configure Before First Conversion
+
+In the desktop Settings panel, check only these items before the first real conversion:
+
+| Field | What to do |
+| --- | --- |
+| API Key | Enter your real API key. |
+| Base URL | Enter your provider endpoint, usually ending in `/v1`. |
+| Coordinator Model | Enter a model supported by your endpoint. |
+| Worker Model | Enter a worker/subtask model supported by your endpoint; it can be the same as Coordinator Model. |
+| Request Format | Keep the default unless your provider requires a different format. |
+| API Protocol | Keep the default `openai_compatible`. |
+
+All advanced workflow, budget, retry, concurrency, SAM, and memory settings can stay unchanged for the first run.
+
+Detailed configuration behavior is documented in [docs.development.md](./docs.development.md). Frontend label/value mappings are documented in [docs.settings-mapping.md](./docs.settings-mapping.md).
 
 ## What The App Does
 
@@ -126,20 +143,7 @@ Older installer builds may contain fixed bugs, so always use the newest release 
 
 ### Configure And Run
 
-In the app settings, check only these items before the first real conversion:
-
-| Field | What to do |
-| --- | --- |
-| API Key | Enter your real API key. |
-| Base URL | Enter your provider endpoint, usually ending in `/v1`. |
-| Coordinator Model | Enter a model supported by your endpoint. |
-| Worker Model | Enter a worker/subtask model supported by your endpoint; it can be the same as Coordinator Model. |
-| Request Format | Keep the default unless your provider requires a different format. |
-| API Protocol | Keep the default `openai_compatible`. |
-
-All advanced workflow, budget, retry, concurrency, SAM, and memory settings can stay unchanged for the first run.
-
-Detailed configuration behavior is documented in [docs.development.md](./docs.development.md). Frontend label/value mappings are documented in [docs.settings-mapping.md](./docs.settings-mapping.md).
+Complete [Configure Before First Conversion](#configure-before-first-conversion) in the desktop Settings panel, then start a real conversion from the desktop window.
 
 ### Update
 
